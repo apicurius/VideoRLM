@@ -8,9 +8,14 @@ class PrimeREPL(IsolatedEnv):
         context_payload: dict | list | str | None = None,
         sandbox_name: str | None = None,
         api_key: str | None = None,
+        persistent: bool = False,
         **kwargs,
     ):
-        pass
+        if persistent:
+            raise NotImplementedError(
+                "Persistent REPLs are currently not supported for environment: PrimeREPL"
+            )
+        super().__init__(persistent=persistent, **kwargs)
 
     def setup(self):
         pass
