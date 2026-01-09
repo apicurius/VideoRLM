@@ -53,9 +53,17 @@ uv init && uv venv --python 3.12  # change version as needed
 uv pip install -e .
 ```
 
-To run a quick test, the following will run an RLM query with the OpenAI client using your environment variable `OPENAI_API_KEY` (feel free to change this). This will generate console output as well as a log which you can use with the visualizer to explore the trajectories. 
+### Makefile Usage
+This project includes a `Makefile` to simplify common tasks.
+
+- `make install`: Install base dependencies.
+- `make install-dev`: Install development dependencies.
+- `make check`: Run linter, formatter, and tests.
+- `make quickstart`: Run the quickstart example.
+
+To run a quick test, the following will run an RLM query with the OpenAI client using your environment variable `OPENAI_API_KEY` (feel free to change this). This will generate console output as well as a log which you can use with the visualizer to explore the trajectories.
 ```bash
-uv run examples/quickstart.py
+make quickstart
 ```
 
 The default RLM client uses a REPL environment that runs on the host process through Python `exec` calls. It uses the same virtual environment as the host process (i.e. it will have access to the same dependencies), but with some limitations in its available global modules. As an example, we can call RLM completions using GPT-5-nano:
