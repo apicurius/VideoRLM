@@ -257,11 +257,21 @@ class DockerREPL(NonIsolatedEnv):
         )
 
     def load_context(self, context_payload: dict | list | str):
+        """Load context by writing to a file in the mounted workspace."""
         if isinstance(context_payload, str):
-            escaped = context_payload.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
-            self.execute_code(f'context = """{escaped}"""')
+            context_path = os.path.join(self.temp_dir, "context.txt")
+            with open(context_path, "w") as f:
+                f.write(context_payload)
+            self.execute_code(
+                "with open('/workspace/context.txt', 'r') as f:\n    context = f.read()"
+            )
         else:
-            self.execute_code(f"import json; context = json.loads('{json.dumps(context_payload)}')")
+            context_path = os.path.join(self.temp_dir, "context.json")
+            with open(context_path, "w") as f:
+                json.dump(context_payload, f)
+            self.execute_code(
+                "import json\nwith open('/workspace/context.json', 'r') as f:\n    context = json.load(f)"
+            )
 
     def execute_code(self, code: str) -> REPLResult:
         start = time.perf_counter()
