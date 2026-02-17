@@ -53,10 +53,14 @@ class TestEncodeFrame:
 
     def test_encode_jpg(self):
         frame = _make_frame()
-        encoded = _encode_frame(frame, format=".jpg")
+        result = _encode_frame(frame, format=".jpg")
+
+        # Should be a tagged image dict
+        assert result["__image__"] is True
+        assert result["mime_type"] == "image/jpeg"
 
         # Should be valid base64
-        decoded = base64.b64decode(encoded)
+        decoded = base64.b64decode(result["data"])
         assert len(decoded) > 0
 
         # Should decode back to an image
@@ -68,9 +72,12 @@ class TestEncodeFrame:
 
     def test_encode_png(self):
         frame = _make_frame()
-        encoded = _encode_frame(frame, format=".png")
+        result = _encode_frame(frame, format=".png")
 
-        decoded = base64.b64decode(encoded)
+        assert result["__image__"] is True
+        assert result["mime_type"] == "image/png"
+
+        decoded = base64.b64decode(result["data"])
         arr = np.frombuffer(decoded, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         assert img is not None
@@ -82,7 +89,7 @@ class TestEncodeFrame:
         encoded_a = _encode_frame(frame_a, format=".png")
         encoded_b = _encode_frame(frame_b, format=".png")
 
-        assert encoded_a != encoded_b
+        assert encoded_a["data"] != encoded_b["data"]
 
 
 class TestVideoContextInit:
@@ -115,10 +122,11 @@ class TestBuildContext:
         assert result["metadata"]["duration"] == 1.0
         assert result["num_frames"] == 3
         assert len(result["frames"]) == 3
-        # Each frame should be a base64 string
+        # Each frame should be a tagged image dict
         for f in result["frames"]:
-            assert isinstance(f, str)
-            base64.b64decode(f)  # should not raise
+            assert isinstance(f, dict)
+            assert f["__image__"] is True
+            base64.b64decode(f["data"])  # should not raise
 
     def test_segmented_context(self):
         frames = [_make_frame(value=i * 30) for i in range(6)]

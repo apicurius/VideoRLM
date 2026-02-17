@@ -1,3 +1,4 @@
+import base64
 import os
 from collections import defaultdict
 from typing import Any
@@ -94,6 +95,46 @@ class GeminiClient(BaseLM):
         self._track_cost(response, model)
         return response.text
 
+    @staticmethod
+    def _to_parts(content: Any) -> list[types.Part]:
+        """Convert message content into a list of Gemini ``Part`` objects.
+
+        Handles:
+        - Plain strings → ``types.Part(text=...)``
+        - Tagged image dicts (``{"__image__": True, "data": ..., "mime_type": ...}``)
+          → ``types.Part(inline_data=types.Blob(...))``
+        - Strings that look like serialised dicts/lists (from ``str(context)``)
+          are kept as text — only explicit tagged dicts become image parts.
+        - Lists/dicts are walked recursively so nested frame data is found.
+        """
+        parts: list[types.Part] = []
+
+        if isinstance(content, str):
+            parts.append(types.Part(text=content))
+        elif isinstance(content, dict):
+            if content.get("__image__"):
+                raw = base64.b64decode(content["data"])
+                parts.append(
+                    types.Part(
+                        inline_data=types.Blob(
+                            data=raw,
+                            mime_type=content.get("mime_type", "image/jpeg"),
+                        )
+                    )
+                )
+            else:
+                # Recurse into dict values to find nested image dicts
+                for v in content.values():
+                    parts.extend(GeminiClient._to_parts(v))
+        elif isinstance(content, list):
+            for item in content:
+                parts.extend(GeminiClient._to_parts(item))
+        else:
+            # Fallback: coerce to string
+            parts.append(types.Part(text=str(content)))
+
+        return parts
+
     def _prepare_contents(
         self, prompt: str | list[dict[str, Any]]
     ) -> tuple[list[types.Content] | str, str | None]:
@@ -111,16 +152,19 @@ class GeminiClient(BaseLM):
                 content = msg.get("content", "")
 
                 if role == "system":
-                    # Gemini handles system instruction separately
-                    system_instruction = content
+                    # System instruction is always text
+                    system_instruction = content if isinstance(content, str) else str(content)
                 elif role == "user":
-                    contents.append(types.Content(role="user", parts=[types.Part(text=content)]))
+                    parts = self._to_parts(content)
+                    contents.append(types.Content(role="user", parts=parts))
                 elif role == "assistant":
                     # Gemini uses "model" instead of "assistant"
-                    contents.append(types.Content(role="model", parts=[types.Part(text=content)]))
+                    parts = self._to_parts(content)
+                    contents.append(types.Content(role="model", parts=parts))
                 else:
                     # Default to user role for unknown roles
-                    contents.append(types.Content(role="user", parts=[types.Part(text=content)]))
+                    parts = self._to_parts(content)
+                    contents.append(types.Content(role="user", parts=parts))
 
             return contents, system_instruction
 

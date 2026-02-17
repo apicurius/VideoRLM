@@ -11,8 +11,8 @@ import numpy as np
 from rlm.video.video_loader import LoadedVideo, VideoSegment
 
 
-def _encode_frame(frame: np.ndarray, format: str = ".jpg", quality: int = 85) -> str:
-    """Encode a single frame to base64 string.
+def _encode_frame(frame: np.ndarray, format: str = ".jpg", quality: int = 85) -> dict[str, Any]:
+    """Encode a single frame to a tagged image dict for multimodal APIs.
 
     Args:
         frame: BGR numpy array from OpenCV.
@@ -20,7 +20,7 @@ def _encode_frame(frame: np.ndarray, format: str = ".jpg", quality: int = 85) ->
         quality: JPEG quality (1-100). Ignored for PNG.
 
     Returns:
-        Base64-encoded string of the frame.
+        Dict with ``__image__``, ``data`` (base64), and ``mime_type`` keys.
     """
     params: list[int] = []
     if format == ".jpg":
@@ -32,7 +32,12 @@ def _encode_frame(frame: np.ndarray, format: str = ".jpg", quality: int = 85) ->
     if not success:
         raise ValueError(f"Failed to encode frame to {format}")
 
-    return base64.b64encode(buffer.tobytes()).decode("utf-8")
+    mime = "image/jpeg" if format == ".jpg" else "image/png"
+    return {
+        "__image__": True,
+        "data": base64.b64encode(buffer.tobytes()).decode("utf-8"),
+        "mime_type": mime,
+    }
 
 
 def _segment_to_dict(segment: VideoSegment, format: str, quality: int) -> dict[str, Any]:
