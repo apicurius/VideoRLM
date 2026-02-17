@@ -1,0 +1,236 @@
+"""Tests for video search tool factory functions."""
+
+import sys
+from unittest.mock import MagicMock
+
+import numpy as np
+import pytest
+
+# Ensure sklearn is available (real or shimmed) so the lazy import inside
+# make_search_video succeeds even in environments without scikit-learn.
+try:
+    from sklearn.metrics.pairwise import cosine_similarity as _real_cos_sim  # noqa: F401
+except ImportError:
+    # Provide a minimal shim so the production import does not fail.
+    def _cosine_similarity(a, b):
+        a = np.asarray(a)
+        b = np.asarray(b)
+        a_norm = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-10)
+        b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-10)
+        return a_norm @ b_norm.T
+
+    _pairwise_mod = type(sys)("sklearn.metrics.pairwise")
+    _pairwise_mod.cosine_similarity = _cosine_similarity
+    _metrics_mod = type(sys)("sklearn.metrics")
+    _metrics_mod.pairwise = _pairwise_mod
+    _sklearn_mod = type(sys)("sklearn")
+    _sklearn_mod.metrics = _metrics_mod
+    sys.modules.setdefault("sklearn", _sklearn_mod)
+    sys.modules.setdefault("sklearn.metrics", _metrics_mod)
+    sys.modules.setdefault("sklearn.metrics.pairwise", _pairwise_mod)
+
+from rlm.video.video_search_tools import (
+    make_get_scene_list,
+    make_get_transcript,
+    make_search_transcript,
+    make_search_video,
+)
+
+
+def _make_index(
+    segments=None,
+    embeddings=None,
+    transcript=None,
+    embed_fn=None,
+):
+    """Create a mock VideoIndex with the given attributes."""
+    index = MagicMock()
+    index.segments = segments or []
+    index.embeddings = embeddings
+    index.transcript = transcript or []
+    index.embed_fn = embed_fn
+    return index
+
+
+# ---------------------------------------------------------------
+# search_video
+# ---------------------------------------------------------------
+
+
+class TestSearchVideo:
+    def test_basic_semantic_search(self):
+        # Segment 0 embedding close to query, segment 1 far away
+        emb0 = np.array([1.0, 0.0, 0.0])
+        emb1 = np.array([0.0, 1.0, 0.0])
+        embeddings = np.stack([emb0, emb1])
+
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "a cat"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "a dog"},
+        ]
+
+        # embed_fn returns vector close to emb0
+        embed_fn = MagicMock(return_value=np.array([0.9, 0.1, 0.0]))
+
+        index = _make_index(
+            segments=segments,
+            embeddings=embeddings,
+            embed_fn=embed_fn,
+        )
+
+        tool_dict = make_search_video(index)
+        search_video = tool_dict["tool"]
+        results = search_video("cat", top_k=2)
+
+        assert len(results) == 2
+        # First result should be segment 0 (higher similarity)
+        assert results[0]["caption"] == "a cat"
+        assert results[0]["score"] > results[1]["score"]
+        embed_fn.assert_called_once_with("cat")
+
+    def test_empty_embeddings_returns_empty(self):
+        index = _make_index(embeddings=None)
+        tool_dict = make_search_video(index)
+        assert tool_dict["tool"]("query") == []
+
+    def test_empty_embeddings_array_returns_empty(self):
+        index = _make_index(embeddings=np.array([]))
+        tool_dict = make_search_video(index)
+        assert tool_dict["tool"]("query") == []
+
+    def test_top_k_limits_results(self):
+        n = 5
+        embeddings = np.random.default_rng(42).random((n, 3))
+        segments = [
+            {"start_time": float(i), "end_time": float(i + 1), "caption": f"seg{i}"}
+            for i in range(n)
+        ]
+        embed_fn = MagicMock(return_value=np.array([1.0, 0.0, 0.0]))
+        index = _make_index(segments=segments, embeddings=embeddings, embed_fn=embed_fn)
+
+        results = make_search_video(index)["tool"]("q", top_k=2)
+        assert len(results) == 2
+
+
+# ---------------------------------------------------------------
+# search_transcript
+# ---------------------------------------------------------------
+
+
+class TestSearchTranscript:
+    def test_keyword_match(self):
+        transcript = [
+            {"start_time": 0.0, "end_time": 2.0, "text": "Hello world"},
+            {"start_time": 2.0, "end_time": 4.0, "text": "Goodbye moon"},
+            {"start_time": 4.0, "end_time": 6.0, "text": "Hello again"},
+        ]
+        index = _make_index(transcript=transcript)
+        search = make_search_transcript(index)["tool"]
+
+        results = search("hello")
+        assert len(results) == 2
+        assert results[0]["text"] == "Hello world"
+        assert results[1]["text"] == "Hello again"
+
+    def test_case_insensitive(self):
+        transcript = [{"start_time": 0.0, "end_time": 1.0, "text": "FOO bar"}]
+        index = _make_index(transcript=transcript)
+        results = make_search_transcript(index)["tool"]("foo")
+        assert len(results) == 1
+
+    def test_context_includes_neighbours(self):
+        transcript = [
+            {"start_time": 0.0, "end_time": 1.0, "text": "before"},
+            {"start_time": 1.0, "end_time": 2.0, "text": "match keyword"},
+            {"start_time": 2.0, "end_time": 3.0, "text": "after"},
+        ]
+        index = _make_index(transcript=transcript)
+        results = make_search_transcript(index)["tool"]("keyword")
+        assert len(results) == 1
+        context = results[0]["context"]
+        assert "before" in context
+        assert "match keyword" in context
+        assert "after" in context
+
+    def test_empty_transcript(self):
+        index = _make_index(transcript=[])
+        results = make_search_transcript(index)["tool"]("anything")
+        assert results == []
+
+    def test_no_match(self):
+        transcript = [{"start_time": 0.0, "end_time": 1.0, "text": "Hello"}]
+        index = _make_index(transcript=transcript)
+        results = make_search_transcript(index)["tool"]("xyz")
+        assert results == []
+
+
+# ---------------------------------------------------------------
+# get_transcript
+# ---------------------------------------------------------------
+
+
+class TestGetTranscript:
+    def test_time_range_filter(self):
+        transcript = [
+            {"start_time": 0.0, "end_time": 2.0, "text": "first"},
+            {"start_time": 2.0, "end_time": 4.0, "text": "second"},
+            {"start_time": 4.0, "end_time": 6.0, "text": "third"},
+            {"start_time": 6.0, "end_time": 8.0, "text": "fourth"},
+        ]
+        index = _make_index(transcript=transcript)
+        get_fn = make_get_transcript(index)["tool"]
+
+        result = get_fn(1.5, 5.0)
+        assert "first" in result
+        assert "second" in result
+        assert "third" in result
+        assert "fourth" not in result
+
+    def test_empty_transcript_returns_empty_string(self):
+        index = _make_index(transcript=[])
+        result = make_get_transcript(index)["tool"](0.0, 10.0)
+        assert result == ""
+
+    def test_no_overlap_returns_empty(self):
+        transcript = [{"start_time": 10.0, "end_time": 12.0, "text": "late"}]
+        index = _make_index(transcript=transcript)
+        result = make_get_transcript(index)["tool"](0.0, 5.0)
+        assert result == ""
+
+
+# ---------------------------------------------------------------
+# get_scene_list
+# ---------------------------------------------------------------
+
+
+class TestGetSceneList:
+    def test_returns_all_segments(self):
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "intro"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "main"},
+        ]
+        index = _make_index(segments=segments)
+        scenes = make_get_scene_list(index)["tool"]()
+
+        assert len(scenes) == 2
+        assert scenes[0]["scene_index"] == 0
+        assert scenes[0]["start_time"] == 0.0
+        assert scenes[0]["caption"] == "intro"
+        assert scenes[1]["scene_index"] == 1
+
+    def test_empty_segments(self):
+        index = _make_index(segments=[])
+        scenes = make_get_scene_list(index)["tool"]()
+        assert scenes == []
+
+    def test_missing_caption_defaults_to_empty(self):
+        segments = [{"start_time": 0.0, "end_time": 5.0}]
+        index = _make_index(segments=segments)
+        scenes = make_get_scene_list(index)["tool"]()
+        assert scenes[0]["caption"] == ""
+
+    def test_description_present(self):
+        index = _make_index()
+        tool_dict = make_get_scene_list(index)
+        assert "description" in tool_dict
+        assert isinstance(tool_dict["description"], str)

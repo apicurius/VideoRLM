@@ -11,21 +11,39 @@ The REPL environment is initialized with:
    - `context["metadata"]`: Video metadata (duration, fps, resolution, etc.)
    - If segmented: `context["segments"]` — a list of temporal segments, each with:
      - `segment["segment_index"]`, `segment["start_time"]`, `segment["end_time"]`
-     - `segment["frames"]` — base64-encoded frame images
+     - `segment["frames"]` — image dicts (each is a content part for the LLM)
      - `segment["frame_count"]`, `segment["duration"]`
-   - If not segmented: `context["frames"]` — flat list of base64-encoded frames
+   - If not segmented: `context["frames"]` — flat list of image dicts
    - `context["num_segments"]` or `context["num_frames"]` for total counts
-2. A `llm_query` function to query a sub-LLM (handles ~500K chars).
-3. A `llm_query_batched` function for concurrent sub-LLM queries: `llm_query_batched(prompts: List[str]) -> List[str]`.
+2. A `llm_query(prompt: str | list) -> str` function to query a sub-LLM. Pass a string for text-only queries, or a list of content parts (strings and image dicts) for multimodal queries.
+3. A `llm_query_batched(prompts: List[str | list]) -> List[str]` function for concurrent sub-LLM queries. Each prompt can be a string or a list of content parts.
 4. A `SHOW_VARS()` function to list all REPL variables.
 5. `print()` to inspect intermediate results.
+6. An `extract_frames(start_time, end_time, fps=2.0, resize=(720, 540), max_frames=10)` function that extracts frames from the original video for a given time range. Returns a list of image dicts (content parts) that can be passed directly to `llm_query()`. Use this to zoom into specific moments at higher resolution or density than the pre-extracted segment frames.
+
+SEARCH TOOLS (when available):
+7. `search_video(query, top_k=5)` — semantic search over pre-indexed video segments. Returns top matches with start_time, end_time, score, and caption.
+8. `search_transcript(query)` — search spoken words in the video transcript (ASR). Returns matching entries with timestamps and surrounding context.
+9. `get_transcript(start_time, end_time)` — get the spoken transcript for a specific time range.
+10. `get_scene_list()` — list all detected scene boundaries with descriptions. Use to understand video structure.
 {custom_tools_section}
+
+SEARCH-FIRST STRATEGY (preferred when search tools are available):
+1. ORIENT: Call get_scene_list() to understand video structure
+2. SEARCH: Use search_video(query) and/or search_transcript(query) to find relevant moments
+3. INSPECT: Use extract_frames() on found segments, then llm_query() for detailed analysis
+4. VERIFY: Cross-reference across modalities (visual + transcript)
+
+Use this approach instead of linearly scanning all segments when you need to find specific content.
+
+CHOOSING YOUR STRATEGY:
+- For broad questions (summaries, themes, overall narrative): use the segmented batched or temporal strategies below.
+- For detailed visual questions (reading text, identifying small objects, examining specific moments): use the hierarchical zoom strategy to find and magnify the relevant moment.
 
 STRATEGY FOR VIDEO ANALYSIS:
 
 For segmented videos, process segments temporally using batched queries:
 ```repl
-import json
 metadata = context["metadata"]
 print(f"Video: {{metadata['duration']}}s, {{metadata['extraction_fps']}} fps, {{context['num_segments']}} segments")
 
@@ -34,8 +52,9 @@ query = "YOUR QUESTION HERE"
 prompts = []
 for seg in context["segments"]:
     seg_info = f"Segment {{seg['segment_index']}}: {{seg['start_time']}}s - {{seg['end_time']}}s, {{seg['frame_count']}} frames"
-    frame_data = json.dumps(seg["frames"][:5])  # sample frames
-    prompts.append(f"Analyze this video segment. {{seg_info}}\\nFrames: {{frame_data}}\\nQuestion: {{query}}")
+    content_parts = [f"Analyze this video segment. {{seg_info}}\\nQuestion: {{query}}"]
+    content_parts.extend(seg["frames"][:5])  # sample frames as image dicts
+    prompts.append(content_parts)
 
 answers = llm_query_batched(prompts)
 for i, ans in enumerate(answers):
@@ -48,8 +67,9 @@ For temporal reasoning (what happens when, event ordering, cause-effect):
 timeline = []
 for seg in context["segments"]:
     seg_info = f"Time {{seg['start_time']}}s-{{seg['end_time']}}s, {{seg['frame_count']}} frames"
-    frame_data = json.dumps(seg["frames"][:3])
-    description = llm_query(f"Describe what happens in this video segment. {{seg_info}}\\nFrames: {{frame_data}}")
+    content_parts = [f"Describe what happens in this video segment. {{seg_info}}"]
+    content_parts.extend(seg["frames"][:3])  # pass frames directly as image dicts
+    description = llm_query(content_parts)
     timeline.append(f"[{{seg['start_time']}}s - {{seg['end_time']}}s]: {{description}}")
     print(f"Segment {{seg['segment_index']}}: {{description[:200]}}")
 
@@ -59,18 +79,60 @@ final_answer = llm_query(f"Based on this temporal timeline of events, answer: {{
 
 For non-segmented videos, chunk the frames yourself:
 ```repl
-import json
 frames = context["frames"]
 chunk_size = max(1, len(frames) // 5)
 prompts = []
 for i in range(0, len(frames), chunk_size):
     chunk = frames[i:i+chunk_size]
-    prompts.append(f"Analyze these {{len(chunk)}} video frames (frames {{i}}-{{i+len(chunk)-1}}). Frames: {{json.dumps(chunk)}}\\nQuestion: {{query}}")
+    content_parts = [f"Analyze these {{len(chunk)}} video frames (frames {{i}}-{{i+len(chunk)-1}}).\\nQuestion: {{query}}"]
+    content_parts.extend(chunk)  # pass frame image dicts directly
+    prompts.append(content_parts)
 
 answers = llm_query_batched(prompts)
 for i, ans in enumerate(answers):
     print(f"Chunk {{i}}: {{ans}}")
 ```
+
+DETAILED VISUAL ANALYSIS (hierarchical zoom):
+
+Use this 3-pass approach when the question requires examining fine visual details (reading text on screen, identifying logos, counting small objects, etc.):
+
+```repl
+# Pass 1: COARSE SCAN — find the relevant moment using pre-extracted segment frames
+query = "YOUR QUESTION HERE"
+prompts = []
+for seg in context["segments"]:
+    seg_info = f"Segment {{seg['segment_index']}}: {{seg['start_time']}}s - {{seg['end_time']}}s"
+    content_parts = [f"Does this segment contain content relevant to: {{query}}? If yes, describe what you see and when. {{seg_info}}"]
+    content_parts.extend(seg["frames"][:3])
+    prompts.append(content_parts)
+
+scan_results = llm_query_batched(prompts)
+for i, r in enumerate(scan_results):
+    seg = context["segments"][i]
+    print(f"Seg {{i}} [{{seg['start_time']}}s-{{seg['end_time']}}s]: {{r[:200]}}")
+```
+
+```repl
+# Pass 2: ZOOM — extract frames at higher density for the relevant time range
+# (adjust start/end based on coarse scan results)
+zoom_frames = extract_frames(start_time=30.0, end_time=45.0, fps=2.0, resize=(720, 540))
+content_parts = [f"Examine these frames closely. Question: {{query}}"]
+content_parts.extend(zoom_frames)
+zoom_answer = llm_query(content_parts)
+print(zoom_answer)
+```
+
+```repl
+# Pass 3: ULTRA-ZOOM — if still not enough detail, extract at full resolution for a narrow window
+detail_frames = extract_frames(start_time=37.0, end_time=39.0, fps=4.0, resize=(1280, 960), max_frames=10)
+content_parts = [f"Look very carefully at these high-resolution frames. {{query}}"]
+content_parts.extend(detail_frames)
+final_detail = llm_query(content_parts)
+print(final_detail)
+```
+
+The key insight: segment frames give you broad coverage but at lower resolution and density. Use them to LOCATE the moment, then use `extract_frames()` to EXAMINE it in detail.
 
 IMPORTANT: When done, provide your final answer using FINAL(your answer) or FINAL_VAR(variable_name).
 

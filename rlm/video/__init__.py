@@ -12,6 +12,7 @@ from rlm.video.video_prompts import VIDEO_SYSTEM_PROMPT
 if TYPE_CHECKING:
     from rlm.video.video_context import VideoContext
     from rlm.video.video_loader import LoadedVideo, VideoLoader, VideoMetadata, VideoSegment
+    from rlm.video.video_indexer import VideoIndex, VideoIndexer
     from rlm.video.video_rlm import VideoRLM
 
 
@@ -24,6 +25,8 @@ def __getattr__(name: str):
         "VideoSegment": "rlm.video.video_loader",
         "LoadedVideo": "rlm.video.video_loader",
         "VideoRLM": "rlm.video.video_rlm",
+        "VideoIndex": "rlm.video.video_indexer",
+        "VideoIndexer": "rlm.video.video_indexer",
     }
     if name in _cv2_exports:
         try:
@@ -43,6 +46,8 @@ __all__ = [
     "LoadedVideo",
     "VIDEO_SYSTEM_PROMPT",
     "VideoContext",
+    "VideoIndex",
+    "VideoIndexer",
     "VideoLoader",
     "VideoMetadata",
     "VideoRLM",
