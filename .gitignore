@@ -1,3 +1,6 @@
+# Large test videos
+*.mp4
+
 # MacOS
 .DS_Store
 
