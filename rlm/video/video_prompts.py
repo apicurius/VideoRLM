@@ -45,14 +45,14 @@ When you need precise visual analysis (counting objects, measuring sizes, detect
 frames = extract_frames(start_time=10.0, end_time=11.0, fps=1.0)
 mask = threshold_frame(frames[0], value=200)
 info = frame_info(mask)
-print(f"Bright area: mean brightness {info['mean_brightness']:.1f}")
+print(f"Bright area: mean brightness {{info['mean_brightness']:.1f}}")
 
 # Example: Detect what changed between two moments
 frames_before = extract_frames(start_time=5.0, end_time=5.5, fps=1.0)
 frames_after = extract_frames(start_time=15.0, end_time=15.5, fps=1.0)
 change = diff_frames(frames_before[0], frames_after[0])
 change_info = frame_info(change)
-print(f"Change intensity: {change_info['mean_brightness']:.1f}")
+print(f"Change intensity: {{change_info['mean_brightness']:.1f}}")
 # Pass change image to llm_query for description
 result = llm_query(["What changed between these frames?", change])
 ```
