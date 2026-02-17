@@ -11,6 +11,30 @@ import numpy as np
 from rlm.video.video_loader import LoadedVideo, VideoSegment
 
 
+def _blend_frames(frames: list, blend_size: int = 4) -> list:
+    """Blend consecutive frames into composites for context compression.
+
+    Args:
+        frames: List of BGR numpy arrays.
+        blend_size: Number of consecutive frames to blend into one composite.
+            1 means no blending (pass-through).
+
+    Returns:
+        List of blended frames (length ≈ len(frames) / blend_size).
+    """
+    if blend_size <= 1:
+        return frames
+    blended = []
+    for i in range(0, len(frames), blend_size):
+        group = frames[i : i + blend_size]
+        if len(group) == 1:
+            blended.append(group[0])
+        else:
+            composite = np.mean(np.stack(group), axis=0).astype(np.uint8)
+            blended.append(composite)
+    return blended
+
+
 def _encode_frame(frame: np.ndarray, format: str = ".jpg", quality: int = 85) -> dict[str, Any]:
     """Encode a single frame to a tagged image dict for multimodal APIs.
 

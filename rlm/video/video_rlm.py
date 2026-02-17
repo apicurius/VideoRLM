@@ -33,6 +33,8 @@ class VideoRLM:
         max_frames_per_segment: Cap frames per segment in context.
         max_depth: Maximum RLM recursion depth.
         max_iterations: Maximum REPL iterations per completion.
+        token_budget: Maximum total tokens (input + output) before injecting a
+            wrap-up signal. None means no budget (default).
         environment: RLM environment type.
         environment_kwargs: Extra kwargs for the environment.
         other_backends: Additional backends for sub-LLM calls.
@@ -44,6 +46,35 @@ class VideoRLM:
         refine_fn: Optional function ``(draft, context) -> str`` for
             Self-Refine of segment annotations.  Passed through to
             :meth:`VideoIndexer.index_video`.
+        caption_fn: Optional function that produces a caption for a list of
+            frames (segment-level captioning).  Passed through to
+            :meth:`VideoIndexer.index_video`.
+        frame_caption_fn: Optional function that captions a single keyframe
+            (Tree-of-Captions leaf level).  Passed through to
+            :meth:`VideoIndexer.index_video`.
+        enable_sharding: When True, videos with more segments than
+            ``shard_max_segments`` are analyzed via parallel sub-agent calls
+            (one per shard) before a final aggregation pass.  Defaults to
+            False for backward compatibility.
+        shard_max_segments: Maximum number of segments per shard when sharding
+            is enabled.  Defaults to 5.
+        auto_fps: When True, dynamically compute extraction FPS based on video
+            duration so that approximately ``target_frames`` frames are
+            extracted.  The ``fps`` parameter is used as a fallback when the
+            video duration cannot be determined.  Defaults to False.
+        target_frames: Target number of frames to extract when ``auto_fps``
+            is enabled.  The computed FPS is clamped to [0.1, 5.0].
+            Defaults to 120.
+        caption_resize: Optional (width, height) to resize frames before
+            passing them to caption_fn.  Reduces VLM cost and standardizes
+            input resolution for captioning only (embeddings use original
+            resolution).  None means no resizing (default).
+        text_embedding_model: Optional HuggingFace model id for a separate text
+            encoder (e.g. ``"google/embedding-gemma-300m"``).  When set, text
+            queries and captions are encoded with this model instead of SigLIP2's
+            built-in text tower.  This can improve search quality when the text
+            model has richer semantic representations than the CLIP-style text
+            encoder.  None means use SigLIP2 for both vision and text (default).
     """
 
     def __init__(
@@ -61,6 +92,7 @@ class VideoRLM:
         max_frames_per_segment: int | None = None,
         max_depth: int = 1,
         max_iterations: int = 30,
+        token_budget: int | None = None,
         environment: EnvironmentType = "local",
         environment_kwargs: dict[str, Any] | None = None,
         other_backends: list[ClientBackend] | None = None,
@@ -74,7 +106,21 @@ class VideoRLM:
         whisper_model: str = "base",
         transcript_path: str | None = None,
         refine_fn: Callable | None = None,
+        caption_fn: Callable | None = None,
+        frame_caption_fn: Callable | None = None,
+        enable_sharding: bool = False,
+        shard_max_segments: int = 5,
+        auto_fps: bool = False,
+        target_frames: int = 120,
+        cache_dir: str | None = None,
+        caption_resize: tuple[int, int] | None = None,
+        text_embedding_model: str | None = None,
     ):
+        self.caption_resize = caption_resize
+        self.auto_fps = auto_fps
+        self.target_frames = target_frames
+        self.cache_dir = cache_dir
+        self.text_embedding_model = text_embedding_model
         self.loader = VideoLoader(fps=fps, max_frames=max_frames, resize=resize)
         self.context_builder = VideoContext(
             format=image_format,
@@ -89,6 +135,10 @@ class VideoRLM:
         self.whisper_model = whisper_model
         self.transcript_path = transcript_path
         self.refine_fn = refine_fn
+        self.caption_fn = caption_fn
+        self.frame_caption_fn = frame_caption_fn
+        self.enable_sharding = enable_sharding
+        self.shard_max_segments = shard_max_segments
 
         self.rlm = RLM(
             backend=backend,
@@ -97,6 +147,7 @@ class VideoRLM:
             environment_kwargs=environment_kwargs or {},
             max_depth=max_depth,
             max_iterations=max_iterations,
+            token_budget=token_budget,
             custom_system_prompt=VIDEO_SYSTEM_PROMPT,
             other_backends=other_backends,
             other_backend_kwargs=other_backend_kwargs,
@@ -124,9 +175,43 @@ class VideoRLM:
             RLMChatCompletion with the analysis result.
         """
         loaded_video = self._load_video(video_path)
-        context = self.context_builder.build_context(loaded_video)
 
-        # Inject extract_frames tool so the LLM can zoom into time ranges
+        # Route to sharded completion for long videos
+        if (
+            self.enable_sharding
+            and loaded_video.segments
+            and len(loaded_video.segments) > self.shard_max_segments
+        ):
+            return self._sharded_completion(loaded_video, video_path, prompt)
+
+        context = self.context_builder.build_context(loaded_video)
+        extra_tools = self._build_extra_tools(video_path, loaded_video)
+
+        # Merge with any user-supplied custom tools
+        prev_tools = self.rlm.custom_tools
+        merged = {**(prev_tools or {}), **extra_tools}
+        self.rlm.custom_tools = merged
+        try:
+            return self.rlm.completion(context, root_prompt=prompt)
+        finally:
+            self.rlm.custom_tools = prev_tools
+
+    def _build_extra_tools(
+        self,
+        video_path: str | Path,
+        loaded_video: LoadedVideo,
+    ) -> dict[str, Any]:
+        """Build the standard extra tools dict injected into the REPL environment.
+
+        Includes extract_frames, pixel tools, and (when enabled) search tools.
+
+        Args:
+            video_path: Path to the video file.
+            loaded_video: Already-loaded video data.
+
+        Returns:
+            Dict mapping tool names to ``{"tool": callable, "description": str}`` dicts.
+        """
         extract_fn = self._make_extract_frames(
             str(Path(video_path).resolve()),
             image_format=self.context_builder.format,
@@ -156,9 +241,14 @@ class VideoRLM:
 
             indexer = VideoIndexer(
                 embedding_model=self.embedding_model or "google/siglip2-base-patch16-256",
+                cache_dir=self.cache_dir,
+                caption_resize=self.caption_resize,
+                text_embedding_model=self.text_embedding_model,
             )
             video_index = indexer.index_video(
                 loaded_video,
+                caption_fn=self.caption_fn,
+                frame_caption_fn=self.frame_caption_fn,
                 refine_fn=self.refine_fn,
                 whisper_model=self.whisper_model,
                 transcript_path=self.transcript_path,
@@ -174,14 +264,132 @@ class VideoRLM:
                 tool_name = result["tool"].__name__
                 extra_tools[tool_name] = result
 
-        # Merge with any user-supplied custom tools
+            from rlm.video.video_search_tools import make_discriminative_vqa
+            vqa_result = make_discriminative_vqa(video_index)
+            extra_tools[vqa_result["tool"].__name__] = vqa_result
+
+        # Add pixel manipulation tools
+        extra_tools.update(self._make_pixel_tools())
+
+        return extra_tools
+
+    def _sharded_completion(
+        self,
+        loaded_video: LoadedVideo,
+        video_path: str | Path,
+        prompt: str | None = None,
+    ) -> RLMChatCompletion:
+        """Analyze a long video by sharding segments across sub-agent calls.
+
+        Divides segments into groups (shards), builds pre-encoded multimodal
+        prompts for each shard, and injects them as ``shard_prompts`` into the
+        REPL so the orchestrator LLM can call
+        ``llm_query_batched(shard_prompts)`` to analyze all shards in parallel,
+        then aggregate the results.
+
+        This maps to K2.5's Agent Swarm architecture (pp. 4-6) where each
+        sub-agent has an isolated context and only returns task-relevant
+        summaries back to the orchestrator.
+
+        Args:
+            loaded_video: Already-loaded video with segments.
+            video_path: Path to the video file (for extract_frames tool).
+            prompt: Optional question or instruction about the video.
+
+        Returns:
+            RLMChatCompletion with the aggregated analysis result.
+        """
+        segments = loaded_video.segments
+
+        # Group segments into shards of at most shard_max_segments each
+        shards = [
+            segments[i : i + self.shard_max_segments]
+            for i in range(0, len(segments), self.shard_max_segments)
+        ]
+
+        # Build a multimodal prompt for each shard (strings + encoded image dicts)
+        shard_prompts: list[list[Any]] = []
+        for shard_idx, shard in enumerate(shards):
+            parts: list[Any] = [
+                f"You are analyzing shard {shard_idx + 1}/{len(shards)} of a video "
+                f"({loaded_video.metadata.duration:.1f}s total). "
+                f"This shard covers segments "
+                f"{shard[0].segment_index}-{shard[-1].segment_index} "
+                f"({shard[0].start_time:.1f}s - {shard[-1].end_time:.1f}s).\n"
+                f"Question: {prompt}\n"
+                f"Analyze these frames and provide a detailed answer for your shard."
+            ]
+            for seg in shard:
+                parts.append(
+                    f"\n--- Segment {seg.segment_index} "
+                    f"({seg.start_time:.1f}s - {seg.end_time:.1f}s) ---"
+                )
+                for frame in seg.frames[:3]:
+                    parts.append(
+                        _encode_frame(
+                            frame,
+                            format=self.context_builder.format,
+                            quality=self.context_builder.quality,
+                        )
+                    )
+            shard_prompts.append(parts)
+
+        context = self.context_builder.build_context(loaded_video)
+        extra_tools = self._build_extra_tools(video_path, loaded_video)
+
+        # Expose shard info as a callable tool
+        def get_shard_info() -> list[str]:
+            """Return a description of each video shard's segment range and timestamps."""
+            return [
+                f"Shard {i + 1}/{len(shards)}: segments "
+                f"{shards[i][0].segment_index}-{shards[i][-1].segment_index} "
+                f"({shards[i][0].start_time:.1f}s-{shards[i][-1].end_time:.1f}s)"
+                for i in range(len(shards))
+            ]
+
+        extra_tools["get_shard_info"] = {
+            "tool": get_shard_info,
+            "description": (
+                "get_shard_info() -> list[str]. "
+                "Get a list of video shards with their segment ranges and timestamps. "
+                "Use llm_query_batched(shard_prompts) to analyze all shards in parallel."
+            ),
+        }
+        # Expose pre-built multimodal shard prompts as a REPL variable
+        extra_tools["shard_prompts"] = {
+            "tool": shard_prompts,
+            "description": (
+                "shard_prompts: list[list]. Pre-built multimodal prompts for each "
+                "video shard. Pass to llm_query_batched(shard_prompts) to analyze "
+                "all shards in parallel, then aggregate the results."
+            ),
+        }
+
+        shard_guidance = (
+            f"\n\nSHARDED VIDEO ANALYSIS:\n"
+            f"This video has been divided into {len(shards)} shards for efficient "
+            f"analysis. A `shard_prompts` variable is available containing pre-built "
+            f"multimodal prompts for each shard. Use `llm_query_batched(shard_prompts)` "
+            f"to analyze all shards in parallel, then aggregate the results to answer "
+            f"the question.\n"
+            f"Example:\n"
+            f"```repl\n"
+            f"shard_results = llm_query_batched(shard_prompts)\n"
+            f"for i, result in enumerate(shard_results):\n"
+            f"    print(f'Shard {{i+1}}: {{result[:200]}}')\n"
+            f"```\n"
+        )
+
         prev_tools = self.rlm.custom_tools
         merged = {**(prev_tools or {}), **extra_tools}
         self.rlm.custom_tools = merged
+        original_system_prompt = self.rlm.custom_system_prompt
+        self.rlm.custom_system_prompt = VIDEO_SYSTEM_PROMPT + shard_guidance
         try:
             return self.rlm.completion(context, root_prompt=prompt)
         finally:
             self.rlm.custom_tools = prev_tools
+            self.rlm.custom_system_prompt = original_system_prompt
 
     @staticmethod
     def _make_extract_frames(
@@ -277,12 +485,163 @@ class VideoRLM:
 
         return extract_frames
 
+    @staticmethod
+    def _make_pixel_tools() -> dict[str, Any]:
+        """Create pixel-manipulation tools for code-based visual reasoning."""
+        import base64
+
+        import cv2
+        import numpy as np
+
+        def _decode_image_dict(image_dict: dict) -> np.ndarray:
+            """Convert a tagged image dict back to a BGR numpy array."""
+            data = base64.b64decode(image_dict["data"])
+            arr = np.frombuffer(data, dtype=np.uint8)
+            return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+        def _to_image_dict(frame: np.ndarray, mime_type: str = "image/jpeg") -> dict:
+            """Convert BGR numpy array to tagged image dict."""
+            _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            return {
+                "__image__": True,
+                "data": base64.b64encode(buffer.tobytes()).decode("utf-8"),
+                "mime_type": mime_type,
+            }
+
+        def threshold_frame(image_dict: dict, value: int = 128) -> dict:
+            """Convert frame to binary mask. Pixels > value become white, else black.
+            Useful for object counting via pixel analysis."""
+            frame = _decode_image_dict(image_dict)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            _, mask = cv2.threshold(gray, value, 255, cv2.THRESH_BINARY)
+            result = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            return _to_image_dict(result)
+
+        def crop_frame(
+            image_dict: dict,
+            x1_pct: float,
+            y1_pct: float,
+            x2_pct: float,
+            y2_pct: float,
+        ) -> dict:
+            """Crop a region of interest from a frame using percentage coordinates.
+            x1_pct, y1_pct = top-left corner (0.0-1.0), x2_pct, y2_pct = bottom-right."""
+            frame = _decode_image_dict(image_dict)
+            h, w = frame.shape[:2]
+            x1, y1 = int(x1_pct * w), int(y1_pct * h)
+            x2, y2 = int(x2_pct * w), int(y2_pct * h)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            cropped = frame[y1:y2, x1:x2]
+            return _to_image_dict(cropped)
+
+        def diff_frames(image_dict_a: dict, image_dict_b: dict) -> dict:
+            """Compute absolute difference between two frames.
+            Bright areas in result = regions that changed. Useful for motion detection."""
+            frame_a = _decode_image_dict(image_dict_a)
+            frame_b = _decode_image_dict(image_dict_b)
+            if frame_a.shape != frame_b.shape:
+                frame_b = cv2.resize(frame_b, (frame_a.shape[1], frame_a.shape[0]))
+            diff = cv2.absdiff(frame_a, frame_b)
+            return _to_image_dict(diff)
+
+        def blend_frames(image_dicts: list[dict]) -> dict:
+            """Blend multiple frames into a single composite by averaging pixels.
+            Useful for creating motion summary or detecting static elements."""
+            frames = [_decode_image_dict(d) for d in image_dicts]
+            if not frames:
+                raise ValueError("No frames to blend")
+            target_shape = frames[0].shape[:2]
+            resized = [
+                cv2.resize(f, (target_shape[1], target_shape[0]))
+                if f.shape[:2] != target_shape
+                else f
+                for f in frames
+            ]
+            composite = np.mean(np.stack(resized), axis=0).astype(np.uint8)
+            return _to_image_dict(composite)
+
+        def frame_info(image_dict: dict) -> dict:
+            """Get frame dimensions and basic statistics (mean brightness, etc.)."""
+            frame = _decode_image_dict(image_dict)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            h, w = frame.shape[:2]
+            return {
+                "width": w,
+                "height": h,
+                "channels": frame.shape[2] if len(frame.shape) > 2 else 1,
+                "mean_brightness": float(gray.mean()),
+                "std_brightness": float(gray.std()),
+                "min_brightness": int(gray.min()),
+                "max_brightness": int(gray.max()),
+            }
+
+        return {
+            "threshold_frame": {
+                "tool": threshold_frame,
+                "description": (
+                    "threshold_frame(image_dict, value=128) -> image_dict. "
+                    "Convert frame to binary mask (pixels > value = white, else black). "
+                    "Pass any image dict from extract_frames() or context frames."
+                ),
+            },
+            "crop_frame": {
+                "tool": crop_frame,
+                "description": (
+                    "crop_frame(image_dict, x1_pct, y1_pct, x2_pct, y2_pct) -> image_dict. "
+                    "Crop region of interest using percentage coordinates (0.0-1.0). "
+                    "Example: crop_frame(frame, 0.0, 0.0, 0.5, 0.5) crops top-left quarter."
+                ),
+            },
+            "diff_frames": {
+                "tool": diff_frames,
+                "description": (
+                    "diff_frames(image_dict_a, image_dict_b) -> image_dict. "
+                    "Compute absolute pixel difference between two frames. "
+                    "Bright areas = regions that changed. Use for motion detection."
+                ),
+            },
+            "blend_frames": {
+                "tool": blend_frames,
+                "description": (
+                    "blend_frames(image_dicts: list) -> image_dict. "
+                    "Average multiple frames into one composite. "
+                    "Use for motion summary or detecting static elements."
+                ),
+            },
+            "frame_info": {
+                "tool": frame_info,
+                "description": (
+                    "frame_info(image_dict) -> dict. "
+                    "Get frame dimensions and brightness statistics "
+                    "(width, height, mean_brightness, std_brightness)."
+                ),
+            },
+        }
+
     def _load_video(self, video_path: str | Path) -> LoadedVideo:
         """Load and optionally segment a video."""
-        if self.num_segments is not None or self.segment_duration is not None:
-            return self.loader.load_and_segment(
-                video_path,
-                num_segments=self.num_segments,
-                segment_duration=self.segment_duration,
-            )
-        return self.loader.load(video_path)
+        original_fps = self.loader.fps
+        if self.auto_fps:
+            cap = cv2.VideoCapture(str(video_path))
+            try:
+                video_fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                if video_fps > 0 and frame_count > 0:
+                    duration = frame_count / video_fps
+                    optimal_fps = self.target_frames / duration
+                    self.loader.fps = max(0.1, min(5.0, optimal_fps))
+            finally:
+                cap.release()
+
+        try:
+            if self.num_segments is not None or self.segment_duration is not None:
+                return self.loader.load_and_segment(
+                    video_path,
+                    num_segments=self.num_segments,
+                    segment_duration=self.segment_duration,
+                )
+            return self.loader.load(video_path)
+        finally:
+            if self.auto_fps:
+                self.loader.fps = original_fps

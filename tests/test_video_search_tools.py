@@ -25,11 +25,22 @@ except ImportError:
     _metrics_mod.pairwise = _pairwise_mod
     _sklearn_mod = type(sys)("sklearn")
     _sklearn_mod.metrics = _metrics_mod
+    class _KMeans:
+        def __init__(self, n_clusters=2, random_state=None, n_init=10):
+            self.n_clusters = n_clusters
+        def fit_predict(self, X):
+            X = np.asarray(X)
+            return np.array([i % self.n_clusters for i in range(len(X))])
+
+    _cluster_mod = type(sys)("sklearn.cluster")
+    _cluster_mod.KMeans = _KMeans
     sys.modules.setdefault("sklearn", _sklearn_mod)
     sys.modules.setdefault("sklearn.metrics", _metrics_mod)
     sys.modules.setdefault("sklearn.metrics.pairwise", _pairwise_mod)
+    sys.modules.setdefault("sklearn.cluster", _cluster_mod)
 
 from rlm.video.video_search_tools import (
+    make_discriminative_vqa,
     make_get_scene_list,
     make_get_transcript,
     make_search_transcript,
@@ -355,3 +366,100 @@ class TestGetSceneList:
         tool_dict = make_get_scene_list(index)
         assert "description" in tool_dict
         assert isinstance(tool_dict["description"], str)
+
+
+# ---------------------------------------------------------------
+# discriminative_vqa
+# ---------------------------------------------------------------
+
+
+class TestDiscriminativeVqa:
+    def _build_index(self):
+        """Build a mock index with 3 segments and known embeddings."""
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "person cooking"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "person reading"},
+            {"start_time": 10.0, "end_time": 15.0, "caption": "person exercising"},
+        ]
+        # Each segment embedding is a unit vector along a different axis
+        embeddings = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ])
+
+        def embed_fn(text: str) -> np.ndarray:
+            # Return embedding close to segment 0 for "cooking", segment 1 for "reading", etc.
+            if "cooking" in text:
+                return np.array([0.9, 0.1, 0.0])
+            elif "reading" in text:
+                return np.array([0.1, 0.9, 0.0])
+            elif "exercising" in text:
+                return np.array([0.0, 0.1, 0.9])
+            return np.array([0.33, 0.33, 0.33])
+
+        return _make_index(
+            segments=segments, embeddings=embeddings, embed_fn=embed_fn,
+        )
+
+    def test_basic_multiple_choice(self):
+        index = self._build_index()
+        tool_dict = make_discriminative_vqa(index)
+        vqa = tool_dict["tool"]
+
+        results = vqa("What is the person doing?", ["cooking", "reading", "exercising"])
+        assert len(results) == 3
+        # Results should be sorted by confidence descending
+        assert results[0]["confidence"] >= results[1]["confidence"]
+        assert results[1]["confidence"] >= results[2]["confidence"]
+        # Each result has the expected keys
+        for r in results:
+            assert "answer" in r
+            assert "confidence" in r
+            assert "best_segment" in r
+            assert "start_time" in r["best_segment"]
+            assert "end_time" in r["best_segment"]
+            assert "caption" in r["best_segment"]
+
+    def test_returns_empty_for_no_candidates(self):
+        index = self._build_index()
+        vqa = make_discriminative_vqa(index)["tool"]
+        assert vqa("question", []) == []
+
+    def test_returns_empty_when_no_embeddings(self):
+        index = _make_index(embeddings=None)
+        vqa = make_discriminative_vqa(index)["tool"]
+        assert vqa("question", ["a", "b"]) == []
+
+    def test_returns_empty_when_no_embed_fn(self):
+        index = _make_index(
+            embeddings=np.array([[1.0, 0.0]]),
+            embed_fn=None,
+            segments=[{"start_time": 0.0, "end_time": 5.0}],
+        )
+        vqa = make_discriminative_vqa(index)["tool"]
+        assert vqa("question", ["a", "b"]) == []
+
+    def test_time_range_filter(self):
+        index = self._build_index()
+        vqa = make_discriminative_vqa(index)["tool"]
+
+        # Only look at segments 0-4.9s (segment 0: cooking)
+        results = vqa("What is happening?", ["cooking", "reading"], time_range=(0.0, 4.9))
+        assert len(results) == 2
+        # Both should reference segment 0 since it's the only active one
+        for r in results:
+            assert r["best_segment"]["start_time"] == 0.0
+            assert r["best_segment"]["end_time"] == 5.0
+
+    def test_time_range_no_overlap_returns_empty(self):
+        index = self._build_index()
+        vqa = make_discriminative_vqa(index)["tool"]
+        results = vqa("question", ["a", "b"], time_range=(100.0, 200.0))
+        assert results == []
+
+    def test_description_present(self):
+        index = self._build_index()
+        tool_dict = make_discriminative_vqa(index)
+        assert "description" in tool_dict
+        assert "discriminative_vqa" in tool_dict["description"]

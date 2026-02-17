@@ -46,6 +46,7 @@ class RLM:
         depth: int = 0,
         max_depth: int = 1,
         max_iterations: int = 30,
+        token_budget: int | None = None,
         custom_system_prompt: str | None = None,
         other_backends: list[ClientBackend] | None = None,
         other_backend_kwargs: list[dict[str, Any]] | None = None,
@@ -64,6 +65,8 @@ class RLM:
             depth: The current depth of the RLM (0-indexed).
             max_depth: The maximum depth of the RLM. Currently, only depth 1 is supported.
             max_iterations: The maximum number of iterations of the RLM.
+            token_budget: Maximum total tokens (input + output) before injecting a wrap-up
+                signal. None means no budget (default, backward compatible).
             custom_system_prompt: The custom system prompt to use for the RLM.
             other_backends: A list of other client backends that the environments can use to make sub-calls.
             other_backend_kwargs: The kwargs to pass to the other client backends (ordered to match other_backends).
@@ -101,6 +104,7 @@ class RLM:
         self.depth = depth
         self.max_depth = max_depth
         self.max_iterations = max_iterations
+        self.token_budget = token_budget
         self.system_prompt = custom_system_prompt if custom_system_prompt else RLM_SYSTEM_PROMPT
         self.logger = logger
         self.verbose = VerbosePrinter(enabled=verbose)
@@ -234,6 +238,7 @@ class RLM:
 
         with self._spawn_completion_context(prompt) as (lm_handler, environment):
             message_history = self._setup_prompt(prompt)
+            consecutive_no_code = 0
 
             for i in range(self.max_iterations):
                 # Current prompt = message history + additional prompt suffix
@@ -256,6 +261,38 @@ class RLM:
                     lm_handler=lm_handler,
                     environment=environment,
                 )
+
+                # Track consecutive no-code iterations for early stopping
+                if not iteration.code_blocks:
+                    consecutive_no_code += 1
+                else:
+                    consecutive_no_code = 0
+
+                # Budget-aware early stopping: inject wrap-up signal when token budget exceeded
+                if self.token_budget is not None:
+                    usage = lm_handler.get_usage_summary()
+                    total_tokens = sum(
+                        m.total_input_tokens + m.total_output_tokens
+                        for m in usage.model_usage_summaries.values()
+                    )
+                    if total_tokens >= self.token_budget:
+                        message_history.append({
+                            "role": "user",
+                            "content": (
+                                "TOKEN BUDGET REACHED. You must provide your final answer NOW. "
+                                "Use FINAL(your answer) or FINAL_VAR(variable_name) immediately."
+                            ),
+                        })
+
+                # Early stopping heuristic: consecutive iterations with no code execution
+                if consecutive_no_code >= 2:
+                    message_history.append({
+                        "role": "user",
+                        "content": (
+                            "You have been reasoning without executing code for multiple iterations. "
+                            "Please provide your final answer now using FINAL(your answer)."
+                        ),
+                    })
 
                 # Check if RLM is done and has a final answer.
                 final_answer = find_final_answer(iteration.response, environment=environment)

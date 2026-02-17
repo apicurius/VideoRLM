@@ -12,7 +12,7 @@ def detect_scenes(
     timestamps: list[float],
     embed_fn: Callable[[list[np.ndarray]], np.ndarray] | None = None,
     threshold: float = 0.3,
-    min_duration: float = 0.5,
+    min_duration: float = 4.0,
 ) -> list[tuple[float, float]]:
     """Detect scene boundaries via embedding clustering or histogram fallback.
 
@@ -27,7 +27,7 @@ def detect_scenes(
             ``(N, D)`` embedding matrix.
         threshold: Distance threshold controlling the number of scenes.
             Higher → fewer scenes.
-        min_duration: Minimum scene duration in seconds.
+        min_duration: Minimum scene duration in seconds. Defaults to 4.0.
 
     Returns:
         List of ``(start_time, end_time)`` tuples for each scene.
@@ -94,6 +94,63 @@ def _detect_scenes_embedding(
             scenes = [(timestamps[0], timestamps[-1])]
 
     return scenes
+
+
+def detect_scenes_hierarchical(
+    frames: list[np.ndarray],
+    timestamps: list[float],
+    embed_fn: Callable[[list[np.ndarray]], np.ndarray],
+    thresholds: tuple[float, ...] = (0.15, 0.30, 0.50),
+    min_durations: tuple[float, ...] = (0.5, 2.0, 4.0),
+) -> dict:
+    """Detect scene boundaries at multiple granularity levels.
+
+    Runs embedding-based scene detection at each ``(threshold, min_duration)``
+    pair.  Lower thresholds produce finer (more) scenes; higher thresholds
+    produce coarser (fewer) scenes.  Coarse-level boundaries are snapped to
+    the nearest fine-level boundary so that the hierarchy is consistent.
+
+    Args:
+        frames: BGR numpy arrays (OpenCV format).
+        timestamps: Per-frame timestamps in seconds.
+        embed_fn: Callable that embeds a list of frames into an ``(N, D)``
+            matrix.
+        thresholds: Distance thresholds from finest to coarsest.
+        min_durations: Minimum scene durations corresponding to each threshold.
+
+    Returns:
+        ``{"levels": [finest_scenes, ..., coarsest_scenes]}`` where each
+        entry is a list of ``(start_time, end_time)`` tuples.
+    """
+    if len(frames) != len(timestamps):
+        raise ValueError(
+            f"frames ({len(frames)}) and timestamps ({len(timestamps)}) must have the same length"
+        )
+    if not frames:
+        return {"levels": [[] for _ in thresholds]}
+    if len(frames) == 1:
+        single = [(timestamps[0], timestamps[0])]
+        return {"levels": [single for _ in thresholds]}
+
+    levels: list[list[tuple[float, float]]] = []
+    for thresh, min_dur in zip(thresholds, min_durations):
+        scenes = _detect_scenes_embedding(frames, timestamps, embed_fn, thresh, min_dur)
+        levels.append(scenes)
+
+    # Align coarser levels to finest boundaries
+    if levels:
+        fine_boundaries = sorted({s for scene in levels[0] for s in scene})
+        for lvl_idx in range(1, len(levels)):
+            aligned: list[tuple[float, float]] = []
+            for start, end in levels[lvl_idx]:
+                snap_start = min(fine_boundaries, key=lambda b: abs(b - start))
+                snap_end = min(fine_boundaries, key=lambda b: abs(b - end))
+                if snap_start >= snap_end:
+                    snap_end = end  # fallback to original if snapping collapses
+                aligned.append((snap_start, snap_end))
+            levels[lvl_idx] = aligned
+
+    return {"levels": levels}
 
 
 def _detect_scenes_histogram(

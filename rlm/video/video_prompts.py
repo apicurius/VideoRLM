@@ -30,6 +30,32 @@ SEARCH TOOLS (when available):
 8. `search_transcript(query)` — search spoken words in the video transcript (ASR). Returns matching entries with timestamps and surrounding context.
 9. `get_transcript(start_time, end_time)` — get the spoken transcript for a specific time range.
 10. `get_scene_list()` — list all detected scene boundaries with structured annotations including action descriptions and actor information.
+
+PIXEL MANIPULATION TOOLS (always available):
+11. `threshold_frame(image_dict, value=128)` — convert to binary mask for counting/segmentation
+12. `crop_frame(image_dict, x1_pct, y1_pct, x2_pct, y2_pct)` — extract region of interest (0.0-1.0 coords)
+13. `diff_frames(image_dict_a, image_dict_b)` — pixel difference for motion/change detection
+14. `blend_frames(image_dicts)` — average multiple frames into composite
+15. `frame_info(image_dict)` — get dimensions and brightness statistics
+
+CODE-BASED VISUAL REASONING:
+When you need precise visual analysis (counting objects, measuring sizes, detecting changes), use code:
+```repl
+# Example: Count bright objects in a frame
+frames = extract_frames(start_time=10.0, end_time=11.0, fps=1.0)
+mask = threshold_frame(frames[0], value=200)
+info = frame_info(mask)
+print(f"Bright area: mean brightness {info['mean_brightness']:.1f}")
+
+# Example: Detect what changed between two moments
+frames_before = extract_frames(start_time=5.0, end_time=5.5, fps=1.0)
+frames_after = extract_frames(start_time=15.0, end_time=15.5, fps=1.0)
+change = diff_frames(frames_before[0], frames_after[0])
+change_info = frame_info(change)
+print(f"Change intensity: {change_info['mean_brightness']:.1f}")
+# Pass change image to llm_query for description
+result = llm_query(["What changed between these frames?", change])
+```
 {custom_tools_section}
 
 SEARCH-FIRST STRATEGY (preferred when search tools are available):
@@ -48,6 +74,14 @@ Search results include structured annotations with:
 Use these fields to quickly assess relevance before extracting frames.
 
 Use this approach instead of linearly scanning all segments when you need to find specific content.
+
+## DISCRIMINATIVE VQA
+For multiple-choice or yes/no questions, use `discriminative_vqa(question, candidates)`
+for fast embedding-based answer selection without LLM generation. Example:
+```repl
+result = discriminative_vqa("What is the person doing?", ["cooking", "reading", "exercising"])
+print(result[0]["answer"], result[0]["confidence"])
+```
 
 CHOOSING YOUR STRATEGY:
 - For broad questions (summaries, themes, overall narrative): use the segmented batched or temporal strategies below.
