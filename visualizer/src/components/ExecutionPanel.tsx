@@ -6,6 +6,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { CodeBlock } from './CodeBlock';
 import { RLMIteration } from '@/lib/types';
+import { VideoFrameViewer, extractImageFrames, isImageFrame } from './VideoFrameViewer';
 
 interface ExecutionPanelProps {
   iteration: RLMIteration | null;
@@ -141,14 +142,38 @@ export function ExecutionPanel({ iteration }: ExecutionPanelProps) {
                           <div>
                             <p className="text-xs text-muted-foreground mb-1.5 font-medium uppercase tracking-wider">
                               Prompt
+                              {extractImageFrames(call.prompt).length > 0 && (
+                                <Badge className="ml-2 bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 border-cyan-500/30 text-[10px] align-middle">
+                                  Multimodal
+                                </Badge>
+                              )}
                             </p>
-                            <div className="bg-muted/50 rounded-lg p-3 max-h-40 overflow-y-auto border border-border">
-                              <pre className="text-xs whitespace-pre-wrap font-mono">
-                                {typeof call.prompt === 'string' 
-                                  ? call.prompt 
-                                  : JSON.stringify(call.prompt, null, 2)}
-                              </pre>
-                            </div>
+                            {(() => {
+                              const frames = extractImageFrames(call.prompt);
+                              if (frames.length > 0) {
+                                return (
+                                  <div className="space-y-3">
+                                    <VideoFrameViewer frames={frames} thumbSize={100} />
+                                    <div className="bg-muted/50 rounded-lg p-3 max-h-40 overflow-y-auto border border-border">
+                                      <pre className="text-xs whitespace-pre-wrap font-mono">
+                                        {typeof call.prompt === 'string'
+                                          ? call.prompt
+                                          : JSON.stringify(call.prompt, (_, v) => isImageFrame(v) ? { __image__: true, mime_type: v.mime_type, data: '[base64]' } : v, 2)}
+                                      </pre>
+                                    </div>
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div className="bg-muted/50 rounded-lg p-3 max-h-40 overflow-y-auto border border-border">
+                                  <pre className="text-xs whitespace-pre-wrap font-mono">
+                                    {typeof call.prompt === 'string'
+                                      ? call.prompt
+                                      : JSON.stringify(call.prompt, null, 2)}
+                                  </pre>
+                                </div>
+                              );
+                            })()}
                           </div>
                           <div>
                             <p className="text-xs text-muted-foreground mb-1.5 font-medium uppercase tracking-wider">

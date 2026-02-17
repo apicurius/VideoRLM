@@ -219,17 +219,22 @@ class LocalREPL(NonIsolatedEnv):
             return "No variables created yet. Use ```repl``` blocks to create variables."
         return f"Available variables: {available}"
 
-    def _llm_query(self, prompt: str, model: str | None = None) -> str:
+    def _llm_query(self, prompt: str | list, model: str | None = None) -> str:
         """Query the LM via socket connection to the handler.
 
         Args:
-            prompt: The prompt to send to the LM.
+            prompt: The prompt to send to the LM. Can be a string or a list of
+                    content parts (text strings and image dicts) for multimodal queries.
             model: Optional model name to use (if handler has multiple clients).
         """
         if not self.lm_handler_address:
             return "Error: No LM handler configured"
 
         try:
+            # Wrap multimodal content parts as a list of message dicts
+            if isinstance(prompt, list):
+                prompt = [{"role": "user", "content": prompt}]
+
             request = LMRequest(prompt=prompt, model=model, depth=self.depth)
             response = send_lm_request(self.lm_handler_address, request)
 
@@ -245,11 +250,15 @@ class LocalREPL(NonIsolatedEnv):
         except Exception as e:
             return f"Error: LM query failed - {e}"
 
-    def _llm_query_batched(self, prompts: list[str], model: str | None = None) -> list[str]:
+    def _llm_query_batched(
+        self, prompts: list[str | list], model: str | None = None
+    ) -> list[str]:
         """Query the LM with multiple prompts concurrently.
 
         Args:
-            prompts: List of prompts to send to the LM.
+            prompts: List of prompts to send to the LM. Each prompt can be a string
+                     or a list of content parts (text strings and image dicts) for
+                     multimodal queries.
             model: Optional model name to use (if handler has multiple clients).
 
         Returns:
@@ -259,8 +268,14 @@ class LocalREPL(NonIsolatedEnv):
             return ["Error: No LM handler configured"] * len(prompts)
 
         try:
+            # Wrap multimodal content parts as lists of message dicts
+            wrapped = [
+                [{"role": "user", "content": p}] if isinstance(p, list) else p
+                for p in prompts
+            ]
+
             responses = send_lm_request_batched(
-                self.lm_handler_address, prompts, model=model, depth=self.depth
+                self.lm_handler_address, wrapped, model=model, depth=self.depth
             )
 
             results = []

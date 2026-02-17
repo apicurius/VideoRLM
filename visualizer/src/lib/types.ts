@@ -42,6 +42,11 @@ export interface RLMConfigMetadata {
   environment_type: string | null;
   environment_kwargs: Record<string, unknown> | null;
   other_backends: string[] | null;
+  video_path?: string | null;
+  fps?: number | null;
+  num_segments?: number | null;
+  max_frames_per_segment?: number | null;
+  resize?: [number, number] | null;
 }
 
 export interface RLMLogFile {
@@ -60,6 +65,9 @@ export interface LogMetadata {
   finalAnswer: string | null;
   totalExecutionTime: number;
   hasErrors: boolean;
+  isVideoRun: boolean;
+  videoPath: string | null;
+  totalFramesSent: number;
 }
 
 export function extractFinalAnswer(answer: string | [string, string] | null): string | null {

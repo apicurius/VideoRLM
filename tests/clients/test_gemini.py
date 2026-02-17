@@ -1,10 +1,12 @@
 """Tests for the Gemini client."""
 
+import base64
 import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 from dotenv import load_dotenv
+from google.genai import types
 
 from rlm.clients.gemini import GeminiClient
 from rlm.core.types import ModelUsageSummary, UsageSummary
@@ -134,6 +136,151 @@ class TestGeminiClientUnit:
             assert client.model_call_counts["gemini-2.5-flash"] == 1
             assert client.model_input_tokens["gemini-2.5-flash"] == 10
             assert client.model_output_tokens["gemini-2.5-flash"] == 5
+
+
+class TestToPartsMultimodal:
+    """Tests for GeminiClient._to_parts() multimodal conversion."""
+
+    def test_string_to_text_part(self):
+        """String content produces a single Part(text=...)."""
+        parts = GeminiClient._to_parts("hello")
+        assert len(parts) == 1
+        assert parts[0].text == "hello"
+
+    def test_image_dict_to_inline_data_part(self):
+        """Tagged image dict produces Part(inline_data=Blob(...))."""
+        raw_bytes = b"\x89PNG\r\n"
+        b64 = base64.b64encode(raw_bytes).decode()
+        img = {"__image__": True, "data": b64, "mime_type": "image/png"}
+
+        parts = GeminiClient._to_parts(img)
+        assert len(parts) == 1
+        assert parts[0].inline_data is not None
+        assert parts[0].inline_data.mime_type == "image/png"
+        assert parts[0].inline_data.data == raw_bytes
+
+    def test_image_dict_default_mime_type(self):
+        """Image dict without explicit mime_type defaults to image/jpeg."""
+        b64 = base64.b64encode(b"\xff\xd8").decode()
+        img = {"__image__": True, "data": b64}
+
+        parts = GeminiClient._to_parts(img)
+        assert parts[0].inline_data.mime_type == "image/jpeg"
+
+    def test_mixed_list_produces_multiple_parts(self):
+        """A list of text + image dicts yields the correct sequence of parts."""
+        b64 = base64.b64encode(b"\x00\x01").decode()
+        content = [
+            "Describe this image:",
+            {"__image__": True, "data": b64, "mime_type": "image/jpeg"},
+            "What do you see?",
+        ]
+
+        parts = GeminiClient._to_parts(content)
+        assert len(parts) == 3
+        assert parts[0].text == "Describe this image:"
+        assert parts[1].inline_data is not None
+        assert parts[2].text == "What do you see?"
+
+    def test_non_image_dict_recurses_values(self):
+        """A plain dict (no __image__ key) recurses into its values."""
+        b64 = base64.b64encode(b"\x00").decode()
+        content = {"frame": {"__image__": True, "data": b64, "mime_type": "image/jpeg"}}
+
+        parts = GeminiClient._to_parts(content)
+        assert len(parts) == 1
+        assert parts[0].inline_data is not None
+
+    def test_fallback_coerces_to_string(self):
+        """Non-str/dict/list content is coerced to a text Part."""
+        parts = GeminiClient._to_parts(42)
+        assert len(parts) == 1
+        assert parts[0].text == "42"
+
+    def test_prepare_contents_multimodal_message(self):
+        """_prepare_contents with multimodal user content calls _to_parts."""
+        b64 = base64.b64encode(b"\x00").decode()
+        messages = [
+            {"role": "system", "content": "Analyze the image."},
+            {
+                "role": "user",
+                "content": [
+                    "What is in this image?",
+                    {"__image__": True, "data": b64, "mime_type": "image/png"},
+                ],
+            },
+        ]
+
+        with patch("rlm.clients.gemini.genai.Client"):
+            client = GeminiClient(api_key="test-key")
+            contents, system = client._prepare_contents(messages)
+
+        assert system == "Analyze the image."
+        assert len(contents) == 1
+        assert contents[0].role == "user"
+        # The user message should have 2 parts: text + image
+        assert len(contents[0].parts) == 2
+        assert contents[0].parts[0].text == "What is in this image?"
+        assert contents[0].parts[1].inline_data is not None
+
+
+class TestLlmQueryListPrompt:
+    """Test that _llm_query wraps list prompts into a message dict before sending."""
+
+    def test_llm_query_wraps_list_as_message_dict(self):
+        """When prompt is a list, _llm_query wraps it as {'role': 'user', 'content': <list>}."""
+        from rlm.environments.local_repl import LocalREPL
+
+        repl = LocalREPL()
+        repl.lm_handler_address = ("localhost", 9999)
+
+        b64 = base64.b64encode(b"\x00").decode()
+        multimodal_prompt = [
+            "describe this",
+            {"__image__": True, "data": b64, "mime_type": "image/jpeg"},
+        ]
+
+        with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
+            mock_response = MagicMock()
+            mock_response.success = True
+            mock_response.chat_completion.response = "I see an image"
+            mock_send.return_value = mock_response
+
+            result = repl._llm_query(multimodal_prompt)
+
+        # Verify send_lm_request was called
+        mock_send.assert_called_once()
+        sent_request = mock_send.call_args[0][1]
+        # The prompt should have been wrapped into a list of message dicts
+        assert isinstance(sent_request.prompt, list)
+        assert len(sent_request.prompt) == 1
+        assert sent_request.prompt[0]["role"] == "user"
+        assert sent_request.prompt[0]["content"] is multimodal_prompt
+        assert result == "I see an image"
+
+        repl.cleanup()
+
+    def test_llm_query_string_prompt_unchanged(self):
+        """When prompt is a plain string, it is sent as-is (not wrapped)."""
+        from rlm.environments.local_repl import LocalREPL
+
+        repl = LocalREPL()
+        repl.lm_handler_address = ("localhost", 9999)
+
+        with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
+            mock_response = MagicMock()
+            mock_response.success = True
+            mock_response.chat_completion.response = "42"
+            mock_send.return_value = mock_response
+
+            result = repl._llm_query("What is 6*7?")
+
+        sent_request = mock_send.call_args[0][1]
+        assert isinstance(sent_request.prompt, str)
+        assert sent_request.prompt == "What is 6*7?"
+        assert result == "42"
+
+        repl.cleanup()
 
 
 class TestGeminiClientIntegration:

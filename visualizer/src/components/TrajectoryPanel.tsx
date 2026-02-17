@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { RLMIteration, extractFinalAnswer } from '@/lib/types';
+import { containsBase64ImageData, replaceBase64WithPlaceholder } from './VideoFrameViewer';
 
 interface TrajectoryPanelProps {
   iterations: RLMIteration[];
@@ -13,10 +14,15 @@ interface TrajectoryPanelProps {
 
 // Helper to format message content for display
 function formatMessageContent(content: string): string {
-  if (content.length > 8000) {
-    return content.slice(0, 8000) + '\n\n... [content truncated for display]';
+  // Replace raw base64 image data with a clean placeholder
+  let text = containsBase64ImageData(content)
+    ? replaceBase64WithPlaceholder(content)
+    : content;
+
+  if (text.length > 8000) {
+    return text.slice(0, 8000) + '\n\n... [content truncated for display]';
   }
-  return content;
+  return text;
 }
 
 // Role icon component

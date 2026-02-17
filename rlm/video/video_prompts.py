@@ -22,17 +22,30 @@ The REPL environment is initialized with:
 6. An `extract_frames(start_time, end_time, fps=2.0, resize=(720, 540), max_frames=10)` function that extracts frames from the original video for a given time range. Returns a list of image dicts (content parts) that can be passed directly to `llm_query()`. Use this to zoom into specific moments at higher resolution or density than the pre-extracted segment frames.
 
 SEARCH TOOLS (when available):
-7. `search_video(query, top_k=5)` — semantic search over pre-indexed video segments. Returns top matches with start_time, end_time, score, and caption.
+7. `search_video(query, top_k=5, field="summary")` — semantic search over pre-indexed video segments.
+   - field="summary" (default): search visual descriptions
+   - field="action": search by action/activity type
+   - field="all": search across all annotation fields
+   Returns top matches with start_time, end_time, score, caption, and structured annotation (summary, action, actor).
 8. `search_transcript(query)` — search spoken words in the video transcript (ASR). Returns matching entries with timestamps and surrounding context.
 9. `get_transcript(start_time, end_time)` — get the spoken transcript for a specific time range.
-10. `get_scene_list()` — list all detected scene boundaries with descriptions. Use to understand video structure.
+10. `get_scene_list()` — list all detected scene boundaries with structured annotations including action descriptions and actor information.
 {custom_tools_section}
 
 SEARCH-FIRST STRATEGY (preferred when search tools are available):
-1. ORIENT: Call get_scene_list() to understand video structure
-2. SEARCH: Use search_video(query) and/or search_transcript(query) to find relevant moments
+1. ORIENT: Call get_scene_list() to understand video structure and available annotations
+2. SEARCH: Decompose your query into components:
+   - For "what happens" queries: search_video(query, field="action")
+   - For "what does it look like" queries: search_video(query, field="summary")
+   - For general queries: search_video(query, field="all")
 3. INSPECT: Use extract_frames() on found segments, then llm_query() for detailed analysis
-4. VERIFY: Cross-reference across modalities (visual + transcript)
+4. VERIFY: Cross-reference annotations (action, actor, summary) with visual evidence and transcript
+
+Search results include structured annotations with:
+- annotation.summary.brief/detailed: visual descriptions
+- annotation.action.brief/detailed: action descriptions
+- annotation.action.actor: who is performing the action
+Use these fields to quickly assess relevance before extracting frames.
 
 Use this approach instead of linearly scanning all segments when you need to find specific content.
 
@@ -134,9 +147,15 @@ print(final_detail)
 
 The key insight: segment frames give you broad coverage but at lower resolution and density. Use them to LOCATE the moment, then use `extract_frames()` to EXAMINE it in detail.
 
-IMPORTANT: When done, provide your final answer using FINAL(your answer) or FINAL_VAR(variable_name).
+IMPORTANT: When done, provide your final answer. Two options:
+- Option A (preferred): Write `FINAL(your short answer here)` directly — no REPL block needed.
+- Option B (for long answers): First create the variable in a ```repl``` block:
+  ```repl
+  final_answer = "Your detailed answer here..."
+  ```
+  Then in the NEXT step (not the same block), call: FINAL_VAR(final_answer)
 
-WARNING - COMMON MISTAKE: FINAL_VAR retrieves an EXISTING variable. Create and assign it in a ```repl``` block FIRST, then call FINAL_VAR in a SEPARATE step.
+CRITICAL: FINAL_VAR only retrieves an EXISTING variable. You MUST assign it in a ```repl``` block FIRST. Never write FINAL_VAR for a variable that doesn't exist yet.
 
 Think step by step: first inspect the context structure, then plan your analysis strategy, execute it using the REPL, and provide a clear answer to the original query.
 """

@@ -20,7 +20,7 @@ vrlm = VideoRLM(
 
 result = vrlm.completion(
     "/Users/oerdogan/LVU/test_video.mp4",
-    prompt="What is the most striking or visually memorable moment in this video? First scan all segments to find it, then use extract_frames() to zoom in and describe the moment in vivid detail - colors, expressions, objects, text on screen, everything you can see.",
+    prompt="What is the most important concept explained in this video? Use the search tools to find the key moments, then zoom in to describe them in detail.",
 )
 
 print("\n" + "=" * 60)

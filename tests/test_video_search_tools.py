@@ -40,6 +40,7 @@ from rlm.video.video_search_tools import (
 def _make_index(
     segments=None,
     embeddings=None,
+    action_embeddings=None,
     transcript=None,
     embed_fn=None,
 ):
@@ -47,6 +48,7 @@ def _make_index(
     index = MagicMock()
     index.segments = segments or []
     index.embeddings = embeddings
+    index.action_embeddings = action_embeddings
     index.transcript = transcript or []
     index.embed_fn = embed_fn
     return index
@@ -110,6 +112,112 @@ class TestSearchVideo:
 
         results = make_search_video(index)["tool"]("q", top_k=2)
         assert len(results) == 2
+
+    def test_field_action_uses_action_embeddings(self):
+        """field='action' should search against action_embeddings."""
+        summary_emb = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        action_emb = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "seg0"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "seg1"},
+        ]
+        # Query close to action_emb[0]
+        embed_fn = MagicMock(return_value=np.array([0.9, 0.1, 0.0]))
+        index = _make_index(
+            segments=segments, embeddings=summary_emb,
+            action_embeddings=action_emb, embed_fn=embed_fn,
+        )
+
+        results = make_search_video(index)["tool"]("running", top_k=2, field="action")
+        assert results[0]["caption"] == "seg0"
+        assert results[0]["score"] > results[1]["score"]
+
+    def test_field_all_merges_max_score(self):
+        """field='all' should merge summary and action by max score."""
+        summary_emb = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        action_emb = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "seg0"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "seg1"},
+        ]
+        # Query close to [1, 0, 0] — seg0 wins via summary, seg1 wins via action
+        embed_fn = MagicMock(return_value=np.array([1.0, 0.0, 0.0]))
+        index = _make_index(
+            segments=segments, embeddings=summary_emb,
+            action_embeddings=action_emb, embed_fn=embed_fn,
+        )
+
+        results = make_search_video(index)["tool"]("q", top_k=2, field="all")
+        # Both segments have a max score of 1.0 (seg0 via summary, seg1 via action)
+        assert len(results) == 2
+        assert abs(results[0]["score"] - results[1]["score"]) < 0.01
+
+    def test_result_includes_annotation(self):
+        """Results should include the annotation dict when present."""
+        annotation = {
+            "summary": {"brief": "A cat", "detailed": "A cat sitting."},
+            "action": {"brief": "sitting", "detailed": "sitting still", "actor": "cat"},
+        }
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "A cat", "annotation": annotation},
+        ]
+        embeddings = np.array([[1.0, 0.0]])
+        embed_fn = MagicMock(return_value=np.array([1.0, 0.0]))
+        index = _make_index(segments=segments, embeddings=embeddings, embed_fn=embed_fn)
+
+        results = make_search_video(index)["tool"]("cat", top_k=1)
+        assert results[0]["annotation"] == annotation
+
+    def test_field_action_fallback_when_action_embeddings_none(self):
+        """field='action' falls back to summary embeddings when action_embeddings is None."""
+        summary_emb = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "seg0"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "seg1"},
+        ]
+        embed_fn = MagicMock(return_value=np.array([0.9, 0.1, 0.0]))
+        index = _make_index(
+            segments=segments, embeddings=summary_emb,
+            action_embeddings=None, embed_fn=embed_fn,
+        )
+
+        # Should not crash — falls back to summary embeddings
+        results = make_search_video(index)["tool"]("q", top_k=2, field="action")
+        assert len(results) == 2
+
+    def test_field_summary_default_uses_embeddings(self):
+        """field='summary' (default) uses index.embeddings."""
+        summary_emb = np.array([[1.0, 0.0], [0.0, 1.0]])
+        action_emb = np.array([[0.0, 1.0], [1.0, 0.0]])
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "seg0"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "seg1"},
+        ]
+        # Query aligned with summary_emb[0]
+        embed_fn = MagicMock(return_value=np.array([1.0, 0.0]))
+        index = _make_index(
+            segments=segments, embeddings=summary_emb,
+            action_embeddings=action_emb, embed_fn=embed_fn,
+        )
+
+        # Default field="summary": seg0 should rank highest
+        results = make_search_video(index)["tool"]("q", top_k=2)
+        assert results[0]["caption"] == "seg0"
+
+    def test_caption_field_always_present(self):
+        """Backward compat: results always include a caption field."""
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "hello"},
+        ]
+        embeddings = np.array([[1.0, 0.0]])
+        embed_fn = MagicMock(return_value=np.array([1.0, 0.0]))
+        index = _make_index(segments=segments, embeddings=embeddings, embed_fn=embed_fn)
+
+        results = make_search_video(index)["tool"]("q", top_k=1)
+        assert "caption" in results[0]
+        assert results[0]["caption"] == "hello"
 
 
 # ---------------------------------------------------------------
@@ -228,6 +336,19 @@ class TestGetSceneList:
         index = _make_index(segments=segments)
         scenes = make_get_scene_list(index)["tool"]()
         assert scenes[0]["caption"] == ""
+
+    def test_returns_annotations(self):
+        """get_scene_list should include annotation when present."""
+        annotation = {
+            "summary": {"brief": "A cat", "detailed": "A cat sitting."},
+            "action": {"brief": "sitting", "detailed": "sitting still", "actor": "cat"},
+        }
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "A cat", "annotation": annotation},
+        ]
+        index = _make_index(segments=segments)
+        scenes = make_get_scene_list(index)["tool"]()
+        assert scenes[0]["annotation"] == annotation
 
     def test_description_present(self):
         index = _make_index()

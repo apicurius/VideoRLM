@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 
@@ -41,6 +41,9 @@ class VideoRLM:
         verbose: Print verbose output.
         custom_tools: Custom tools available in the REPL.
         custom_sub_tools: Custom tools for sub-agents.
+        refine_fn: Optional function ``(draft, context) -> str`` for
+            Self-Refine of segment annotations.  Passed through to
+            :meth:`VideoIndexer.index_video`.
     """
 
     def __init__(
@@ -70,6 +73,7 @@ class VideoRLM:
         embedding_model: str | None = None,
         whisper_model: str = "base",
         transcript_path: str | None = None,
+        refine_fn: Callable | None = None,
     ):
         self.loader = VideoLoader(fps=fps, max_frames=max_frames, resize=resize)
         self.context_builder = VideoContext(
@@ -84,6 +88,7 @@ class VideoRLM:
         self.embedding_model = embedding_model
         self.whisper_model = whisper_model
         self.transcript_path = transcript_path
+        self.refine_fn = refine_fn
 
         self.rlm = RLM(
             backend=backend,
@@ -150,10 +155,11 @@ class VideoRLM:
             )
 
             indexer = VideoIndexer(
-                embedding_model=self.embedding_model or "jinaai/jina-clip-v2",
+                embedding_model=self.embedding_model or "google/siglip2-base-patch16-256",
             )
             video_index = indexer.index_video(
                 loaded_video,
+                refine_fn=self.refine_fn,
                 whisper_model=self.whisper_model,
                 transcript_path=self.transcript_path,
             )

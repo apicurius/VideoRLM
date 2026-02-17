@@ -8,6 +8,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { cn } from '@/lib/utils';
 import { CodeBlock as CodeBlockType } from '@/lib/types';
 import { CodeWithLineNumbers } from './CodeWithLineNumbers';
+import { isImageFrame, extractImageFrames, VideoFrameViewer } from './VideoFrameViewer';
 
 interface CodeBlockProps {
   block: CodeBlockType;
@@ -128,9 +129,11 @@ export function CodeBlock({ block, index }: CodeBlockProps) {
                       <span className="text-sky-600 dark:text-sky-400">{key}</span>
                       <span className="text-muted-foreground mx-1">=</span>
                       <span className="text-amber-600 dark:text-amber-400 truncate">
-                        {typeof value === 'string' 
-                          ? value.length > 30 ? value.slice(0, 30) + '...' : value
-                          : JSON.stringify(value).slice(0, 30)}
+                        {isImageFrame(value)
+                          ? '[image frame]'
+                          : typeof value === 'string'
+                            ? value.length > 30 ? value.slice(0, 30) + '...' : value
+                            : JSON.stringify(value).slice(0, 30)}
                       </span>
                     </div>
                   ))}
@@ -163,11 +166,28 @@ export function CodeBlock({ block, index }: CodeBlockProps) {
                         </div>
                       </div>
                       <div className="text-xs text-muted-foreground mb-1">Prompt:</div>
-                      <div className="text-sm bg-muted rounded p-2 mb-2 max-h-24 overflow-y-auto border border-border">
-                        {typeof call.prompt === 'string' 
-                          ? call.prompt.slice(0, 500) + (call.prompt.length > 500 ? '...' : '')
-                          : JSON.stringify(call.prompt).slice(0, 500)}
-                      </div>
+                      {(() => {
+                        const frames = extractImageFrames(call.prompt);
+                        if (frames.length > 0) {
+                          return (
+                            <div className="space-y-2 mb-2">
+                              <VideoFrameViewer frames={frames} thumbSize={80} />
+                              <div className="text-sm bg-muted rounded p-2 max-h-24 overflow-y-auto border border-border">
+                                {typeof call.prompt === 'string'
+                                  ? call.prompt.slice(0, 500) + (call.prompt.length > 500 ? '...' : '')
+                                  : JSON.stringify(call.prompt, (_, v) => isImageFrame(v) ? { __image__: true, data: '[base64]' } : v).slice(0, 500)}
+                              </div>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="text-sm bg-muted rounded p-2 mb-2 max-h-24 overflow-y-auto border border-border">
+                            {typeof call.prompt === 'string'
+                              ? call.prompt.slice(0, 500) + (call.prompt.length > 500 ? '...' : '')
+                              : JSON.stringify(call.prompt).slice(0, 500)}
+                          </div>
+                        );
+                      })()}
                       <div className="text-xs text-muted-foreground mb-1">Response:</div>
                       <div className="text-sm bg-muted rounded p-2 max-h-24 overflow-y-auto border border-border">
                         {call.response.slice(0, 500) + (call.response.length > 500 ? '...' : '')}

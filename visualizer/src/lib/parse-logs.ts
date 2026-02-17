@@ -26,6 +26,11 @@ function getDefaultConfig(): RLMConfigMetadata {
     environment_type: null,
     environment_kwargs: null,
     other_backends: null,
+    video_path: null,
+    fps: null,
+    num_segments: null,
+    max_frames_per_segment: null,
+    resize: null,
   };
 }
 
@@ -54,6 +59,11 @@ export function parseJSONL(content: string): ParsedJSONL {
           environment_type: parsed.environment_type ?? null,
           environment_kwargs: parsed.environment_kwargs ?? null,
           other_backends: parsed.other_backends ?? null,
+          video_path: parsed.video_path ?? null,
+          fps: parsed.fps ?? null,
+          num_segments: parsed.num_segments ?? null,
+          max_frames_per_segment: parsed.max_frames_per_segment ?? null,
+          resize: parsed.resize ?? null,
         };
       } else {
         // This is an iteration entry
@@ -118,16 +128,47 @@ export function extractContextQuestion(iterations: RLMIteration[]): string {
   return 'Context available in REPL environment';
 }
 
-export function computeMetadata(iterations: RLMIteration[]): LogMetadata {
+// Count __image__ occurrences in a string (serialized prompt/call data)
+export function countImageTags(text: string): number {
+  let count = 0;
+  let idx = 0;
+  while ((idx = text.indexOf('"__image__"', idx)) !== -1) {
+    count++;
+    idx += 11;
+  }
+  return count;
+}
+
+export function computeMetadata(iterations: RLMIteration[], config: RLMConfigMetadata): LogMetadata {
   let totalCodeBlocks = 0;
   let totalSubLMCalls = 0;
   let totalExecutionTime = 0;
   let hasErrors = false;
   let finalAnswer: string | null = null;
-  
+  let totalFramesSent = 0;
+
+  // Detect video run: check config for video_path or video-related backend_kwargs,
+  // or check if system prompt mentions video analysis
+  let isVideoRun = false;
+  if (config.video_path) {
+    isVideoRun = true;
+  } else if (config.backend_kwargs) {
+    const bkStr = JSON.stringify(config.backend_kwargs);
+    if (bkStr.includes('video') || bkStr.includes('fps') || bkStr.includes('segment')) {
+      isVideoRun = true;
+    }
+  }
+  // Also check the system prompt of the first iteration for video-related content
+  if (!isVideoRun && iterations.length > 0) {
+    const systemMsg = iterations[0].prompt.find(m => m.role === 'system');
+    if (systemMsg?.content && /analyzing a video|video.*frames|extracted frames/i.test(systemMsg.content)) {
+      isVideoRun = true;
+    }
+  }
+
   for (const iter of iterations) {
     totalCodeBlocks += iter.code_blocks.length;
-    
+
     // Use iteration_time if available, otherwise sum code block times
     if (iter.iteration_time != null) {
       totalExecutionTime += iter.iteration_time;
@@ -138,7 +179,7 @@ export function computeMetadata(iterations: RLMIteration[]): LogMetadata {
         }
       }
     }
-    
+
     for (const block of iter.code_blocks) {
       if (block.result) {
         if (block.result.stderr) {
@@ -146,15 +187,35 @@ export function computeMetadata(iterations: RLMIteration[]): LogMetadata {
         }
         if (block.result.rlm_calls) {
           totalSubLMCalls += block.result.rlm_calls.length;
+          // Count frames sent in sub-LM calls
+          if (isVideoRun) {
+            for (const call of block.result.rlm_calls) {
+              const promptStr = typeof call.prompt === 'string'
+                ? call.prompt
+                : JSON.stringify(call.prompt);
+              totalFramesSent += countImageTags(promptStr);
+            }
+          }
         }
       }
     }
-    
+
+    // Count frames in iteration prompts
+    if (isVideoRun) {
+      for (const msg of iter.prompt) {
+        if (typeof msg.content === 'string') {
+          totalFramesSent += countImageTags(msg.content);
+        } else if (typeof msg.content === 'object') {
+          totalFramesSent += countImageTags(JSON.stringify(msg.content));
+        }
+      }
+    }
+
     if (iter.final_answer) {
       finalAnswer = extractFinalAnswer(iter.final_answer);
     }
   }
-  
+
   return {
     totalIterations: iterations.length,
     totalCodeBlocks,
@@ -163,12 +224,15 @@ export function computeMetadata(iterations: RLMIteration[]): LogMetadata {
     finalAnswer,
     totalExecutionTime,
     hasErrors,
+    isVideoRun,
+    videoPath: config.video_path ?? null,
+    totalFramesSent,
   };
 }
 
 export function parseLogFile(fileName: string, content: string): RLMLogFile {
   const { iterations, config } = parseJSONL(content);
-  const metadata = computeMetadata(iterations);
+  const metadata = computeMetadata(iterations, config);
   
   return {
     fileName,

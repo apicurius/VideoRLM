@@ -19,29 +19,59 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
     """Semantic search over video segment embeddings.
 
     Embeds the query text with the same model used during indexing and returns
-    the *top_k* most similar segments by cosine similarity.
+    the *top_k* most similar segments by cosine similarity.  Supports
+    field-targeted search over summary or action embeddings.
     """
     from sklearn.metrics.pairwise import cosine_similarity
 
-    def search_video(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+    def _search_matrix(
+        query_emb: np.ndarray, matrix: np.ndarray,
+    ) -> np.ndarray:
+        """Return per-segment cosine similarity scores."""
+        return cosine_similarity(query_emb, matrix)[0]
+
+    def search_video(
+        query: str, top_k: int = 5, field: str = "summary",
+    ) -> list[dict[str, Any]]:
         """Search video segments by semantic similarity to *query*.
 
         Args:
             query: Natural-language description of what to find.
             top_k: Number of results to return.
+            field: Embedding field to search against.
+
+                - ``"summary"`` (default): search summary.brief embeddings.
+                - ``"action"``: search action.brief embeddings.
+                - ``"all"``: search both and merge by max score.
 
         Returns:
-            List of dicts with ``start_time``, ``end_time``, ``score``, and
-            ``caption`` for each matching segment, sorted by descending score.
+            List of dicts with ``start_time``, ``end_time``, ``score``,
+            ``caption``, and ``annotation`` for each matching segment,
+            sorted by descending score.
         """
-        if index.embeddings is None or len(index.embeddings) == 0:
+        # Resolve which embedding matrices to use
+        summary_emb = index.embeddings
+        action_emb = index.action_embeddings if index.action_embeddings is not None else index.embeddings
+
+        if field == "summary":
+            matrices = [summary_emb]
+        elif field == "action":
+            matrices = [action_emb]
+        else:  # "all"
+            matrices = [summary_emb, action_emb]
+
+        # Filter out None matrices
+        matrices = [m for m in matrices if m is not None and len(m) > 0]
+        if not matrices:
             return []
 
-        # Encode query with the same model stored in the index
         query_emb = index.embed_fn(query)
         query_emb = np.asarray(query_emb).reshape(1, -1)
 
-        scores = cosine_similarity(query_emb, index.embeddings)[0]
+        # Compute scores across all requested matrices, take max per segment
+        all_scores = np.stack([_search_matrix(query_emb, m) for m in matrices])
+        scores = np.max(all_scores, axis=0)
+
         top_indices = np.argsort(scores)[::-1][:top_k]
 
         results = []
@@ -53,6 +83,7 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                     "end_time": seg["end_time"],
                     "score": round(float(scores[idx]), 4),
                     "caption": seg.get("caption", ""),
+                    "annotation": seg.get("annotation", {}),
                 }
             )
         return results
@@ -60,9 +91,10 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
     return {
         "tool": search_video,
         "description": (
-            "search_video(query, top_k=5) -> list[dict]. "
-            "Semantic search over pre-indexed video segments. Returns the top_k "
-            "most relevant segments with start_time, end_time, score, and caption."
+            'search_video(query, top_k=5, field="summary") -> list[dict]. '
+            "Semantic search over pre-indexed video segments. field can be "
+            '"summary" (default), "action", or "all". Returns top_k segments '
+            "with start_time, end_time, score, caption, and annotation."
         ),
     }
 
@@ -150,7 +182,7 @@ def make_get_scene_list(index: VideoIndex) -> dict[str, Any]:
 
         Returns:
             List of dicts with ``scene_index``, ``start_time``, ``end_time``,
-            and ``caption`` for each scene.
+            ``caption``, and ``annotation`` for each scene.
         """
         scenes = []
         for i, seg in enumerate(index.segments):
@@ -160,6 +192,7 @@ def make_get_scene_list(index: VideoIndex) -> dict[str, Any]:
                     "start_time": seg["start_time"],
                     "end_time": seg["end_time"],
                     "caption": seg.get("caption", ""),
+                    "annotation": seg.get("annotation", {}),
                 }
             )
         return scenes
@@ -169,6 +202,7 @@ def make_get_scene_list(index: VideoIndex) -> dict[str, Any]:
         "description": (
             "get_scene_list() -> list[dict]. "
             "List all detected scene boundaries with scene_index, start_time, "
-            "end_time, and caption. Use this to understand the video structure."
+            "end_time, caption, and annotation. Use this to understand the "
+            "video structure."
         ),
     }

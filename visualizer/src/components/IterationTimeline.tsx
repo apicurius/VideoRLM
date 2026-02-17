@@ -5,36 +5,58 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { RLMIteration, extractFinalAnswer } from '@/lib/types';
+import { countImageTags } from '@/lib/parse-logs';
 
 interface IterationTimelineProps {
   iterations: RLMIteration[];
   selectedIteration: number;
   onSelectIteration: (index: number) => void;
+  isVideoRun?: boolean;
 }
 
-function getIterationStats(iteration: RLMIteration) {
+function getIterationStats(iteration: RLMIteration, isVideoRun?: boolean) {
   let totalSubCalls = 0;
   let codeExecTime = 0;
   let hasError = false;
-  
+  let imageCount = 0;
+
   for (const block of iteration.code_blocks) {
     if (block.result) {
       codeExecTime += block.result.execution_time || 0;
       if (block.result.stderr) hasError = true;
       if (block.result.rlm_calls) {
         totalSubCalls += block.result.rlm_calls.length;
+        if (isVideoRun) {
+          for (const call of block.result.rlm_calls) {
+            const promptStr = typeof call.prompt === 'string'
+              ? call.prompt
+              : JSON.stringify(call.prompt);
+            imageCount += countImageTags(promptStr);
+          }
+        }
       }
     }
   }
-  
+
+  // Count images in iteration prompts
+  if (isVideoRun) {
+    for (const msg of iteration.prompt) {
+      if (typeof msg.content === 'string') {
+        imageCount += countImageTags(msg.content);
+      } else if (typeof msg.content === 'object') {
+        imageCount += countImageTags(JSON.stringify(msg.content));
+      }
+    }
+  }
+
   // Use iteration_time if available, otherwise fall back to code execution time
   const iterTime = iteration.iteration_time ?? codeExecTime;
-  
+
   // Estimate token counts from prompt (rough estimation)
   const promptText = iteration.prompt.map(m => m.content).join('');
   const estimatedInputTokens = Math.round(promptText.length / 4);
   const estimatedOutputTokens = Math.round(iteration.response.length / 4);
-  
+
   return {
     codeBlocks: iteration.code_blocks.length,
     subCalls: totalSubCalls,
@@ -43,13 +65,15 @@ function getIterationStats(iteration: RLMIteration) {
     hasFinal: iteration.final_answer !== null,
     inputTokens: estimatedInputTokens,
     outputTokens: estimatedOutputTokens,
+    imageCount,
   };
 }
 
-export function IterationTimeline({ 
-  iterations, 
-  selectedIteration, 
-  onSelectIteration 
+export function IterationTimeline({
+  iterations,
+  selectedIteration,
+  onSelectIteration,
+  isVideoRun,
 }: IterationTimelineProps) {
   const selectedRef = useRef<HTMLDivElement>(null);
   
@@ -86,7 +110,7 @@ export function IterationTimeline({
       <ScrollArea className="w-full">
         <div className="flex gap-2 px-3 pb-3">
           {iterations.map((iteration, idx) => {
-            const stats = getIterationStats(iteration);
+            const stats = getIterationStats(iteration, isVideoRun);
             const isSelected = idx === selectedIteration;
             const finalAnswer = extractFinalAnswer(iteration.final_answer);
             const responseSnippet = iteration.response.slice(0, 60).replace(/\n/g, ' ');
@@ -145,6 +169,11 @@ export function IterationTimeline({
                       {stats.subCalls > 0 && (
                         <span className="text-[10px] text-fuchsia-600 dark:text-fuchsia-400">
                           {stats.subCalls} sub
+                        </span>
+                      )}
+                      {stats.imageCount > 0 && (
+                        <span className="text-[10px] text-violet-600 dark:text-violet-400">
+                          {stats.imageCount} img
                         </span>
                       )}
                       <span className="text-[10px] text-muted-foreground ml-auto">

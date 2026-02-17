@@ -65,10 +65,31 @@ export function LogViewer({ logFile, onBack }: LogViewerProps) {
                 <h1 className="font-semibold flex items-center gap-2 text-sm">
                   <span className="text-primary">◈</span>
                   {logFile.fileName}
+                  {metadata.isVideoRun && (
+                    <Badge className="bg-violet-500/20 text-violet-600 dark:text-violet-400 border-violet-500/30 text-[10px] px-1.5 py-0 h-4 ml-1">
+                      <svg className="w-2.5 h-2.5 mr-0.5 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                      Video
+                    </Badge>
+                  )}
                 </h1>
                 <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
                   {config.root_model ?? 'Unknown model'} • {config.backend ?? 'Unknown backend'} • {config.environment_type ?? 'Unknown env'}
+                  {metadata.isVideoRun && (
+                    <>
+                      {config.fps != null && ` • ${config.fps} fps`}
+                      {config.num_segments != null && ` • ${config.num_segments} segments`}
+                      {config.max_frames_per_segment != null && ` • max ${config.max_frames_per_segment} frames/seg`}
+                      {config.resize && ` • ${config.resize[0]}×${config.resize[1]}`}
+                    </>
+                  )}
                 </p>
+                {metadata.isVideoRun && metadata.videoPath && (
+                  <p className="text-[10px] text-violet-600 dark:text-violet-400 font-mono mt-0.5 truncate max-w-md" title={metadata.videoPath}>
+                    {metadata.videoPath.split('/').pop()}
+                  </p>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-3">
@@ -139,6 +160,15 @@ export function LogViewer({ logFile, onBack }: LogViewerProps) {
               icon="⏱"
               variant="yellow"
             />
+            {metadata.isVideoRun && (
+              <StatsCard
+                label="Frames"
+                value={metadata.totalFramesSent}
+                icon="▦"
+                variant="magenta"
+                subtext={config.num_segments != null ? `${config.num_segments} segments` : undefined}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -148,6 +178,7 @@ export function LogViewer({ logFile, onBack }: LogViewerProps) {
         iterations={iterations}
         selectedIteration={selectedIteration}
         onSelectIteration={setSelectedIteration}
+        isVideoRun={metadata.isVideoRun}
       />
 
       {/* Main Content - Resizable Split View */}

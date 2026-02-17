@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import tempfile
@@ -23,6 +24,7 @@ class VideoIndex:
 
     segments: list[dict] = field(default_factory=list)
     embeddings: np.ndarray | None = None
+    action_embeddings: np.ndarray | None = None
     transcript: list[dict] = field(default_factory=list)
     scene_boundaries: list[float] = field(default_factory=list)
     embed_fn: Any = None
@@ -41,26 +43,38 @@ class VideoIndexer:
 
     def __init__(
         self,
-        embedding_model: str = "jinaai/jina-clip-v2",
+        embedding_model: str = "google/siglip2-base-patch16-256",
         device: str = "auto",
     ):
         self._embedding_model_name = embedding_model
         self._device = device
         self._model = None
+        self._processor = None
 
     # ------------------------------------------------------------------
     # Lazy model loading
     # ------------------------------------------------------------------
 
     def _ensure_model(self) -> None:
-        """Lazily load the sentence-transformers model on first use."""
+        """Lazily load the SigLIP2 model on first use."""
         if self._model is not None:
             return
-        from sentence_transformers import SentenceTransformer
+        import torch
+        from transformers import AutoModel, GemmaTokenizerFast, SiglipImageProcessor
 
-        device = self._device if self._device != "auto" else None
-        self._model = SentenceTransformer(self._embedding_model_name, device=device)
-        logger.info("Loaded embedding model %s", self._embedding_model_name)
+        device = self._device
+        if device == "auto":
+            device = "mps" if torch.backends.mps.is_available() else (
+                "cuda" if torch.cuda.is_available() else "cpu"
+            )
+
+        # AutoProcessor/AutoTokenizer crash with SigLIP2 on transformers >=5.2
+        # due to a tokenizer registration bug. Load components explicitly.
+        self._image_processor = SiglipImageProcessor.from_pretrained(self._embedding_model_name)
+        self._tokenizer = GemmaTokenizerFast.from_pretrained(self._embedding_model_name)
+        self._model = AutoModel.from_pretrained(self._embedding_model_name).eval().to(device)
+        self._torch_device = device
+        logger.info("Loaded embedding model %s on %s", self._embedding_model_name, device)
 
     # ------------------------------------------------------------------
     # Public API
@@ -71,6 +85,7 @@ class VideoIndexer:
         loaded_video: LoadedVideo,
         *,
         caption_fn: Callable | None = None,
+        refine_fn: Callable | None = None,
         whisper_model: str = "base",
         transcript_path: str | None = None,
     ) -> VideoIndex:
@@ -78,9 +93,12 @@ class VideoIndexer:
 
         Args:
             loaded_video: A :class:`LoadedVideo` returned by :class:`VideoLoader`.
-            caption_fn: Optional function ``(list[np.ndarray]) -> str`` that
-                produces a text caption for a list of frames.  If *None*, captions
-                are left empty.
+            caption_fn: Optional function that produces a caption for a list of
+                frames.  May return a plain string (backward-compatible) or a
+                structured annotation dict with ``summary`` and ``action`` keys.
+            refine_fn: Optional function ``(draft: str, context: str) -> str``
+                used for Self-Refine.  When provided, annotations are iteratively
+                refined for 3 rounds using neighbor and transcript context.
             whisper_model: Faster-whisper model size to use for ASR.
             transcript_path: Path to a pre-existing transcript JSON/SRT file.
                 When provided, Whisper ASR is skipped.
@@ -95,38 +113,61 @@ class VideoIndexer:
         # 1. Compute per-frame timestamps
         timestamps = [i / fps for i in range(len(frames))]
 
-        # 2. Detect scene boundaries (uses the same embedding model)
+        # 2. Detect scene boundaries (uses the CLIP embedding model)
         self._ensure_model()
         scenes = detect_scenes(frames, timestamps, embed_fn=self._encode_frames)
         scene_boundaries = [start for start, _end in scenes]
 
-        # 3. Build segment dicts -— prefer existing segments, fall back to scenes
+        # 3. Build segment dicts — prefer existing segments, fall back to scenes
         if loaded_video.segments:
             segment_infos = self._segments_from_loaded(loaded_video)
         else:
             segment_infos = self._segments_from_scenes(scenes, frames, timestamps)
 
-        # 4. Caption each segment (if a caption function was provided)
-        if caption_fn is not None:
-            for seg in segment_infos:
-                seg["caption"] = caption_fn(seg.pop("_frames"))
-        else:
-            for seg in segment_infos:
-                seg.pop("_frames", None)
-
-        # 5. Embed captions
-        embeddings = self._embed_captions(segment_infos)
-
-        # 6. Transcript (Whisper ASR or pre-existing file)
+        # 4. Transcript (Whisper ASR or pre-existing file) — run before captioning
+        #    so ASR context can be injected into caption prompts
         transcript = self._get_transcript(
             loaded_video.metadata.path,
             whisper_model=whisper_model,
             transcript_path=transcript_path,
         )
 
+        # 5. Caption each segment (if a caption function was provided)
+        if caption_fn is not None:
+            for seg in segment_infos:
+                seg_frames = seg.pop("_frames")
+                # ASR context injection: prepend transcript text for this segment
+                transcript_text = self._transcript_for_range(
+                    transcript, seg["start_time"], seg["end_time"],
+                )
+                if transcript_text:
+                    seg_frames = [f"[transcript] {transcript_text}"] + seg_frames
+
+                result = caption_fn(seg_frames)
+                # Backward compat: wrap plain strings into structured annotation
+                if isinstance(result, str):
+                    annotation = {
+                        "summary": {"brief": result, "detailed": result},
+                        "action": {"brief": "", "detailed": "", "actor": None},
+                    }
+                else:
+                    annotation = result
+                seg["annotation"] = annotation
+                seg["caption"] = annotation.get("summary", {}).get("brief", "")
+        else:
+            for seg in segment_infos:
+                seg.pop("_frames", None)
+
+        # 6. Self-Refine annotations
+        self._refine_annotations(segment_infos, transcript, refine_fn)
+
+        # 7. Embed captions
+        embeddings, action_embeddings = self._embed_captions(segment_infos)
+
         return VideoIndex(
             segments=segment_infos,
             embeddings=embeddings,
+            action_embeddings=action_embeddings,
             transcript=transcript,
             scene_boundaries=scene_boundaries,
             embed_fn=self._encode_query,
@@ -172,32 +213,117 @@ class VideoIndexer:
             )
         return results
 
-    def _embed_captions(self, segments: list[dict]) -> np.ndarray | None:
-        """Encode segment captions into an (N, D) embedding matrix."""
+    def _embed_captions(
+        self, segments: list[dict],
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Encode segment captions and action briefs into embedding matrices."""
         captions = [seg.get("caption", "") for seg in segments]
-        if not any(captions):
-            return None
+        actions = [
+            seg.get("annotation", {}).get("action", {}).get("brief", "")
+            for seg in segments
+        ]
 
         self._ensure_model()
-        embeddings = self._model.encode(captions, show_progress_bar=False)
-        return np.asarray(embeddings)
+
+        embeddings = None
+        if any(captions):
+            embeddings = self._encode_texts(captions)
+
+        action_embeddings = None
+        if any(actions):
+            action_embeddings = self._encode_texts(actions)
+
+        return embeddings, action_embeddings
+
+    @staticmethod
+    def _transcript_for_range(
+        transcript: list[dict], start: float, end: float,
+    ) -> str:
+        """Return concatenated transcript text overlapping a time range."""
+        return " ".join(
+            e["text"]
+            for e in transcript
+            if e["end_time"] >= start and e["start_time"] <= end
+        )
+
+    def _refine_annotations(
+        self,
+        segments: list[dict],
+        transcript: list[dict],
+        refine_fn: Callable | None,
+    ) -> None:
+        """Iteratively refine segment annotations using the Self-Refine pattern.
+
+        ``refine_fn`` signature: ``(draft: str, context: str) -> str``.
+        Runs 3 rounds of refinement, passing the prior annotation together with
+        neighbor context and overlapping transcript text.
+        """
+        if refine_fn is None:
+            return
+        for _round in range(3):
+            for i, seg in enumerate(segments):
+                neighbors = segments[max(0, i - 1) : i + 2]
+                neighbor_text = " | ".join(
+                    n.get("caption", "") for n in neighbors if n is not seg
+                )
+                transcript_text = self._transcript_for_range(
+                    transcript, seg["start_time"], seg["end_time"],
+                )
+                context = f"Neighbors: {neighbor_text}\nTranscript: {transcript_text}"
+                draft = json.dumps(seg.get("annotation", {}))
+                refined = refine_fn(draft, context)
+                try:
+                    seg["annotation"] = json.loads(refined)
+                    seg["caption"] = (
+                        seg["annotation"]
+                        .get("summary", {})
+                        .get("brief", seg.get("caption", ""))
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    pass  # keep existing annotation if refinement fails
 
     def _encode_frames(self, frames: list[np.ndarray]) -> np.ndarray:
         """Encode a batch of BGR frames into an (N, D) embedding matrix.
 
         Used by :func:`detect_scenes` for semantic scene boundary detection.
-        Converts frames from BGR to RGB before encoding, as sentence-transformers
-        image encoders expect RGB input.
+        Converts frames from BGR to RGB PIL Images before encoding.
         """
+        import torch
         from PIL import Image
 
         images = [Image.fromarray(f[:, :, ::-1]) for f in frames]  # BGR → RGB
-        return np.asarray(self._model.encode(images, show_progress_bar=False))
+
+        # Process in batches of 32 to avoid OOM
+        all_embs = []
+        batch_size = 32
+        for i in range(0, len(images), batch_size):
+            batch = images[i : i + batch_size]
+            inputs = self._image_processor(images=batch, return_tensors="pt").to(self._torch_device)
+            with torch.no_grad():
+                out = self._model.get_image_features(**inputs)
+                emb = out.pooler_output if hasattr(out, "pooler_output") else out
+                emb = emb / emb.norm(p=2, dim=-1, keepdim=True)
+            all_embs.append(emb.cpu().numpy())
+
+        return np.concatenate(all_embs, axis=0)
+
+    def _encode_texts(self, texts: list[str]) -> np.ndarray:
+        """Encode a list of text strings into an (N, D) embedding matrix."""
+        import torch
+
+        inputs = self._tokenizer(
+            texts, padding="max_length", max_length=64, return_tensors="pt",
+        ).to(self._torch_device)
+        with torch.no_grad():
+            out = self._model.get_text_features(**inputs)
+            emb = out.pooler_output if hasattr(out, "pooler_output") else out
+            emb = emb / emb.norm(p=2, dim=-1, keepdim=True)
+        return emb.cpu().numpy()
 
     def _encode_query(self, text: str) -> np.ndarray:
         """Encode a single query string — stored as ``embed_fn`` on the index."""
         self._ensure_model()
-        return np.asarray(self._model.encode(text, show_progress_bar=False))
+        return self._encode_texts([text])[0]
 
     def _get_transcript(
         self,
@@ -215,8 +341,6 @@ class VideoIndexer:
     @staticmethod
     def _load_transcript_file(path: str) -> list[dict]:
         """Load a transcript from a JSON file."""
-        import json
-
         try:
             data = json.loads(Path(path).read_text())
             if isinstance(data, list):

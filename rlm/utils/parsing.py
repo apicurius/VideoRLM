@@ -50,6 +50,11 @@ def find_final_answer(text: str, environment: "BaseEnv | None" = None) -> str | 
             final_answer = result.stdout.strip()
             if final_answer == "":
                 final_answer = result.stderr.strip() or ""
+            # If FINAL_VAR returned an error (variable not found), don't treat
+            # the error message as the answer — return None so _default_answer
+            # can synthesize a proper response from the conversation history.
+            if final_answer.startswith("Error: Variable"):
+                return None
             return final_answer
         return None
 
