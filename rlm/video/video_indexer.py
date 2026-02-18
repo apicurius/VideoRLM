@@ -171,9 +171,20 @@ class VideoIndexer:
         try:
             from sentence_transformers import SentenceTransformer
 
+            # SentenceTransformer doesn't accept "auto" — resolve device first
+            device = self._device
+            if device == "auto":
+                import torch
+
+                device = (
+                    "mps"
+                    if torch.backends.mps.is_available()
+                    else ("cuda" if torch.cuda.is_available() else "cpu")
+                )
+
             self._text_model = SentenceTransformer(
                 self._text_embedding_model_name,
-                device=self._device,
+                device=device,
             )
             self._text_model_type = "sentence_transformers"
         except ImportError:
@@ -227,10 +238,12 @@ class VideoIndexer:
         device = self._device
         if device == "auto":
             device = (
-                "mps"
-                if torch.backends.mps.is_available()
-                else ("cuda" if torch.cuda.is_available() else "cpu")
+                "cuda" if torch.cuda.is_available() else "cpu"
             )
+        elif device == "mps":
+            # SigLIP2 produces degenerate (identical) embeddings on MPS;
+            # fall back to CPU for correctness.
+            device = "cpu"
 
         # AutoProcessor/AutoTokenizer crash with SigLIP2 on transformers >=5.2
         # due to a tokenizer registration bug. Load components explicitly.
@@ -691,6 +704,8 @@ class VideoIndexer:
         """
         if len(segments) < 2:
             return
+
+        self._ensure_model()
 
         # Compute mean visual embedding for each segment from its _frames
         seg_embeddings = []
