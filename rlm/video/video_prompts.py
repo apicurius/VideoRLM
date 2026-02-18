@@ -28,16 +28,17 @@ SEARCH TOOLS (when available):
    - field "action": search by action/activity type
    - field "all": search across all annotation fields
    Returns top matches with start_time, end_time, score, caption, and structured annotation (summary, action, actor).
-8. search_transcript — search spoken words in the video transcript (ASR). Parameter: query (str). Returns matching entries with timestamps and surrounding context.
-9. get_transcript — get the spoken transcript for a specific time range. Parameters: start_time (float), end_time (float).
-10. get_scene_list — list all detected scene boundaries with structured annotations including action descriptions and actor information. Takes no parameters.
+8. search_transcript — search spoken words in the video transcript (ASR). Parameter: query (str). Returns matching entries with timestamps and surrounding context. Use this for dialogue, narration, or anything said aloud (names, numbers, quotes).
+9. get_transcript — get the spoken transcript for a specific time range. Parameters: start_time (float), end_time (float). Returns the full spoken text. Use after search hits to get complete dialogue context.
+10. get_scene_list — list all detected scene boundaries with structured annotations including action descriptions and actor information. Takes no parameters. Returns list of dicts with scene_index, start_time, end_time, caption, and annotation.
+11. discriminative_vqa — fast embedding-based multiple-choice or yes/no answer selection without LLM generation. Parameters: question (str), candidates (list[str]), time_range (optional tuple). Returns candidates ranked by confidence with best matching segment.
 
 PIXEL MANIPULATION TOOLS (always available):
-11. threshold_frame — convert to binary mask for counting/segmentation. Parameters: image_dict, value (int, default 128).
-12. crop_frame — extract region of interest (0.0-1.0 coords). Parameters: image_dict, x1_pct, y1_pct, x2_pct, y2_pct.
-13. diff_frames — pixel difference for motion/change detection. Parameters: image_dict_a, image_dict_b.
-14. blend_frames — average multiple frames into composite. Parameters: image_dicts (list).
-15. frame_info — get dimensions and brightness statistics. Parameters: image_dict.
+12. threshold_frame — convert to binary mask for counting/segmentation. Parameters: image_dict, value (int, default 128).
+13. crop_frame — extract region of interest (0.0-1.0 coords). Parameters: image_dict, x1_pct, y1_pct, x2_pct, y2_pct. Use to isolate text, faces, or objects before passing to llm_query.
+14. diff_frames — pixel difference for motion/change detection. Parameters: image_dict_a, image_dict_b.
+15. blend_frames — average multiple frames into composite. Parameters: image_dicts (list). Use to create a stabilized background or motion summary across frames.
+16. frame_info — get dimensions and brightness statistics. Parameters: image_dict.
 
 CODE-BASED VISUAL REASONING:
 When you need precise visual analysis (counting objects, measuring sizes, detecting changes), use code:
@@ -54,19 +55,67 @@ frames_after = extract_frames(start_time=15.0, end_time=15.5, fps=1.0)
 change = diff_frames(frames_before[0], frames_after[0])
 change_info = frame_info(change)
 print(f"Change intensity: {{change_info['mean_brightness']:.1f}}")
-# Pass change image to llm_query for description
 result = llm_query(["What changed between these frames?", change])
+
+# Example: Crop a region of interest (e.g. text on screen, a face, a scoreboard)
+frames = extract_frames(start_time=20.0, end_time=20.5, fps=1.0)
+cropped = crop_frame(frames[0], 0.1, 0.05, 0.9, 0.35)  # top banner region
+result = llm_query(["Read the text in this cropped region:", cropped])
+
+# Example: Blend frames to create a motion summary or stabilized background
+frames = extract_frames(start_time=0.0, end_time=10.0, fps=1.0, max_frames=10)
+composite = blend_frames(frames)
+result = llm_query(["Describe the static elements visible across all frames:", composite])
+
+# Example: Get transcript for a time range after finding a relevant segment
+transcript_text = get_transcript(30.0, 45.0)
+print(f"What was said: {{transcript_text}}")
+
+# Example: Search transcript for specific spoken content (names, quotes, dialogue)
+matches = search_transcript("machine learning")
+for m in matches:
+    print(f"[{{m['start_time']}}s-{{m['end_time']}}s]: {{m['text']}}")
+    print(f"  Context: {{m['context']}}")
+
+# Example: Debug — see all available REPL variables and tools
+SHOW_VARS()
 ```
 {custom_tools_section}
 
 SEARCH-FIRST STRATEGY (preferred when search tools are available):
-1. ORIENT: Call get_scene_list() to understand video structure and available annotations
+1. ORIENT: Call get_scene_list() to see all scenes with annotations:
+```repl
+scenes = get_scene_list()
+for s in scenes:
+    ann = s.get("annotation", {{}})
+    action = ann.get("action", {{}}).get("brief", "")
+    print(f"Scene {{s['scene_index']}}: {{s['start_time']}}s-{{s['end_time']}}s | {{s['caption']}} | action: {{action}}")
+```
 2. SEARCH: Decompose your query into components:
    - For "what happens" queries: search_video(query, field="action")
    - For "what does it look like" queries: search_video(query, field="summary")
    - For general queries: search_video(query, field="all")
-3. INSPECT: Use extract_frames() on found segments, then llm_query() for detailed analysis
-4. VERIFY: Cross-reference annotations (action, actor, summary) with visual evidence and transcript
+   - For spoken content (names, dialogue, narration): search_transcript(query)
+   - For multiple-choice or yes/no questions: discriminative_vqa(question, candidates)
+3. INSPECT: Use extract_frames() on found segments, then analyze with llm_query() or llm_query_batched() for multiple segments at once:
+```repl
+# Analyze multiple search hits in parallel
+hits = search_video("key concept", top_k=3)
+prompts = []
+for h in hits:
+    frames = extract_frames(h["start_time"], h["end_time"], fps=2.0, max_frames=5)
+    prompts.append([f"Describe what happens at {{h['start_time']}}s-{{h['end_time']}}s:"] + frames)
+results = llm_query_batched(prompts)
+for h, r in zip(hits, results):
+    print(f"[{{h['start_time']}}s-{{h['end_time']}}s]: {{r[:200]}}")
+```
+4. CONTEXTUALIZE: Get the spoken transcript for relevant segments to cross-reference visual and audio:
+```repl
+transcript = get_transcript(hit["start_time"], hit["end_time"])
+print(f"Visual: {{visual_description}}")
+print(f"Speech: {{transcript}}")
+```
+5. VERIFY: Cross-reference annotations (action, actor, summary) with visual evidence and transcript.
 
 Search results include structured annotations with:
 - annotation.summary.brief/detailed: visual descriptions
@@ -77,11 +126,12 @@ Use these fields to quickly assess relevance before extracting frames.
 Use this approach instead of linearly scanning all segments when you need to find specific content.
 
 ## DISCRIMINATIVE VQA
-For multiple-choice or yes/no questions, use discriminative_vqa
-for fast embedding-based answer selection without LLM generation. Example:
+For multiple-choice or yes/no questions, use discriminative_vqa for fast embedding-based answer selection without LLM generation:
 ```repl
 result = discriminative_vqa("What is the person doing?", ["cooking", "reading", "exercising"])
 print(result[0]["answer"], result[0]["confidence"])
+# Optional: filter by time range
+result = discriminative_vqa("What activity?", ["running", "walking"], time_range=(10.0, 30.0))
 ```
 
 CHOOSING YOUR STRATEGY:

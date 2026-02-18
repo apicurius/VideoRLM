@@ -20,6 +20,16 @@ _MOCK_CLUSTERING_CLS = MagicMock()
 # Default: all frames in one cluster
 _MOCK_CLUSTERING_CLS.return_value.fit_predict.return_value = np.array([0])
 
+# Capture all scipy/sklearn entries present *before* shims are installed so we
+# can fully restore sys.modules after this module's tests finish.  At import
+# time none of them are loaded yet, so this is typically an empty dict.
+_SHIM_PREFIXES = ("scipy", "sklearn")
+_saved_sys_modules = {
+    k: sys.modules[k]
+    for k in list(sys.modules)
+    if any(k == p or k.startswith(p + ".") for p in _SHIM_PREFIXES)
+}
+
 
 def _install_shims():
     """Install minimal scipy/sklearn shims so the lazy imports succeed."""
@@ -48,6 +58,24 @@ def _install_shims():
 _install_shims()
 
 from rlm.video.scene_detection import detect_scenes  # noqa: E402
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_sys_modules_after_module():
+    """Restore sys.modules after this module's tests finish.
+
+    Removes every scipy / sklearn entry that was not present before this module
+    was imported, and reinstates any that were.  This prevents fake shim
+    modules from leaking into other test modules (e.g. test_video_indexer.py)
+    that depend on the real scipy / sklearn libraries.
+    """
+    yield
+    for key in list(sys.modules):
+        if any(key == p or key.startswith(p + ".") for p in _SHIM_PREFIXES):
+            if key in _saved_sys_modules:
+                sys.modules[key] = _saved_sys_modules[key]
+            else:
+                del sys.modules[key]
 
 
 def _identity_embed(frames: list[np.ndarray]) -> np.ndarray:
