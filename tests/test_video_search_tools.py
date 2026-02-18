@@ -476,3 +476,81 @@ class TestDiscriminativeVqa:
         tool_dict = make_discriminative_vqa(index)
         assert "description" in tool_dict
         assert "multiple-choice" in tool_dict["description"]
+
+
+# ---------------------------------------------------------------
+# Visual field search (Feature 3)
+# ---------------------------------------------------------------
+
+
+class TestSearchVideoVisualField:
+    """Tests for field='visual' search using frame embeddings."""
+
+    def test_visual_field_basic(self):
+        """field='visual' should search against frame_embeddings."""
+        frame_emb0 = np.array([1.0, 0.0, 0.0])
+        frame_emb1 = np.array([0.0, 1.0, 0.0])
+        frame_embeddings = np.stack([frame_emb0, frame_emb1])
+
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "a cat"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "a dog"},
+        ]
+
+        # visual_embed_fn returns vector close to frame_emb0
+        visual_fn = MagicMock(return_value=np.array([0.9, 0.1, 0.0]))
+        embed_fn = MagicMock(return_value=np.array([0.1, 0.9, 0.0]))
+
+        index = _make_index(
+            segments=segments,
+            embeddings=np.stack([frame_emb0, frame_emb1]),
+            embed_fn=embed_fn,
+        )
+        index.frame_embeddings = frame_embeddings
+        index.visual_embed_fn = visual_fn
+
+        results = make_search_video(index)["tool"]("cat", top_k=2, field="visual")
+
+        assert len(results) == 2
+        assert results[0]["caption"] == "a cat"
+        visual_fn.assert_called_once_with("cat")
+
+    def test_visual_field_fallback_to_summary(self):
+        """field='visual' without frame_embeddings should fall back to summary."""
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "a cat"},
+        ]
+        embeddings = np.array([[1.0, 0.0]])
+        embed_fn = MagicMock(return_value=np.array([1.0, 0.0]))
+
+        index = _make_index(segments=segments, embeddings=embeddings, embed_fn=embed_fn)
+        index.frame_embeddings = None
+
+        results = make_search_video(index)["tool"]("cat", top_k=1, field="visual")
+        assert len(results) == 1
+        assert results[0]["caption"] == "a cat"
+
+    def test_visual_field_excludes_duplicates(self):
+        """field='visual' should suppress duplicate segments."""
+        frame_embeddings = np.array([[1.0, 0.0], [0.9, 0.1]])
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "a cat"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "a cat dup", "is_duplicate": True},
+        ]
+
+        visual_fn = MagicMock(return_value=np.array([1.0, 0.0]))
+        index = _make_index(
+            segments=segments, embeddings=frame_embeddings, embed_fn=visual_fn
+        )
+        index.frame_embeddings = frame_embeddings
+        index.visual_embed_fn = visual_fn
+
+        results = make_search_video(index)["tool"]("cat", top_k=2, field="visual")
+        # First result should be non-duplicate, second should have -inf score
+        assert results[0]["caption"] == "a cat"
+
+    def test_description_mentions_visual(self):
+        """Tool description should mention 'visual' field."""
+        index = _make_index(embeddings=np.array([[1.0]]))
+        tool_dict = make_search_video(index)
+        assert "visual" in tool_dict["description"]

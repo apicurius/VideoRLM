@@ -700,10 +700,11 @@ class TestHierarchicalIndexingRoundTrip:
 
         # Primary segments from finest level
         assert len(result.segments) == 4
-        # Hierarchy has 2 higher levels
-        assert len(result.segment_hierarchy) == 2
+        # Hierarchy has 2 higher levels + 1 coarse level (always added)
+        assert len(result.segment_hierarchy) == 3
         assert len(result.segment_hierarchy[0]) == 2  # medium
         assert len(result.segment_hierarchy[1]) == 1  # coarsest
+        # Third level is the fixed-duration coarse level
 
         # Save and reload
         save_dir = tmp_path / "hier_index"
@@ -726,3 +727,260 @@ class TestHierarchicalIndexingRoundTrip:
         idx = VideoIndex()
         assert idx.segment_hierarchy == []
         assert idx.hierarchy_embeddings == []
+
+
+class TestVideoIndexerSceneModel:
+    """Test scene_model (V-JEPA 2) parameter handling."""
+
+    def test_scene_model_stored(self):
+        indexer = VideoIndexer(scene_model="facebook/vjepa2-vitl-fpc64-256")
+        assert indexer._scene_model_name == "facebook/vjepa2-vitl-fpc64-256"
+        assert indexer._scene_model is None
+        assert indexer._scene_processor is None
+
+    def test_scene_model_default_none(self):
+        indexer = VideoIndexer()
+        assert indexer._scene_model_name is None
+
+    def test_scene_clip_size_default(self):
+        indexer = VideoIndexer(scene_model="facebook/vjepa2-vitl-fpc64-256")
+        assert indexer._scene_clip_size == 16
+
+    def test_scene_clip_size_custom(self):
+        indexer = VideoIndexer(
+            scene_model="facebook/vjepa2-vitl-fpc64-256", scene_clip_size=32
+        )
+        assert indexer._scene_clip_size == 32
+
+
+class TestEmbeddingGemmaTextEncoder:
+    """Tests for Feature 1: EmbeddingGemma text encoder."""
+
+    def test_text_embedding_model_stored(self):
+        indexer = VideoIndexer(text_embedding_model="google/embedding-gemma-300m")
+        assert indexer._text_embedding_model_name == "google/embedding-gemma-300m"
+
+    def test_text_embedding_model_default_none(self):
+        indexer = VideoIndexer()
+        assert indexer._text_embedding_model_name is None
+
+    def test_score_annotations_skipped_with_text_model(self):
+        """_score_annotations should skip scoring when text_embedding_model is set."""
+        indexer = VideoIndexer(text_embedding_model="google/embedding-gemma-300m")
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "a cat sitting"},
+        ]
+        frames = [np.full((48, 64, 3), 128, dtype=np.uint8)] * 10
+        timestamps = [float(i) * 0.5 for i in range(10)]
+
+        with patch.object(indexer, "_ensure_model"):
+            indexer._score_annotations(
+                segments,
+                loaded_video_frames=frames,
+                timestamps=timestamps,
+                caption_fn=None,
+            )
+
+        # Score should NOT be computed (skipped due to cross-space mismatch)
+        assert "caption_quality_score" not in segments[0]
+
+    def test_encode_texts_siglip_method_exists(self):
+        """_encode_texts_siglip method should exist on VideoIndexer."""
+        indexer = VideoIndexer()
+        assert hasattr(indexer, "_encode_texts_siglip")
+        assert callable(indexer._encode_texts_siglip)
+
+    def test_encode_query_siglip_method_exists(self):
+        """_encode_query_siglip method should exist on VideoIndexer."""
+        indexer = VideoIndexer()
+        assert hasattr(indexer, "_encode_query_siglip")
+        assert callable(indexer._encode_query_siglip)
+
+
+class TestMultiScaleSearch:
+    """Tests for Feature 2: Multi-scale search."""
+
+    def test_build_coarse_level_basic(self):
+        """_build_coarse_level should merge segments into ~30s chunks."""
+        indexer = VideoIndexer()
+        segments = [
+            {"start_time": float(i * 5), "end_time": float((i + 1) * 5), "caption": f"seg{i}"}
+            for i in range(10)  # 10 segments of 5s each = 50s total
+        ]
+        embeddings = np.random.default_rng(42).random((10, 8)).astype(np.float32)
+        # Normalize
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = embeddings / norms
+
+        coarse_segs, coarse_embs = indexer._build_coarse_level(
+            segments, embeddings, target_duration=30.0
+        )
+
+        # With 50s total and 30s target, expect 2 coarse segments
+        assert len(coarse_segs) == 2
+        assert coarse_embs is not None
+        assert coarse_embs.shape[0] == 2
+        assert coarse_segs[0]["start_time"] == 0.0
+        assert coarse_segs[-1]["end_time"] == 50.0
+        # Captions should be merged
+        assert "seg0" in coarse_segs[0]["caption"]
+
+    def test_build_coarse_level_empty(self):
+        """Empty input returns empty result."""
+        indexer = VideoIndexer()
+        coarse_segs, coarse_embs = indexer._build_coarse_level([], np.array([]), target_duration=30.0)
+        assert coarse_segs == []
+        assert coarse_embs is None
+
+    def test_build_coarse_level_none_embeddings(self):
+        indexer = VideoIndexer()
+        segs = [{"start_time": 0.0, "end_time": 5.0, "caption": "x"}]
+        coarse_segs, coarse_embs = indexer._build_coarse_level(segs, None, target_duration=30.0)
+        assert coarse_segs == []
+        assert coarse_embs is None
+
+    @patch("rlm.video.video_indexer.detect_scenes")
+    def test_coarse_level_added_in_index_video(self, mock_detect_scenes):
+        """index_video should always add a coarse level when embeddings exist."""
+        mock_detect_scenes.return_value = [(0.0, 2.5), (2.5, 4.5)]
+
+        indexer = VideoIndexer()
+        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(10)]
+        mock_video = MagicMock()
+        mock_video.metadata.extraction_fps = 2.0
+        mock_video.metadata.path = "/fake/video.mp4"
+        mock_video.frames = frames
+        mock_video.segments = []
+
+        fake_emb = np.random.randn(2, 4).astype(np.float32)
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_get_transcript", return_value=[]):
+                with patch.object(
+                    indexer, "_embed_captions", return_value=(fake_emb, None)
+                ):
+                    with patch.object(
+                        indexer, "_encode_frames",
+                        return_value=np.random.randn(2, 4).astype(np.float32),
+                    ):
+                        result = indexer.index_video(mock_video, caption_fn=None)
+
+        # Should have at least 1 hierarchy level (the coarse level)
+        assert len(result.segment_hierarchy) >= 1
+        assert len(result.hierarchy_embeddings) >= 1
+
+
+class TestSelectiveDecode:
+    """Tests for Feature 4: Selective decoding."""
+
+    def test_selective_decode_marks_uniform(self):
+        """Segments with low visual variance should be marked _skip_caption."""
+        indexer = VideoIndexer()
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": ""},
+        ]
+        # Create very similar frames (nearly identical)
+        frames = [np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(10)]
+        timestamps = [float(i) * 0.5 for i in range(10)]
+
+        # Mock _encode_frames to return near-identical embeddings (low variance)
+        uniform_embs = np.ones((10, 8), dtype=np.float32)
+        uniform_embs = uniform_embs / np.linalg.norm(uniform_embs[0])
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_encode_frames", return_value=uniform_embs):
+                indexer._selective_decode(segments, frames, timestamps)
+
+        assert segments[0].get("_skip_caption") is True
+        assert segments[0]["caption"] == "Static or visually uniform content"
+        assert segments[0].get("is_non_action") is True
+
+    def test_selective_decode_keeps_varied(self):
+        """Segments with high visual variance should not be skipped."""
+        indexer = VideoIndexer()
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": ""},
+        ]
+        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(10)]
+        timestamps = [float(i) * 0.5 for i in range(10)]
+
+        # High variance embeddings
+        rng = np.random.default_rng(42)
+        varied_embs = rng.random((10, 8)).astype(np.float32)
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_encode_frames", return_value=varied_embs):
+                indexer._selective_decode(segments, frames, timestamps)
+
+        assert segments[0].get("_skip_caption") is not True
+
+    def test_selective_decode_skips_already_marked(self):
+        """Segments already marked _skip_caption should not be re-processed."""
+        indexer = VideoIndexer()
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "dup", "_skip_caption": True},
+        ]
+        frames = [np.full((48, 64, 3), 128, dtype=np.uint8)] * 10
+        timestamps = [float(i) * 0.5 for i in range(10)]
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_encode_frames") as mock_encode:
+                indexer._selective_decode(segments, frames, timestamps)
+
+        # Should not call _encode_frames since segment was already marked
+        mock_encode.assert_not_called()
+
+    def test_selective_decode_few_frames_skipped(self):
+        """Segments with fewer than 3 frames should not be processed."""
+        indexer = VideoIndexer()
+        segments = [
+            {"start_time": 0.0, "end_time": 0.5, "caption": ""},
+        ]
+        frames = [np.full((48, 64, 3), 128, dtype=np.uint8)]
+        timestamps = [0.0]
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_encode_frames") as mock_encode:
+                indexer._selective_decode(segments, frames, timestamps)
+
+        mock_encode.assert_not_called()
+
+
+class TestVideoIndexFrameEmbeddings:
+    """Tests for Feature 3: frame_embeddings field on VideoIndex."""
+
+    def test_default_none(self):
+        idx = VideoIndex()
+        assert idx.frame_embeddings is None
+        assert idx.visual_embed_fn is None
+
+    def test_save_load_with_frame_embeddings(self, tmp_path):
+        """Frame embeddings should survive save/load round-trip."""
+        frame_embs = np.random.randn(3, 16).astype(np.float32)
+        idx = VideoIndex(
+            segments=[
+                {"start_time": float(i), "end_time": float(i + 1), "caption": f"s{i}"}
+                for i in range(3)
+            ],
+            embeddings=np.random.randn(3, 16).astype(np.float32),
+            frame_embeddings=frame_embs,
+            transcript=[],
+            scene_boundaries=[0.0],
+        )
+        save_dir = tmp_path / "frame_emb_test"
+        idx.save(save_dir)
+        loaded = VideoIndex.load(save_dir)
+        assert loaded.frame_embeddings is not None
+        np.testing.assert_array_almost_equal(loaded.frame_embeddings, frame_embs)
+
+    def test_save_load_without_frame_embeddings(self, tmp_path):
+        """Backward compat: load should work without frame_embeddings in npz."""
+        idx = VideoIndex(
+            segments=[{"start_time": 0.0, "end_time": 1.0, "caption": "x"}],
+            transcript=[],
+            scene_boundaries=[0.0],
+        )
+        save_dir = tmp_path / "no_frame_emb"
+        idx.save(save_dir)
+        loaded = VideoIndex.load(save_dir)
+        assert loaded.frame_embeddings is None

@@ -16,6 +16,8 @@ vrlm = VideoRLM(
     logger=logger,
     verbose=True,
     enable_search=True,
+    scene_model="facebook/vjepa2-vitl-fpc64-256",
+    text_embedding_model="google/embedding-gemma-300m",
 )
 
 result = vrlm.completion(

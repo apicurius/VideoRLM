@@ -116,7 +116,9 @@ class VideoRLM:
         cache_dir: str | None = None,
         caption_resize: tuple[int, int] | None = None,
         text_embedding_model: str | None = None,
+        scene_model: str | None = None,
     ):
+        self.scene_model = scene_model
         self.caption_resize = caption_resize
         self.auto_fps = auto_fps
         self.target_frames = target_frames
@@ -238,6 +240,7 @@ class VideoRLM:
                 cache_dir=self.cache_dir,
                 caption_resize=self.caption_resize,
                 text_embedding_model=self.text_embedding_model,
+                scene_model=self.scene_model,
             )
             video_index = indexer.index_video(
                 loaded_video,

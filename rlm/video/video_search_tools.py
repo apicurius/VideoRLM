@@ -113,6 +113,7 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
 
                 - ``"summary"`` (default): search summary.brief embeddings.
                 - ``"action"``: search action.brief embeddings.
+                - ``"visual"``: search frame embeddings directly (bypasses caption quality).
                 - ``"all"``: search both and merge by max score.
             exclude_non_action: When True and field is ``"action"``, segments
                 marked ``is_non_action`` (action.brief is empty or ``"N/A"``)
@@ -163,6 +164,42 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                         }
                     )
                 return results
+
+        # Visual field: search frame embeddings using SigLIP2 text encoder
+        if field == "visual":
+            if (
+                hasattr(index, "frame_embeddings")
+                and index.frame_embeddings is not None
+                and len(index.frame_embeddings) > 0
+            ):
+                visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
+                query_emb = visual_fn(query)
+                query_emb = np.asarray(query_emb).reshape(1, -1)
+                scores = _search_matrix(query_emb, index.frame_embeddings)
+
+                # Suppress duplicates
+                scores = scores.copy()
+                for i, seg in enumerate(index.segments):
+                    if seg.get("is_duplicate"):
+                        scores[i] = -np.inf
+
+                top_indices = list(np.argsort(scores)[::-1][:top_k])
+                results = []
+                for idx in top_indices:
+                    seg = index.segments[idx]
+                    results.append(
+                        {
+                            "start_time": seg["start_time"],
+                            "end_time": seg["end_time"],
+                            "score": round(float(scores[idx]), 4),
+                            "caption": seg.get("caption", ""),
+                            "annotation": seg.get("annotation", {}),
+                            "quality_score": seg.get("caption_quality_score"),
+                        }
+                    )
+                return results
+            # Fallback to summary embeddings if no frame embeddings
+            field = "summary"
 
         # Resolve which embedding matrices to use
         summary_emb = index.embeddings
@@ -288,7 +325,7 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
         "description": (
             "Semantic search over pre-indexed video segments. "
             "Parameters: query (str), top_k (int, default 5), "
-            'field (str, default "summary" — can be "summary", "action", or "all"), '
+            'field (str, default "summary" — can be "summary", "action", "visual", or "all"), '
             "exclude_non_action (bool, default True — filters non-action segments when field is action), "
             "diverse (bool, default True — MMR reranking for varied results), "
             "cluster_diverse (bool, default False — KMeans clustering alternative to MMR), "

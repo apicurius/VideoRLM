@@ -33,6 +33,8 @@ class VideoIndex:
     scene_boundaries: list[float] = field(default_factory=list)
     embedding_quality: dict = field(default_factory=dict)
     embed_fn: Any = None
+    frame_embeddings: np.ndarray | None = None
+    visual_embed_fn: Any = None
     segment_hierarchy: list[list[dict]] = field(default_factory=list)
     hierarchy_embeddings: list[np.ndarray | None] = field(default_factory=list)
 
@@ -52,6 +54,8 @@ class VideoIndex:
             arrays["embeddings"] = self.embeddings
         if self.action_embeddings is not None:
             arrays["action_embeddings"] = self.action_embeddings
+        if self.frame_embeddings is not None:
+            arrays["frame_embeddings"] = self.frame_embeddings
         for lvl_idx, h_emb in enumerate(self.hierarchy_embeddings):
             if h_emb is not None:
                 arrays[f"hierarchy_emb_L{lvl_idx}"] = h_emb
@@ -80,6 +84,7 @@ class VideoIndex:
         npz = np.load(directory / "embeddings.npz")
         embeddings = npz["embeddings"] if "embeddings" in npz else None
         action_embeddings = npz["action_embeddings"] if "action_embeddings" in npz else None
+        frame_embeddings = npz["frame_embeddings"] if "frame_embeddings" in npz else None
 
         # Load hierarchy embeddings
         hierarchy_embeddings: list[np.ndarray | None] = []
@@ -92,6 +97,7 @@ class VideoIndex:
             segments=metadata["segments"],
             embeddings=embeddings,
             action_embeddings=action_embeddings,
+            frame_embeddings=frame_embeddings,
             transcript=metadata["transcript"],
             scene_boundaries=metadata["scene_boundaries"],
             embedding_quality=metadata.get("embedding_quality", {}),
@@ -130,6 +136,8 @@ class VideoIndexer:
         embedding_stride: int | None = None,
         text_embedding_model: str | None = None,
         hierarchical: bool = False,
+        scene_model: str | None = None,
+        scene_clip_size: int = 16,
     ):
         self._embedding_model_name = embedding_model
         self._device = device
@@ -145,6 +153,10 @@ class VideoIndexer:
         self._text_model = None
         self._text_tokenizer = None
         self._memory_cache: dict[str, VideoIndex] = {}
+        self._scene_model_name = scene_model
+        self._scene_model = None
+        self._scene_processor = None
+        self._scene_clip_size = scene_clip_size
 
     # ------------------------------------------------------------------
     # Lazy model loading
@@ -179,6 +191,31 @@ class VideoIndexer:
             self._text_embedding_model_name,
             self._text_model_type,
         )
+
+    def _ensure_scene_model(self) -> None:
+        """Lazily load V-JEPA 2 for scene detection."""
+        if self._scene_model is not None:
+            return
+        import torch
+
+        device = self._device
+        if device == "auto":
+            device = (
+                "mps"
+                if torch.backends.mps.is_available()
+                else ("cuda" if torch.cuda.is_available() else "cpu")
+            )
+
+        from transformers import AutoModel, AutoVideoProcessor
+
+        self._scene_processor = AutoVideoProcessor.from_pretrained(self._scene_model_name)
+        self._scene_model = (
+            AutoModel.from_pretrained(self._scene_model_name, torch_dtype=torch.float16)
+            .eval()
+            .to(device)
+        )
+        self._scene_torch_device = device
+        logger.info("Loaded scene model %s on %s", self._scene_model_name, device)
 
     def _ensure_model(self) -> None:
         """Lazily load the SigLIP2 model on first use."""
@@ -289,24 +326,49 @@ class VideoIndexer:
         # 1. Compute per-frame timestamps
         timestamps = [i / fps for i in range(len(frames))]
 
-        # 2. Detect scene boundaries (uses the CLIP embedding model)
-        self._ensure_model()
-
-        def _scene_embed_fn(f):
-            return self._encode_frames(
-                f, temporal_window=self._temporal_window, stride=self._embedding_stride
-            )
-
+        # 2. Detect scene boundaries
         hierarchy_result: dict | None = None
-        if self._hierarchical:
-            hierarchy_result = detect_scenes_hierarchical(
-                frames,
-                timestamps,
-                embed_fn=_scene_embed_fn,
+        if self._scene_model_name:
+            # V-JEPA 2 clip-level scene detection
+            self._ensure_scene_model()
+            clips, clip_timestamps = self._group_frames_into_clips(
+                frames, timestamps, self._scene_clip_size
             )
-            scenes = hierarchy_result["levels"][0]  # finest level
+
+            def _vjepa_embed_fn(_frames):
+                return self._encode_clips_vjepa(clips)
+
+            clip_representatives = [c[len(c) // 2] for c in clips]
+
+            if self._hierarchical:
+                hierarchy_result = detect_scenes_hierarchical(
+                    clip_representatives,
+                    clip_timestamps,
+                    embed_fn=_vjepa_embed_fn,
+                )
+                scenes = hierarchy_result["levels"][0]
+            else:
+                scenes = detect_scenes(
+                    clip_representatives, clip_timestamps, embed_fn=_vjepa_embed_fn
+                )
         else:
-            scenes = detect_scenes(frames, timestamps, embed_fn=_scene_embed_fn)
+            # Existing SigLIP2 path
+            self._ensure_model()
+
+            def _scene_embed_fn(f):
+                return self._encode_frames(
+                    f, temporal_window=self._temporal_window, stride=self._embedding_stride
+                )
+
+            if self._hierarchical:
+                hierarchy_result = detect_scenes_hierarchical(
+                    frames,
+                    timestamps,
+                    embed_fn=_scene_embed_fn,
+                )
+                scenes = hierarchy_result["levels"][0]
+            else:
+                scenes = detect_scenes(frames, timestamps, embed_fn=_scene_embed_fn)
         scene_boundaries = [start for start, _end in scenes]
 
         # 3. Build segment dicts — prefer existing segments, fall back to scenes
@@ -326,6 +388,9 @@ class VideoIndexer:
         # 4b. Pre-captioning dedup: identify visually similar segments
         #     and only caption representatives, propagating results afterward.
         self._pre_caption_dedup(segment_infos)
+
+        # 4c. Selective decoding: skip captioning for visually uniform segments
+        self._selective_decode(segment_infos, frames, timestamps)
 
         # 5. Caption each segment (if a caption function was provided)
         if caption_fn is not None or frame_caption_fn is not None:
@@ -473,6 +538,26 @@ class VideoIndexer:
 
         quality = self._check_embedding_quality(embeddings)
 
+        # 7c. Embed representative frame per segment for visual search
+        frame_embeddings = None
+        try:
+            rep_frames = []
+            for seg in segment_infos:
+                seg_frames_list = [
+                    f for f, t in zip(frames, timestamps)
+                    if seg["start_time"] <= t <= seg["end_time"]
+                ]
+                if seg_frames_list:
+                    rep_frames.append(seg_frames_list[len(seg_frames_list) // 2])
+                else:
+                    rep_frames.append(frames[0])  # fallback
+
+            self._ensure_model()
+            frame_embeddings = self._encode_frames(rep_frames)
+            frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
+        except Exception:
+            logger.warning("Failed to compute frame embeddings", exc_info=True)
+
         # 8. Build hierarchy levels (when hierarchical mode is enabled)
         segment_hierarchy: list[list[dict]] = []
         hierarchy_embeddings: list[np.ndarray | None] = []
@@ -507,14 +592,25 @@ class VideoIndexer:
                 else:
                     hierarchy_embeddings.append(None)
 
+        # Always add a fixed-duration coarse level for multi-scale search
+        if embeddings is not None:
+            coarse_segs, coarse_embs = self._build_coarse_level(
+                segment_infos, embeddings, target_duration=30.0
+            )
+            if coarse_segs:
+                segment_hierarchy.append(coarse_segs)
+                hierarchy_embeddings.append(coarse_embs)
+
         index = VideoIndex(
             segments=segment_infos,
             embeddings=embeddings,
             action_embeddings=action_embeddings,
+            frame_embeddings=frame_embeddings,
             transcript=transcript,
             scene_boundaries=scene_boundaries,
             embedding_quality=quality,
             embed_fn=self._encode_query,
+            visual_embed_fn=self._encode_query_siglip,
             segment_hierarchy=segment_hierarchy,
             hierarchy_embeddings=hierarchy_embeddings,
         )
@@ -1046,6 +1142,12 @@ class VideoIndexer:
             if not caption:
                 continue
 
+            # When a separate text embedding model is configured, caption
+            # embeddings live in a different space than frame embeddings —
+            # cross-space cosine similarity is meaningless, so skip scoring.
+            if self._text_embedding_model_name is not None:
+                continue
+
             # Get frames for this segment
             seg_frames = [
                 f
@@ -1233,10 +1335,197 @@ class VideoIndexer:
             emb = emb / emb.norm(p=2, dim=-1, keepdim=True)
         return emb.cpu().numpy()
 
+    def _selective_decode(
+        self,
+        segments: list[dict],
+        frames: list[np.ndarray],
+        timestamps: list[float],
+        variance_threshold: float = 0.02,
+    ) -> None:
+        """Skip captioning for visually uniform segments.
+
+        Computes per-frame embedding variance within each segment.
+        Low-variance segments get a generic caption and _skip_caption=True.
+        """
+        self._ensure_model()
+
+        for seg in segments:
+            if seg.get("_skip_caption"):
+                continue  # already marked by dedup
+            seg_frames = [
+                f for f, t in zip(frames, timestamps)
+                if seg["start_time"] <= t <= seg["end_time"]
+            ]
+            if len(seg_frames) < 3:
+                continue
+            try:
+                embs = self._encode_frames(seg_frames)
+                variance = float(np.var(embs, axis=0).mean())
+                seg["_visual_variance"] = round(variance, 6)
+                if variance < variance_threshold:
+                    seg["_skip_caption"] = True
+                    seg["caption"] = "Static or visually uniform content"
+                    seg["annotation"] = {
+                        "summary": {
+                            "brief": "Static or visually uniform content",
+                            "detailed": "This segment contains minimal visual change.",
+                        },
+                        "action": {"brief": "N/A", "detailed": "", "actor": None},
+                    }
+                    seg["is_non_action"] = True
+            except Exception:
+                pass  # skip on error
+
+        skipped = sum(
+            1 for s in segments
+            if s.get("_skip_caption") and s.get("_visual_variance") is not None
+        )
+        if skipped:
+            logger.info(
+                "Selective decode: %d/%d segments skipped (variance < %.4f)",
+                skipped,
+                len(segments),
+                variance_threshold,
+            )
+
+    def _build_coarse_level(
+        self,
+        segments: list[dict],
+        embeddings: np.ndarray,
+        target_duration: float = 30.0,
+    ) -> tuple[list[dict], np.ndarray | None]:
+        """Merge fine segments into ~30s coarse chunks.
+
+        Groups consecutive segments until cumulative duration >= target_duration.
+        Merges captions with join and averages embeddings.
+
+        Returns:
+            Tuple of (coarse_segments, coarse_embeddings).
+        """
+        if not segments or embeddings is None or len(embeddings) == 0:
+            return [], None
+
+        coarse_segs: list[dict] = []
+        coarse_embs: list[np.ndarray] = []
+
+        group_start = 0
+        group_duration = 0.0
+
+        for i, seg in enumerate(segments):
+            seg_dur = seg["end_time"] - seg["start_time"]
+            group_duration += seg_dur
+
+            is_last = i == len(segments) - 1
+            if group_duration >= target_duration or is_last:
+                group_segs = segments[group_start : i + 1]
+                merged_caption = " ".join(
+                    s.get("caption", "") for s in group_segs if s.get("caption")
+                )
+                coarse_segs.append(
+                    {
+                        "start_time": group_segs[0]["start_time"],
+                        "end_time": group_segs[-1]["end_time"],
+                        "caption": merged_caption,
+                    }
+                )
+
+                group_emb = embeddings[group_start : i + 1].mean(axis=0)
+                norm = np.linalg.norm(group_emb)
+                if norm > 1e-10:
+                    group_emb = group_emb / norm
+                coarse_embs.append(group_emb)
+
+                group_start = i + 1
+                group_duration = 0.0
+
+        if not coarse_embs:
+            return [], None
+
+        return coarse_segs, np.stack(coarse_embs)
+
+    def _encode_texts_siglip(self, texts: list[str]) -> np.ndarray:
+        """Encode texts using SigLIP2's text encoder (ignoring text_embedding_model)."""
+        import torch
+
+        inputs = self._tokenizer(
+            texts,
+            padding="max_length",
+            max_length=64,
+            return_tensors="pt",
+        ).to(self._torch_device)
+        with torch.no_grad():
+            out = self._model.get_text_features(**inputs)
+            emb = out.pooler_output if hasattr(out, "pooler_output") else out
+            emb = emb / emb.norm(p=2, dim=-1, keepdim=True)
+        return emb.cpu().numpy()
+
+    def _encode_query_siglip(self, text: str) -> np.ndarray:
+        """Encode a single query using SigLIP2's text encoder (bypasses text_embedding_model)."""
+        self._ensure_model()
+        return self._encode_texts_siglip([text])[0]
+
     def _encode_query(self, text: str) -> np.ndarray:
         """Encode a single query string — stored as ``embed_fn`` on the index."""
         self._ensure_model()
         return self._encode_texts([text])[0]
+
+    def _encode_clips_vjepa(self, clips: list[list[np.ndarray]]) -> np.ndarray:
+        """Embed video clips using V-JEPA 2.
+
+        Each clip is a list of BGR frames. Returns an ``(N_clips, 1024)``
+        embedding matrix where each row is the mean-pooled patch token
+        representation for one clip.
+        """
+        import torch
+
+        all_embs = []
+        batch_size = 4
+        for i in range(0, len(clips), batch_size):
+            batch_clips = clips[i : i + batch_size]
+            # Convert each clip: BGR→RGB, stack to (T, H, W, 3) list-of-arrays
+            rgb_clips = []
+            for clip in batch_clips:
+                rgb_frames = [f[:, :, ::-1] for f in clip]  # BGR → RGB
+                rgb_clips.append(rgb_frames)
+
+            inputs = self._scene_processor(rgb_clips, return_tensors="pt").to(
+                self._scene_torch_device
+            )
+            with torch.no_grad():
+                outputs = self._scene_model(**inputs)
+                # outputs.last_hidden_state: (batch, seq_len, 1024)
+                patch_tokens = outputs.last_hidden_state
+                clip_embs = patch_tokens.mean(dim=1)  # (batch, 1024)
+                clip_embs = clip_embs / clip_embs.norm(p=2, dim=-1, keepdim=True)
+            all_embs.append(clip_embs.cpu().float().numpy())
+
+        return np.concatenate(all_embs, axis=0)
+
+    def _group_frames_into_clips(
+        self,
+        frames: list[np.ndarray],
+        timestamps: list[float],
+        clip_size: int,
+    ) -> tuple[list[list[np.ndarray]], list[float]]:
+        """Group frames into clips with midpoint timestamps.
+
+        Args:
+            frames: All video frames.
+            timestamps: Per-frame timestamps.
+            clip_size: Number of frames per clip.
+
+        Returns:
+            Tuple of (clips, clip_timestamps) where each clip is a list of
+            frames and clip_timestamps are the midpoint timestamps.
+        """
+        clips: list[list[np.ndarray]] = []
+        clip_timestamps: list[float] = []
+        for i in range(0, len(frames), clip_size):
+            clip = frames[i : i + clip_size]
+            clips.append(clip)
+            mid = min(i + len(clip) // 2, len(frames) - 1)
+            clip_timestamps.append(timestamps[mid])
+        return clips, clip_timestamps
 
     def _get_transcript(
         self,

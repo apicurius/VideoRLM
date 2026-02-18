@@ -26,7 +26,10 @@ SEARCH TOOLS (when available):
    Parameters: query (str), top_k (int, default 5), field (str, default "summary").
    - field "summary" (default): search visual descriptions
    - field "action": search by action/activity type
+   - field "visual": search by frame embeddings (bypasses caption quality issues)
    - field "all": search across all annotation fields
+   - level 0 (default): search fine-grained segments
+   - level 1+: search coarser hierarchy levels (~30s chunks) for broad localization
    Returns top matches with start_time, end_time, score, caption, and structured annotation (summary, action, actor).
 8. search_transcript — search spoken words in the video transcript (ASR). Parameter: query (str). Returns matching entries with timestamps and surrounding context. Use this for dialogue, narration, or anything said aloud (names, numbers, quotes).
 9. get_transcript — get the spoken transcript for a specific time range. Parameters: start_time (float), end_time (float). Returns the full spoken text. Use after search hits to get complete dialogue context.
