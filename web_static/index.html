@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VideoRLM — Ask Your Video</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    * { font-family: 'Inter', sans-serif; }
+
+    body { background: #0a0f1a; }
+
+    .drop-zone {
+      border: 2px dashed #334155;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .drop-zone.drag-over {
+      border-color: #6366f1;
+      background: rgba(99, 102, 241, 0.06);
+    }
+
+    .video-wrapper {
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    video {
+      width: 100%;
+      display: block;
+      max-height: 420px;
+      object-fit: contain;
+    }
+
+    .ts-inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      border-radius: 6px;
+      padding: 1px 8px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      vertical-align: middle;
+      margin: 0 2px;
+    }
+    .ts-inline:hover {
+      background: #f59e0b;
+      color: #000;
+      border-color: #f59e0b;
+    }
+
+    .ts-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(245, 158, 11, 0.12);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      border-radius: 20px;
+      padding: 4px 14px;
+      font-size: 0.83rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .ts-chip:hover {
+      background: #f59e0b;
+      color: #000;
+      border-color: #f59e0b;
+    }
+    .ts-chip.active {
+      background: #f59e0b;
+      color: #000;
+      border-color: #f59e0b;
+    }
+
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid rgba(99, 102, 241, 0.2);
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .answer-prose {
+      line-height: 1.75;
+      color: #cbd5e1;
+      font-size: 0.95rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .card {
+      background: #111827;
+      border: 1px solid #1e293b;
+      border-radius: 14px;
+    }
+
+    .progress-bar {
+      height: 3px;
+      background: linear-gradient(90deg, #6366f1, #8b5cf6, #a855f7);
+      border-radius: 2px;
+      animation: progress 2.5s ease-in-out infinite;
+      background-size: 200% 100%;
+    }
+    @keyframes progress {
+      0% { background-position: 100% 0; }
+      100% { background-position: -100% 0; }
+    }
+
+    .seek-indicator {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.75);
+      color: #fbbf24;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 1.1rem;
+      font-weight: 700;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .seek-indicator.show { opacity: 1; }
+
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+
+    select, textarea, input[type="text"] {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      color: #e2e8f0;
+      border-radius: 8px;
+      transition: border-color 0.15s;
+    }
+    select:focus, textarea:focus, input[type="text"]:focus {
+      outline: none;
+      border-color: #6366f1;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: white;
+      font-weight: 600;
+      border-radius: 10px;
+      padding: 10px 20px;
+      transition: opacity 0.15s, transform 0.1s;
+      cursor: pointer;
+      border: none;
+    }
+    .btn-primary:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
+    .btn-primary:active:not(:disabled) { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20% { transform: translateX(-6px); }
+      40% { transform: translateX(6px); }
+      60% { transform: translateX(-4px); }
+      80% { transform: translateX(4px); }
+    }
+    .shake { animation: shake 0.35s ease; }
+
+    .validation-msg {
+      font-size: 0.78rem;
+      color: #f87171;
+      margin-top: 6px;
+      display: none;
+    }
+    .validation-msg.show { display: block; }
+
+    .model-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .detail-btn {
+      flex: 1;
+      padding: 5px 0;
+      border-radius: 7px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid #1e293b;
+      background: #0f172a;
+      color: #64748b;
+      transition: all 0.15s;
+    }
+    .detail-btn:hover { border-color: #6366f1; color: #a5b4fc; }
+    .detail-btn.active { background: rgba(99,102,241,0.15); border-color: #6366f1; color: #a5b4fc; }
+
+    .mode-btn {
+      flex: 1;
+      padding: 7px 0;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid #1e293b;
+      background: #0f172a;
+      color: #64748b;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+    .mode-btn:hover { border-color: #6366f1; color: #a5b4fc; }
+    .mode-btn.active { background: rgba(99,102,241,0.15); border-color: #6366f1; color: #a5b4fc; }
+
+    .arch-model-card {
+      background: #111827;
+      border: 1px solid #1e293b;
+      border-radius: 9px;
+      padding: 10px 12px;
+    }
+    .arch-badge {
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 20px;
+      border: 1px solid;
+      white-space: nowrap;
+    }
+    .toggle-track {
+      width: 36px;
+      height: 20px;
+      border-radius: 20px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      position: relative;
+      flex-shrink: 0;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .toggle-track.on { background: rgba(99,102,241,0.35); border-color: #6366f1; }
+    .toggle-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #475569;
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      transition: transform 0.2s, background 0.2s;
+    }
+    .toggle-track.on .toggle-thumb { transform: translateX(16px); background: #6366f1; }
+  </style>
+</head>
+
+<body class="min-h-screen text-slate-100">
+
+  <header class="border-b border-slate-800/60 px-6 py-4 sticky top-0 z-10" style="background: rgba(10,15,26,0.95); backdrop-filter: blur(10px);">
+    <div class="max-w-6xl mx-auto flex items-center gap-3">
+      <div class="w-9 h-9 rounded-xl flex items-center justify-center" style="background: linear-gradient(135deg, #6366f1, #8b5cf6);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold leading-none">VideoRLM</h1>
+        <p class="text-xs text-slate-500 mt-0.5">AI-powered video question answering</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 sm:px-6 py-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+    <div class="flex flex-col gap-4">
+
+      <div id="drop-zone" class="drop-zone card rounded-xl p-8 text-center cursor-pointer select-none" onclick="document.getElementById('file-input').click()">
+        <input type="file" id="file-input" accept="video/*" class="hidden" />
+        <div id="upload-icon" class="flex flex-col items-center gap-3">
+          <div class="w-14 h-14 rounded-full flex items-center justify-center" style="background: rgba(99,102,241,0.12); border: 1px solid rgba(99,102,241,0.25);">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <div>
+            <p class="font-semibold text-slate-200">Drop a video here</p>
+            <p class="text-sm text-slate-500 mt-1">or click to browse — MP4, MOV, AVI, WebM</p>
+          </div>
+        </div>
+        <div id="file-name" class="hidden mt-3 text-sm font-medium text-indigo-400"></div>
+      </div>
+
+      <div id="video-container" class="hidden video-wrapper">
+        <video id="video-player" controls preload="metadata"></video>
+        <div id="seek-indicator" class="seek-indicator"></div>
+      </div>
+
+      <div id="timestamps-bar" class="hidden card rounded-xl p-4">
+        <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Jump to timestamp</p>
+        <div id="chips-row" class="flex flex-wrap gap-2"></div>
+      </div>
+
+    </div>
+
+    <div class="flex flex-col gap-4">
+
+      <div class="card rounded-xl p-5">
+        <label class="block text-sm font-semibold text-slate-300 mb-3">Your Question</label>
+        <textarea
+          id="question"
+          rows="3"
+          placeholder="What happens at the beginning of the video?"
+          class="w-full px-4 py-3 text-sm resize-none"
+        ></textarea>
+
+        <div class="model-row mt-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1.5">Backend</label>
+            <select id="backend" class="w-full px-3 py-2 text-sm">
+              <option value="openrouter" selected>OpenRouter</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1.5">Model</label>
+            <input type="text" id="model" value="openai/gpt-4o" class="w-full px-3 py-2 text-sm" />
+          </div>
+        </div>
+
+        <div class="mt-3">
+          <label class="block text-xs font-medium text-slate-500 mb-1.5">Analysis mode</label>
+          <div class="flex gap-2">
+            <button type="button" id="mode-direct" class="mode-btn active" onclick="setMode('direct')">
+              <span class="mode-icon">⚡</span> Direct
+            </button>
+            <button type="button" id="mode-agent" class="mode-btn" onclick="setMode('agent')">
+              <span class="mode-icon">🤖</span> Agent
+            </button>
+          </div>
+          <p id="mode-hint" class="text-xs text-slate-600 mt-1.5">One API call — frames sent directly to the model. Cheapest, fastest, most reliable.</p>
+        </div>
+
+        <div class="mt-3">
+          <label class="block text-xs font-medium text-slate-500 mb-1.5">Detail level <span class="text-slate-600 font-normal">(higher = more frames, more tokens)</span></label>
+          <div class="flex gap-2">
+            <button type="button" class="detail-btn active" data-val="low" onclick="setDetail('low')">Low</button>
+            <button type="button" class="detail-btn" data-val="medium" onclick="setDetail('medium')">Medium</button>
+            <button type="button" class="detail-btn" data-val="high" onclick="setDetail('high')">High</button>
+          </div>
+          <p id="detail-hint" class="text-xs text-slate-600 mt-1.5">3 segments · 2 frames each · 320×240 — fastest, lowest token cost</p>
+        </div>
+
+        <div class="mt-3 rounded-xl overflow-hidden" style="border: 1px solid #1e293b;">
+          <button type="button" onclick="toggleArch()" class="w-full flex items-center justify-between px-4 py-3 text-left" style="background:#0f172a;">
+            <div class="flex items-center gap-2">
+              <div id="arch-dot" class="w-2 h-2 rounded-full" style="background:#334155;transition:background 0.2s;"></div>
+              <span class="text-xs font-semibold text-slate-400">Full Architecture</span>
+              <span class="text-xs text-slate-600">V-JEPA 2 · SigLIP2 · EmbeddingGemma</span>
+            </div>
+            <svg id="arch-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 0.2s"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+
+          <div id="arch-panel" class="hidden px-4 pb-4 pt-2" style="background:#0a0f1a;">
+            <p class="text-xs text-slate-500 mb-3">When enabled, builds a full searchable index before answering. More accurate for long/complex videos.</p>
+
+            <div class="flex flex-col gap-2 mb-4">
+              <div class="arch-model-card" style="border-left:3px solid #4a90d9;">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-bold" style="color:#7eb8f0;">V-JEPA 2</span>
+                  <span class="arch-badge" style="background:rgba(74,144,217,0.12);color:#7eb8f0;border-color:rgba(74,144,217,0.3);">Scene Detection</span>
+                </div>
+                <p class="text-xs font-mono text-slate-500 mb-1">facebook/vjepa2-vitl-fpc64-256</p>
+                <p class="text-xs text-slate-600">16-frame clips → Ward linkage → motion-aware scene boundaries</p>
+              </div>
+              <div class="arch-model-card" style="border-left:3px solid #e8744f;">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-bold" style="color:#f0a080;">SigLIP2</span>
+                  <span class="arch-badge" style="background:rgba(232,116,79,0.12);color:#f0a080;border-color:rgba(232,116,79,0.3);">Visual Embeddings</span>
+                </div>
+                <p class="text-xs font-mono text-slate-500 mb-1">google/siglip2-base-patch16-256</p>
+                <p class="text-xs text-slate-600">Frames + text → shared vision-language space → <code class="text-slate-500">field="visual"</code> search</p>
+              </div>
+              <div class="arch-model-card" style="border-left:3px solid #6bb86b;">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-xs font-bold" style="color:#90d490;">EmbeddingGemma</span>
+                  <span class="arch-badge" style="background:rgba(107,184,107,0.12);color:#90d490;border-color:rgba(107,184,107,0.3);">Semantic Embeddings</span>
+                </div>
+                <p class="text-xs font-mono text-slate-500 mb-1">google/embedding-gemma-300m</p>
+                <p class="text-xs text-slate-600">Captions → semantic space → <code class="text-slate-500">field="summary"</code> + <code class="text-slate-500">field="action"</code> search</p>
+              </div>
+            </div>
+
+            <label class="flex items-center gap-3 cursor-pointer select-none" onclick="toggleFullIndex()">
+              <div id="arch-track" class="toggle-track">
+                <div id="arch-thumb" class="toggle-thumb"></div>
+              </div>
+              <div>
+                <p class="text-xs font-semibold text-slate-300" id="arch-label">Full indexing disabled</p>
+                <p class="text-xs text-slate-600">Models load on first use (~2–5 min for large videos)</p>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <button id="submit-btn" class="btn-primary w-full mt-4 flex items-center justify-center gap-2" onclick="submitQuery()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="m21 21-4.35-4.35"/>
+          </svg>
+          Analyze Video
+        </button>        <p id="validation-msg" class="validation-msg"></p>      </div>
+
+      <div id="result-card" class="card rounded-xl hidden">
+        <div id="loading-state" class="p-6 flex flex-col items-center gap-4">
+          <div class="progress-bar w-full rounded-full"></div>
+          <div class="flex items-center gap-3">
+            <div class="spinner"></div>
+            <div>
+              <p class="text-sm font-semibold text-slate-200">Analyzing video…</p>
+              <p class="text-xs text-slate-500 mt-0.5">This may take up to a minute</p>
+            </div>
+          </div>
+        </div>
+
+        <div id="answer-state" class="hidden p-5">
+          <div class="flex items-center gap-2 mb-4">
+            <div class="w-6 h-6 rounded-lg flex items-center justify-center" style="background: linear-gradient(135deg, #6366f1, #8b5cf6);">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              </svg>
+            </div>
+            <span class="text-sm font-semibold text-slate-200">Answer</span>
+          </div>
+          <div id="answer-html" class="answer-prose"></div>
+        </div>
+
+        <div id="error-state" class="hidden p-5">
+          <div class="flex items-start gap-3">
+            <div class="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5" style="background: rgba(239,68,68,0.15);">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="8" x2="12" y2="12"/>
+                <line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+            </div>
+            <div>
+              <p class="text-sm font-semibold text-red-400">Analysis failed</p>
+              <p id="error-message" class="text-xs text-slate-400 mt-1"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <script>
+    const fileInput = document.getElementById('file-input');
+    const dropZone = document.getElementById('drop-zone');
+    const videoContainer = document.getElementById('video-container');
+    const videoPlayer = document.getElementById('video-player');
+    const fileName = document.getElementById('file-name');
+    const submitBtn = document.getElementById('submit-btn');
+    const resultCard = document.getElementById('result-card');
+    const loadingState = document.getElementById('loading-state');
+    const answerState = document.getElementById('answer-state');
+    const errorState = document.getElementById('error-state');
+    const answerHtml = document.getElementById('answer-html');
+    const errorMessage = document.getElementById('error-message');
+    const timestampsBar = document.getElementById('timestamps-bar');
+    const chipsRow = document.getElementById('chips-row');
+    const seekIndicator = document.getElementById('seek-indicator');
+    const backendSelect = document.getElementById('backend');
+
+    let currentFile = null;
+    let seekTimeout = null;
+
+    let currentDetail = 'low';
+    let fullIndex = false;
+    let archOpen = false;
+    let currentMode = 'direct';
+
+    const modeHints = {
+      direct: 'One API call — frames sent directly to the model. Cheapest, fastest, most reliable.',
+      agent:  'RLM reasoning loop — model writes and executes code iteratively. More powerful but uses multiple API calls.',
+    };
+
+    function setMode(val) {
+      currentMode = val;
+      document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('mode-' + val).classList.add('active');
+      document.getElementById('mode-hint').textContent = modeHints[val];
+    }
+    const detailHints = {
+      low:    '3 segments · 2 frames each · 320×240 — fastest, lowest token cost',
+      medium: '4 segments · 3 frames each · 480×360 — balanced',
+      high:   '5 segments · 4 frames each · 640×480 — most detail, highest token cost',
+    };
+
+    function setDetail(val) {
+      currentDetail = val;
+      document.querySelectorAll('.detail-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.val === val);
+      });
+      document.getElementById('detail-hint').textContent = detailHints[val];
+    }
+
+    function toggleArch() {
+      archOpen = !archOpen;
+      document.getElementById('arch-panel').classList.toggle('hidden', !archOpen);
+      document.getElementById('arch-chevron').style.transform = archOpen ? 'rotate(180deg)' : '';
+    }
+
+    function toggleFullIndex() {
+      fullIndex = !fullIndex;
+      const track = document.getElementById('arch-track');
+      const dot = document.getElementById('arch-dot');
+      const label = document.getElementById('arch-label');
+      track.classList.toggle('on', fullIndex);
+      dot.style.background = fullIndex ? '#6366f1' : '#334155';
+      label.textContent = fullIndex ? 'Full indexing enabled (V-JEPA 2 + SigLIP2 + EmbeddingGemma)' : 'Full indexing disabled';
+    }
+
+    const modelDefaults = {
+      openrouter: 'openai/gpt-4o',
+      openai: 'gpt-4o',
+      anthropic: 'claude-opus-4-5',
+      gemini: 'gemini-2.0-flash',
+    };
+
+    backendSelect.addEventListener('change', () => {
+      document.getElementById('model').value = modelDefaults[backendSelect.value] || 'gpt-4o';
+    });
+
+    function setFile(file) {
+      currentFile = file;
+      const url = URL.createObjectURL(file);
+      videoPlayer.src = url;
+      videoContainer.classList.remove('hidden');
+      fileName.textContent = file.name;
+      fileName.classList.remove('hidden');
+      document.getElementById('validation-msg').classList.remove('show');
+      videoPlayer.load();
+    }
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) setFile(fileInput.files[0]);
+    });
+
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('drag-over');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file && file.type.startsWith('video/')) setFile(file);
+    });
+
+    function seekTo(seconds) {
+      if (!videoPlayer.src) return;
+      videoPlayer.currentTime = seconds;
+
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      const frac = seconds - Math.floor(seconds);
+      const fracStr = frac >= 0.05 ? `.${Math.round(frac * 10)}` : '';
+      const label = `${mins}:${String(secs).padStart(2, '0')}${fracStr}`;
+
+      seekIndicator.textContent = `⏱ ${label}`;
+      seekIndicator.classList.add('show');
+      clearTimeout(seekTimeout);
+      seekTimeout = setTimeout(() => seekIndicator.classList.remove('show'), 1400);
+
+      document.querySelectorAll('.ts-chip').forEach(c => {
+        c.classList.toggle('active', parseFloat(c.dataset.t) === seconds);
+      });
+    }
+
+    function buildChips(timestamps) {
+      chipsRow.innerHTML = '';
+      if (!timestamps.length) {
+        timestampsBar.classList.add('hidden');
+        return;
+      }
+      timestamps.forEach(ts => {
+        const btn = document.createElement('button');
+        btn.className = 'ts-chip';
+        btn.dataset.t = ts.seconds;
+        btn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>${ts.label}`;
+        btn.addEventListener('click', () => seekTo(ts.seconds));
+        chipsRow.appendChild(btn);
+      });
+      timestampsBar.classList.remove('hidden');
+    }
+
+    function showLoading() {
+      resultCard.classList.remove('hidden');
+      loadingState.classList.remove('hidden');
+      answerState.classList.add('hidden');
+      errorState.classList.add('hidden');
+    }
+
+    function showAnswer(data) {
+      loadingState.classList.add('hidden');
+      errorState.classList.add('hidden');
+      answerHtml.innerHTML = data.answer_html;
+      answerState.classList.remove('hidden');
+      buildChips(data.timestamps);
+    }
+
+    function showError(msg) {
+      loadingState.classList.add('hidden');
+      answerState.classList.add('hidden');
+      errorMessage.textContent = msg;
+      errorState.classList.remove('hidden');
+    }
+
+    function shakeBtn() {
+      submitBtn.classList.remove('shake');
+      void submitBtn.offsetWidth;
+      submitBtn.classList.add('shake');
+      submitBtn.addEventListener('animationend', () => submitBtn.classList.remove('shake'), { once: true });
+    }
+
+    async function submitQuery() {
+      const question = document.getElementById('question').value.trim();
+      const validationMsg = document.getElementById('validation-msg');
+
+      if (!currentFile && !question) {
+        validationMsg.textContent = 'Please upload a video and enter a question.';
+        validationMsg.classList.add('show');
+        shakeBtn();
+        return;
+      }
+      if (!currentFile) {
+        validationMsg.textContent = 'Please upload a video first.';
+        validationMsg.classList.add('show');
+        shakeBtn();
+        return;
+      }
+      if (!question) {
+        validationMsg.textContent = 'Please enter a question.';
+        validationMsg.classList.add('show');
+        shakeBtn();
+        return;
+      }
+
+      validationMsg.classList.remove('show');
+      submitBtn.disabled = true;
+      showLoading();
+      timestampsBar.classList.add('hidden');
+
+      const form = new FormData();
+      form.append('video', currentFile);
+      form.append('question', question);
+      form.append('backend', document.getElementById('backend').value);
+      form.append('model', document.getElementById('model').value);
+      form.append('detail', currentDetail);
+      form.append('full_index', fullIndex);
+      form.append('mode', currentMode);
+
+      try {
+        const res = await fetch('/api/analyze', { method: 'POST', body: form });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || 'Unknown error');
+        }
+        const data = await res.json();
+        showAnswer(data);
+      } catch (e) {
+        showError(e.message);
+      } finally {
+        submitBtn.disabled = false;
+      }
+    }
+
+    document.getElementById('question').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submitQuery();
+    });
+  </script>
+
+</body>
+</html>
