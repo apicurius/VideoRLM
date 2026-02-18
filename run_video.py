@@ -22,7 +22,7 @@ vrlm = VideoRLM(
 
 result = vrlm.completion(
     "/Users/oerdogan/LVU/test_video.mp4",
-    prompt="What is the most important concept explained in this video? Use the search tools to find the key moments, then zoom in to describe them in detail.",
+    prompt="Provide a comprehensive analysis of this video. First, search for all distinct scenes and topics covered. Then zoom into each key section to identify: (1) the main concepts being presented, (2) any diagrams, text, or visual aids shown on screen, (3) the speaker's key arguments and examples, and (4) how the sections connect to form the overall narrative. Finally, summarize the video's thesis and the evidence used to support it.",
 )
 
 print("\n" + "=" * 60)
