@@ -7,7 +7,7 @@ logger = RLMLogger(log_dir="./logs")
 
 vrlm = VideoRLM(
     backend="gemini",
-    backend_kwargs={"model_name": "gemini-2.5-flash"},
+    backend_kwargs={"model_name": "gemini-3-flash-preview", "timeout": 300.0},
     fps=0.5,
     num_segments=5,
     max_frames_per_segment=3,

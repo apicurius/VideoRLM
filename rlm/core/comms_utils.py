@@ -47,6 +47,13 @@ class LMRequest:
         d["depth"] = self.depth
         return d
 
+    @staticmethod
+    def _require_depth(data: dict) -> int:
+        """Extract depth from dict, raising if missing."""
+        if "depth" not in data:
+            raise ValueError("LMRequest requires 'depth' field")
+        return data["depth"]
+
     @classmethod
     def from_dict(cls, data: dict) -> "LMRequest":
         """Create from dict."""
@@ -54,7 +61,7 @@ class LMRequest:
             prompt=data.get("prompt"),
             prompts=data.get("prompts"),
             model=data.get("model"),
-            depth=data.get("depth", -1),  # TODO: Default should throw an error
+            depth=cls._require_depth(data),
         )
 
 

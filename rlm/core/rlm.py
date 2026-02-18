@@ -138,7 +138,9 @@ class RLM:
             self.verbose.print_metadata(metadata)
 
     @contextmanager
-    def _spawn_completion_context(self, prompt: str | dict[str, Any]):
+    def _spawn_completion_context(
+        self, prompt: str | dict[str, Any], custom_tools: dict[str, Any] | None = None
+    ):
         """
         Spawn an LM handler and environment for a single completion call.
 
@@ -181,8 +183,8 @@ class RLM:
             env_kwargs["context_payload"] = prompt
             env_kwargs["depth"] = self.depth + 1  # Environment depth is RLM depth + 1
             # Pass custom tools to the environment
-            if self.custom_tools is not None:
-                env_kwargs["custom_tools"] = self.custom_tools
+            if custom_tools is not None:
+                env_kwargs["custom_tools"] = custom_tools
             if self.custom_sub_tools is not None:
                 env_kwargs["custom_sub_tools"] = self.custom_sub_tools
             environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
@@ -197,7 +199,9 @@ class RLM:
             if not self.persistent and hasattr(environment, "cleanup"):
                 environment.cleanup()
 
-    def _setup_prompt(self, prompt: str | dict[str, Any]) -> list[dict[str, Any]]:
+    def _setup_prompt(
+        self, prompt: str | dict[str, Any], custom_tools: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         """
         Setup the system prompt for the RLM. Also include metadata about the prompt and build
         up the initial message history.
@@ -206,13 +210,16 @@ class RLM:
         message_history = build_rlm_system_prompt(
             system_prompt=self.system_prompt,
             query_metadata=metadata,
-            custom_tools=self.custom_tools,
+            custom_tools=custom_tools,
         )
 
         return message_history
 
     def completion(
-        self, prompt: str | dict[str, Any], root_prompt: str | None = None
+        self,
+        prompt: str | dict[str, Any],
+        root_prompt: str | None = None,
+        extra_tools: dict[str, Any] | None = None,
     ) -> RLMChatCompletion:
         """
         Recursive Language Model completion call. This is the main entry point for querying an RLM, and
@@ -229,6 +236,12 @@ class RLM:
         """
         time_start = time.perf_counter()
 
+        # Merge extra_tools with instance custom_tools for this call only
+        if extra_tools:
+            effective_tools = {**(self.custom_tools or {}), **extra_tools}
+        else:
+            effective_tools = self.custom_tools
+
         # If we're at max depth, the RLM is an LM, so we fallback to the regular LM.
         if self.depth >= self.max_depth:
             return self._fallback_answer(prompt)
@@ -236,8 +249,8 @@ class RLM:
         if self.logger:
             self.logger.clear_iterations()
 
-        with self._spawn_completion_context(prompt) as (lm_handler, environment):
-            message_history = self._setup_prompt(prompt)
+        with self._spawn_completion_context(prompt, effective_tools) as (lm_handler, environment):
+            message_history = self._setup_prompt(prompt, effective_tools)
             consecutive_no_code = 0
 
             for i in range(self.max_iterations):
@@ -276,23 +289,27 @@ class RLM:
                         for m in usage.model_usage_summaries.values()
                     )
                     if total_tokens >= self.token_budget:
-                        message_history.append({
-                            "role": "user",
-                            "content": (
-                                "TOKEN BUDGET REACHED. You must provide your final answer NOW. "
-                                "Use FINAL(your answer) or FINAL_VAR(variable_name) immediately."
-                            ),
-                        })
+                        message_history.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "TOKEN BUDGET REACHED. You must provide your final answer NOW. "
+                                    "Use FINAL(your answer) or FINAL_VAR(variable_name) immediately."
+                                ),
+                            }
+                        )
 
                 # Early stopping heuristic: consecutive iterations with no code execution
                 if consecutive_no_code >= 2:
-                    message_history.append({
-                        "role": "user",
-                        "content": (
-                            "You have been reasoning without executing code for multiple iterations. "
-                            "Please provide your final answer now using FINAL(your answer)."
-                        ),
-                    })
+                    message_history.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "You have been reasoning without executing code for multiple iterations. "
+                                "Please provide your final answer now using FINAL(your answer)."
+                            ),
+                        }
+                    )
 
                 # Check if RLM is done and has a final answer.
                 final_answer = find_final_answer(iteration.response, environment=environment)

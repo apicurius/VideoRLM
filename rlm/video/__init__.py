@@ -11,8 +11,8 @@ from rlm.video.video_prompts import VIDEO_SYSTEM_PROMPT
 
 if TYPE_CHECKING:
     from rlm.video.video_context import VideoContext
-    from rlm.video.video_loader import LoadedVideo, VideoLoader, VideoMetadata, VideoSegment
     from rlm.video.video_indexer import VideoIndex, VideoIndexer
+    from rlm.video.video_loader import LoadedVideo, VideoLoader, VideoMetadata, VideoSegment
     from rlm.video.video_rlm import VideoRLM
 
 

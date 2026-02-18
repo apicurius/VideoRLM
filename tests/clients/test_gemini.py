@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from dotenv import load_dotenv
-from google.genai import types
 
 from rlm.clients.gemini import GeminiClient
 from rlm.core.types import ModelUsageSummary, UsageSummary

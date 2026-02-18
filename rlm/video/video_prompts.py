@@ -22,21 +22,22 @@ The REPL environment is initialized with:
 6. An `extract_frames(start_time, end_time, fps=2.0, resize=(720, 540), max_frames=10)` function that extracts frames from the original video for a given time range. Returns a list of image dicts (content parts) that can be passed directly to `llm_query()`. Use this to zoom into specific moments at higher resolution or density than the pre-extracted segment frames.
 
 SEARCH TOOLS (when available):
-7. `search_video(query, top_k=5, field="summary")` — semantic search over pre-indexed video segments.
-   - field="summary" (default): search visual descriptions
-   - field="action": search by action/activity type
-   - field="all": search across all annotation fields
+7. search_video — semantic search over pre-indexed video segments.
+   Parameters: query (str), top_k (int, default 5), field (str, default "summary").
+   - field "summary" (default): search visual descriptions
+   - field "action": search by action/activity type
+   - field "all": search across all annotation fields
    Returns top matches with start_time, end_time, score, caption, and structured annotation (summary, action, actor).
-8. `search_transcript(query)` — search spoken words in the video transcript (ASR). Returns matching entries with timestamps and surrounding context.
-9. `get_transcript(start_time, end_time)` — get the spoken transcript for a specific time range.
-10. `get_scene_list()` — list all detected scene boundaries with structured annotations including action descriptions and actor information.
+8. search_transcript — search spoken words in the video transcript (ASR). Parameter: query (str). Returns matching entries with timestamps and surrounding context.
+9. get_transcript — get the spoken transcript for a specific time range. Parameters: start_time (float), end_time (float).
+10. get_scene_list — list all detected scene boundaries with structured annotations including action descriptions and actor information. Takes no parameters.
 
 PIXEL MANIPULATION TOOLS (always available):
-11. `threshold_frame(image_dict, value=128)` — convert to binary mask for counting/segmentation
-12. `crop_frame(image_dict, x1_pct, y1_pct, x2_pct, y2_pct)` — extract region of interest (0.0-1.0 coords)
-13. `diff_frames(image_dict_a, image_dict_b)` — pixel difference for motion/change detection
-14. `blend_frames(image_dicts)` — average multiple frames into composite
-15. `frame_info(image_dict)` — get dimensions and brightness statistics
+11. threshold_frame — convert to binary mask for counting/segmentation. Parameters: image_dict, value (int, default 128).
+12. crop_frame — extract region of interest (0.0-1.0 coords). Parameters: image_dict, x1_pct, y1_pct, x2_pct, y2_pct.
+13. diff_frames — pixel difference for motion/change detection. Parameters: image_dict_a, image_dict_b.
+14. blend_frames — average multiple frames into composite. Parameters: image_dicts (list).
+15. frame_info — get dimensions and brightness statistics. Parameters: image_dict.
 
 CODE-BASED VISUAL REASONING:
 When you need precise visual analysis (counting objects, measuring sizes, detecting changes), use code:
@@ -76,7 +77,7 @@ Use these fields to quickly assess relevance before extracting frames.
 Use this approach instead of linearly scanning all segments when you need to find specific content.
 
 ## DISCRIMINATIVE VQA
-For multiple-choice or yes/no questions, use `discriminative_vqa(question, candidates)`
+For multiple-choice or yes/no questions, use discriminative_vqa
 for fast embedding-based answer selection without LLM generation. Example:
 ```repl
 result = discriminative_vqa("What is the person doing?", ["cooking", "reading", "exercising"])

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 
@@ -65,9 +65,7 @@ def _detect_scenes_embedding(
     from sklearn.cluster import AgglomerativeClustering
 
     connectivity = (
-        speye(n, format="csr")
-        + speye(n, k=1, format="csr")
-        + speye(n, k=-1, format="csr")
+        speye(n, format="csr") + speye(n, k=1, format="csr") + speye(n, k=-1, format="csr")
     )
 
     clustering = AgglomerativeClustering(

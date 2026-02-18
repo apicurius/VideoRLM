@@ -103,11 +103,6 @@ def format_iteration(
     return messages
 
 
-################
-# TODO: Remove and refactor these soon
-################
-
-
 def format_execution_result(result: REPLResult) -> str:
     """
     Format the execution result as a string for display.
@@ -139,36 +134,3 @@ def format_execution_result(result: REPLResult) -> str:
         result_parts.append(f"REPL variables: {list(important_vars.keys())}\n")
 
     return "\n\n".join(result_parts) if result_parts else "No output"
-
-
-def check_for_final_answer(response: str, repl_env, logger) -> str | None:
-    """Check if response contains a final answer."""
-    # Use the new find_final_answer function which handles both FINAL and FINAL_VAR
-    return find_final_answer(response, environment=repl_env)
-
-
-def convert_context_for_repl(context):
-    """
-    Convert REPL context to either some
-    """
-    if isinstance(context, dict):
-        context_data = context
-        context_str = None
-    elif isinstance(context, str):
-        context_data = None
-        context_str = context
-    elif isinstance(context, list):
-        if len(context) > 0 and isinstance(context[0], dict):
-            if "content" in context[0]:
-                context_data = [msg.get("content", "") for msg in context]
-            else:
-                context_data = context
-            context_str = None
-        else:
-            context_data = context
-            context_str = None
-    else:
-        context_data = context
-        context_str = None
-
-    return context_data, context_str

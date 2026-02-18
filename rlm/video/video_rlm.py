@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import cv2
 
@@ -187,14 +188,7 @@ class VideoRLM:
         context = self.context_builder.build_context(loaded_video)
         extra_tools = self._build_extra_tools(video_path, loaded_video)
 
-        # Merge with any user-supplied custom tools
-        prev_tools = self.rlm.custom_tools
-        merged = {**(prev_tools or {}), **extra_tools}
-        self.rlm.custom_tools = merged
-        try:
-            return self.rlm.completion(context, root_prompt=prompt)
-        finally:
-            self.rlm.custom_tools = prev_tools
+        return self.rlm.completion(context, root_prompt=prompt, extra_tools=extra_tools)
 
     def _build_extra_tools(
         self,
@@ -265,6 +259,7 @@ class VideoRLM:
                 extra_tools[tool_name] = result
 
             from rlm.video.video_search_tools import make_discriminative_vqa
+
             vqa_result = make_discriminative_vqa(video_index)
             extra_tools[vqa_result["tool"].__name__] = vqa_result
 
@@ -380,16 +375,12 @@ class VideoRLM:
             f"```\n"
         )
 
-        prev_tools = self.rlm.custom_tools
-        merged = {**(prev_tools or {}), **extra_tools}
-        self.rlm.custom_tools = merged
-        original_system_prompt = self.rlm.custom_system_prompt
-        self.rlm.custom_system_prompt = VIDEO_SYSTEM_PROMPT + shard_guidance
+        original_system_prompt = self.rlm.system_prompt
+        self.rlm.system_prompt = VIDEO_SYSTEM_PROMPT + shard_guidance
         try:
-            return self.rlm.completion(context, root_prompt=prompt)
+            return self.rlm.completion(context, root_prompt=prompt, extra_tools=extra_tools)
         finally:
-            self.rlm.custom_tools = prev_tools
-            self.rlm.custom_system_prompt = original_system_prompt
+            self.rlm.system_prompt = original_system_prompt
 
     @staticmethod
     def _make_extract_frames(
@@ -475,9 +466,7 @@ class VideoRLM:
                         continue
                     if resize is not None:
                         frame = cv2.resize(frame, resize)
-                    frames.append(
-                        _encode_frame(frame, format=image_format, quality=image_quality)
-                    )
+                    frames.append(_encode_frame(frame, format=image_format, quality=image_quality))
 
                 return frames
             finally:

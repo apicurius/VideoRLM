@@ -130,7 +130,7 @@ class REPLResult:
     stderr: str
     locals: dict
     execution_time: float
-    llm_calls: list["RLMChatCompletion"]
+    rlm_calls: list["RLMChatCompletion"]
 
     def __init__(
         self,

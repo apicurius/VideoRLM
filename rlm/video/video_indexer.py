@@ -8,10 +8,11 @@ import logging
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -67,7 +68,7 @@ class VideoIndex:
         (directory / "metadata.json").write_text(json.dumps(metadata))
 
     @classmethod
-    def load(cls, path: str | Path) -> "VideoIndex":
+    def load(cls, path: str | Path) -> VideoIndex:
         """Load a previously saved index from *path*.
 
         ``embed_fn`` will be ``None`` on the returned object — the caller
@@ -143,6 +144,7 @@ class VideoIndexer:
         self._text_embedding_model_name = text_embedding_model
         self._text_model = None
         self._text_tokenizer = None
+        self._memory_cache: dict[str, VideoIndex] = {}
 
     # ------------------------------------------------------------------
     # Lazy model loading
@@ -158,7 +160,8 @@ class VideoIndexer:
             from sentence_transformers import SentenceTransformer
 
             self._text_model = SentenceTransformer(
-                self._text_embedding_model_name, device=self._device,
+                self._text_embedding_model_name,
+                device=self._device,
             )
             self._text_model_type = "sentence_transformers"
         except ImportError:
@@ -186,8 +189,10 @@ class VideoIndexer:
 
         device = self._device
         if device == "auto":
-            device = "mps" if torch.backends.mps.is_available() else (
-                "cuda" if torch.cuda.is_available() else "cpu"
+            device = (
+                "mps"
+                if torch.backends.mps.is_available()
+                else ("cuda" if torch.cuda.is_available() else "cpu")
             )
 
         # AutoProcessor/AutoTokenizer crash with SigLIP2 on transformers >=5.2
@@ -257,15 +262,25 @@ class VideoIndexer:
             A :class:`VideoIndex` ready for use with the search-tool factories in
             :mod:`rlm.video.video_search_tools`.
         """
-        # --- Cache lookup ---
+        # --- In-memory / disk cache lookup ---
+        mem_key: str | None = None
+        try:
+            mem_key = _cache_key(loaded_video.metadata.path)
+        except (FileNotFoundError, OSError):
+            pass
+
+        if mem_key is not None and mem_key in self._memory_cache:
+            logger.info("Returning in-memory cached index for %s", loaded_video.metadata.path)
+            return self._memory_cache[mem_key]
+
         cache_path: Path | None = None
-        if self._cache_dir is not None:
-            key = _cache_key(loaded_video.metadata.path)
-            cache_path = self._cache_dir / key
+        if mem_key is not None and self._cache_dir is not None:
+            cache_path = self._cache_dir / mem_key
             if (cache_path / "metadata.json").exists():
                 logger.info("Loading cached index from %s", cache_path)
                 idx = VideoIndex.load(cache_path)
                 idx.embed_fn = self._encode_query
+                self._memory_cache[mem_key] = idx
                 return idx
 
         fps = loaded_video.metadata.extraction_fps
@@ -276,13 +291,18 @@ class VideoIndexer:
 
         # 2. Detect scene boundaries (uses the CLIP embedding model)
         self._ensure_model()
+
         def _scene_embed_fn(f):
-            return self._encode_frames(f, temporal_window=self._temporal_window, stride=self._embedding_stride)
+            return self._encode_frames(
+                f, temporal_window=self._temporal_window, stride=self._embedding_stride
+            )
 
         hierarchy_result: dict | None = None
         if self._hierarchical:
             hierarchy_result = detect_scenes_hierarchical(
-                frames, timestamps, embed_fn=_scene_embed_fn,
+                frames,
+                timestamps,
+                embed_fn=_scene_embed_fn,
             )
             scenes = hierarchy_result["levels"][0]  # finest level
         else:
@@ -317,7 +337,9 @@ class VideoIndexer:
                     continue
                 # ASR context injection: prepend transcript text for this segment
                 transcript_text = self._transcript_for_range(
-                    transcript, seg["start_time"], seg["end_time"],
+                    transcript,
+                    seg["start_time"],
+                    seg["end_time"],
                 )
                 if transcript_text:
                     seg_frames = [f"[transcript] {transcript_text}"] + seg_frames
@@ -325,6 +347,7 @@ class VideoIndexer:
 
             # 5a. Frame-level captioning (Tree-of-Captions leaf level)
             if frame_caption_fn is not None:
+
                 def _frame_caption_one(args):
                     seg, seg_frames = args
                     # Extract midpoint keyframe (skip string context tokens)
@@ -343,10 +366,13 @@ class VideoIndexer:
                             seg, frame_cap = future.result()
                             seg["frame_caption"] = frame_cap
                         except Exception:
-                            logger.warning("Frame caption future raised an exception", exc_info=True)
+                            logger.warning(
+                                "Frame caption future raised an exception", exc_info=True
+                            )
 
             # 5b. Segment-level captioning (Tree-of-Captions node level)
             if caption_fn is not None:
+
                 def _caption_segment(args):
                     seg, seg_frames = args
                     # Filter visually dissimilar edge frames
@@ -359,6 +385,7 @@ class VideoIndexer:
                     # Resize real frames for captioning if caption_resize is set
                     if self._caption_resize:
                         import cv2
+
                         resized = []
                         for f in seg_frames:
                             if isinstance(f, str):
@@ -413,7 +440,13 @@ class VideoIndexer:
             seg.pop("_caption_source", None)
 
         # 6. Self-Refine annotations
-        self._refine_annotations(segment_infos, transcript, refine_fn, video_metadata=loaded_video.metadata, rounds=refine_rounds)
+        self._refine_annotations(
+            segment_infos,
+            transcript,
+            refine_fn,
+            video_metadata=loaded_video.metadata,
+            rounds=refine_rounds,
+        )
 
         # 6b. Mark near-duplicate adjacent segments before embedding
         self._deduplicate_segments(segment_infos)
@@ -455,11 +488,13 @@ class VideoIndexer:
                         if seg["start_time"] >= h_start and seg["end_time"] <= h_end
                     ]
                     merged_caption = " ".join(c for c in child_captions if c)
-                    lvl_segments.append({
-                        "start_time": h_start,
-                        "end_time": h_end,
-                        "caption": merged_caption,
-                    })
+                    lvl_segments.append(
+                        {
+                            "start_time": h_start,
+                            "end_time": h_end,
+                            "caption": merged_caption,
+                        }
+                    )
                 segment_hierarchy.append(lvl_segments)
 
                 # Embed the merged captions for this level
@@ -492,6 +527,8 @@ class VideoIndexer:
             except Exception:
                 logger.warning("Failed to save index cache to %s", cache_path, exc_info=True)
 
+        if mem_key is not None:
+            self._memory_cache[mem_key] = index
         return index
 
     # ------------------------------------------------------------------
@@ -505,7 +542,9 @@ class VideoIndexer:
             seg_frames = seg.frames
             if self._max_frames_per_segment and len(seg_frames) > self._max_frames_per_segment:
                 step = len(seg_frames) / self._max_frames_per_segment
-                seg_frames = [seg_frames[int(i * step)] for i in range(self._max_frames_per_segment)]
+                seg_frames = [
+                    seg_frames[int(i * step)] for i in range(self._max_frames_per_segment)
+                ]
             results.append(
                 {
                     "start_time": seg.start_time,
@@ -525,13 +564,13 @@ class VideoIndexer:
         """Create segment dicts from detected scene boundaries."""
         results: list[dict] = []
         for start, end in scenes:
-            seg_frames = [
-                f for f, t in zip(frames, timestamps) if start <= t < end or t == end
-            ]
+            seg_frames = [f for f, t in zip(frames, timestamps) if start <= t < end or t == end]
             # Cap frames per segment for memory/cost efficiency
             if self._max_frames_per_segment and len(seg_frames) > self._max_frames_per_segment:
                 step = len(seg_frames) / self._max_frames_per_segment
-                seg_frames = [seg_frames[int(i * step)] for i in range(self._max_frames_per_segment)]
+                seg_frames = [
+                    seg_frames[int(i * step)] for i in range(self._max_frames_per_segment)
+                ]
             results.append(
                 {
                     "start_time": start,
@@ -543,7 +582,9 @@ class VideoIndexer:
         return results
 
     def _pre_caption_dedup(
-        self, segments: list[dict], threshold: float = 0.90,
+        self,
+        segments: list[dict],
+        threshold: float = 0.90,
     ) -> None:
         """Identify visually near-duplicate segments before captioning.
 
@@ -606,7 +647,9 @@ class VideoIndexer:
         if skipped:
             logger.info(
                 "Pre-caption dedup: %d/%d segments skipped (threshold=%.2f)",
-                skipped, len(segments), threshold,
+                skipped,
+                len(segments),
+                threshold,
             )
 
     def _filter_edge_frames(self, seg_frames: list, threshold: float = 0.5) -> list:
@@ -713,13 +756,15 @@ class VideoIndexer:
         return smoothed
 
     def _embed_captions(
-        self, segments: list[dict],
+        self,
+        segments: list[dict],
     ) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Encode segment captions and action briefs into embedding matrices."""
         captions = [seg.get("caption", "") for seg in segments]
         actions = [
             ""
-            if (b := seg.get("annotation", {}).get("action", {}).get("brief", "").strip()) in ("", "N/A")
+            if (b := seg.get("annotation", {}).get("action", {}).get("brief", "").strip())
+            in ("", "N/A")
             else b
             for seg in segments
         ]
@@ -815,18 +860,20 @@ class VideoIndexer:
         if n_marked:
             logger.info(
                 "Global dedup: %d/%d segments marked as duplicate (threshold=%.2f)",
-                n_marked, len(segments), threshold,
+                n_marked,
+                len(segments),
+                threshold,
             )
 
     @staticmethod
     def _transcript_for_range(
-        transcript: list[dict], start: float, end: float,
+        transcript: list[dict],
+        start: float,
+        end: float,
     ) -> str:
         """Return concatenated transcript text overlapping a time range."""
         return " ".join(
-            e["text"]
-            for e in transcript
-            if e["end_time"] >= start and e["start_time"] <= end
+            e["text"] for e in transcript if e["end_time"] >= start and e["start_time"] <= end
         )
 
     def _refine_annotations(
@@ -868,9 +915,7 @@ class VideoIndexer:
             for j, s in enumerate(segs):
                 fc = s.get("frame_caption", "")
                 sc = s.get("caption", "")
-                lines.append(
-                    f"  Seg {j} [{s['start_time']:.1f}s-{s['end_time']:.1f}s]:"
-                )
+                lines.append(f"  Seg {j} [{s['start_time']:.1f}s-{s['end_time']:.1f}s]:")
                 if fc:
                     lines.append(f"    Frame: {fc}")
                 if sc:
@@ -883,11 +928,11 @@ class VideoIndexer:
             refine_tasks = []
             for i, seg in enumerate(segments):
                 neighbors = segments[max(0, i - 1) : i + 2]
-                neighbor_text = " | ".join(
-                    n.get("caption", "") for n in neighbors if n is not seg
-                )
+                neighbor_text = " | ".join(n.get("caption", "") for n in neighbors if n is not seg)
                 transcript_text = self._transcript_for_range(
-                    transcript, seg["start_time"], seg["end_time"],
+                    transcript,
+                    seg["start_time"],
+                    seg["end_time"],
                 )
                 context = f"""# Video Metadata
 {metadata_text}
@@ -964,9 +1009,7 @@ class VideoIndexer:
                 try:
                     seg["annotation"] = json.loads(refined)
                     seg["caption"] = (
-                        seg["annotation"]
-                        .get("summary", {})
-                        .get("brief", seg.get("caption", ""))
+                        seg["annotation"].get("summary", {}).get("brief", seg.get("caption", ""))
                     )
                 except (json.JSONDecodeError, TypeError):
                     pass  # keep existing annotation if refinement fails
@@ -1005,7 +1048,8 @@ class VideoIndexer:
 
             # Get frames for this segment
             seg_frames = [
-                f for f, t in zip(loaded_video_frames, timestamps)
+                f
+                for f, t in zip(loaded_video_frames, timestamps)
                 if seg["start_time"] <= t <= seg["end_time"]
             ]
             if not seg_frames:
@@ -1063,10 +1107,15 @@ class VideoIndexer:
                     seg["caption_quality_score"] = round(best_score, 4)
                     logger.info(
                         "Re-captioned segment %.1f-%.1fs: score %.4f -> %.4f",
-                        seg["start_time"], seg["end_time"], similarity, best_score,
+                        seg["start_time"],
+                        seg["end_time"],
+                        similarity,
+                        best_score,
                     )
 
-    def _encode_frames(self, frames: list[np.ndarray], temporal_window: int = 1, stride: int | None = None) -> np.ndarray:
+    def _encode_frames(
+        self, frames: list[np.ndarray], temporal_window: int = 1, stride: int | None = None
+    ) -> np.ndarray:
         """Encode a batch of BGR frames into an (N, D) embedding matrix.
 
         Used by :func:`detect_scenes` for semantic scene boundary detection.
@@ -1106,7 +1155,7 @@ class VideoIndexer:
             accum = np.zeros_like(all_embs_arr)
             counts = np.zeros(n, dtype=np.float32)
             for start in range(0, n - temporal_window + 1, stride):
-                window_mean = all_embs_arr[start:start + temporal_window].mean(axis=0)
+                window_mean = all_embs_arr[start : start + temporal_window].mean(axis=0)
                 for k in range(start, min(start + temporal_window, n)):
                     accum[k] += window_mean
                     counts[k] += 1
@@ -1120,17 +1169,21 @@ class VideoIndexer:
             n = len(all_embs_arr)
             n_groups = n // temporal_window
             # Average groups of `temporal_window` consecutive frames
-            grouped = all_embs_arr[:n_groups * temporal_window].reshape(n_groups, temporal_window, -1)
+            grouped = all_embs_arr[: n_groups * temporal_window].reshape(
+                n_groups, temporal_window, -1
+            )
             averaged = grouped.mean(axis=1)
             # Re-normalize after averaging
             norms = np.linalg.norm(averaged, axis=1, keepdims=True)
             norms = np.maximum(norms, 1e-10)
             averaged = averaged / norms
             # Handle remainder frames
-            remainder = all_embs_arr[n_groups * temporal_window:]
+            remainder = all_embs_arr[n_groups * temporal_window :]
             if len(remainder) > 0:
                 rem_avg = remainder.mean(axis=0, keepdims=True)
-                rem_avg = rem_avg / np.maximum(np.linalg.norm(rem_avg, axis=1, keepdims=True), 1e-10)
+                rem_avg = rem_avg / np.maximum(
+                    np.linalg.norm(rem_avg, axis=1, keepdims=True), 1e-10
+                )
                 averaged = np.concatenate([averaged, rem_avg], axis=0)
             return averaged
 
@@ -1153,7 +1206,10 @@ class VideoIndexer:
                 import torch
 
                 inputs = self._text_tokenizer(
-                    texts, padding=True, truncation=True, max_length=512,
+                    texts,
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
                     return_tensors="pt",
                 )
                 with torch.no_grad():
@@ -1166,7 +1222,10 @@ class VideoIndexer:
         import torch
 
         inputs = self._tokenizer(
-            texts, padding="max_length", max_length=64, return_tensors="pt",
+            texts,
+            padding="max_length",
+            max_length=64,
+            return_tensors="pt",
         ).to(self._torch_device)
         with torch.no_grad():
             out = self._model.get_text_features(**inputs)
@@ -1210,12 +1269,17 @@ class VideoIndexer:
         try:
             subprocess.run(
                 [
-                    "ffmpeg", "-y",
-                    "-i", video_path,
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    video_path,
                     "-vn",
-                    "-acodec", "pcm_s16le",
-                    "-ar", "16000",
-                    "-ac", "1",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
                     out_wav,
                 ],
                 check=True,

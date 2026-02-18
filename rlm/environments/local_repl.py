@@ -250,9 +250,7 @@ class LocalREPL(NonIsolatedEnv):
         except Exception as e:
             return f"Error: LM query failed - {e}"
 
-    def _llm_query_batched(
-        self, prompts: list[str | list], model: str | None = None
-    ) -> list[str]:
+    def _llm_query_batched(self, prompts: list[str | list], model: str | None = None) -> list[str]:
         """Query the LM with multiple prompts concurrently.
 
         Args:
@@ -270,8 +268,7 @@ class LocalREPL(NonIsolatedEnv):
         try:
             # Wrap multimodal content parts as lists of message dicts
             wrapped = [
-                [{"role": "user", "content": p}] if isinstance(p, list) else p
-                for p in prompts
+                [{"role": "user", "content": p}] if isinstance(p, list) else p for p in prompts
             ]
 
             responses = send_lm_request_batched(

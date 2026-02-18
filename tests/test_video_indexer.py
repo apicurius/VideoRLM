@@ -4,7 +4,6 @@ import json
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from rlm.video.video_indexer import VideoIndex, VideoIndexer, _cache_key
 
@@ -62,9 +61,7 @@ class TestVideoIndexerIndexVideo:
 
     def _make_loaded_video(self, num_frames=10, fps=2.0):
         """Create a mock LoadedVideo with synthetic frames."""
-        frames = [
-            np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(num_frames)
-        ]
+        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(num_frames)]
         mock_video = MagicMock()
         mock_video.metadata.extraction_fps = fps
         mock_video.metadata.path = "/fake/video.mp4"
@@ -83,7 +80,9 @@ class TestVideoIndexerIndexVideo:
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(
-                    indexer, "_embed_captions", return_value=(None, None),
+                    indexer,
+                    "_embed_captions",
+                    return_value=(None, None),
                 ):
                     result = indexer.index_video(loaded, caption_fn=None)
 
@@ -110,7 +109,8 @@ class TestVideoIndexerIndexVideo:
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
-                indexer, "_embed_captions",
+                indexer,
+                "_embed_captions",
                 return_value=(fake_embeddings, fake_action_embeddings),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
@@ -145,7 +145,9 @@ class TestVideoIndexerIndexVideo:
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(
-                    indexer, "_embed_captions", return_value=(None, None),
+                    indexer,
+                    "_embed_captions",
+                    return_value=(None, None),
                 ):
                     result = indexer.index_video(loaded, caption_fn=None)
 
@@ -163,7 +165,9 @@ class TestVideoIndexerIndexVideo:
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(
-                    indexer, "_embed_captions", return_value=(None, None),
+                    indexer,
+                    "_embed_captions",
+                    return_value=(None, None),
                 ):
                     result = indexer.index_video(loaded, caption_fn=None)
 
@@ -187,7 +191,8 @@ class TestVideoIndexerIndexVideo:
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
-                indexer, "_embed_captions",
+                indexer,
+                "_embed_captions",
                 return_value=(fake_embeddings, fake_action_emb),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
@@ -214,10 +219,14 @@ class TestVideoIndexerIndexVideo:
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(
-                    indexer, "_embed_captions", return_value=(None, None),
+                    indexer,
+                    "_embed_captions",
+                    return_value=(None, None),
                 ):
                     indexer.index_video(
-                        loaded, caption_fn=caption_fn, refine_fn=refine_fn,
+                        loaded,
+                        caption_fn=caption_fn,
+                        refine_fn=refine_fn,
                     )
 
         # 3 rounds × 1 segment = 3 calls
@@ -243,7 +252,9 @@ class TestVideoIndexerIndexVideo:
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=transcript):
                 with patch.object(
-                    indexer, "_embed_captions", return_value=(None, None),
+                    indexer,
+                    "_embed_captions",
+                    return_value=(None, None),
                 ):
                     indexer.index_video(loaded, caption_fn=capture_caption_fn)
 
@@ -320,9 +331,7 @@ class TestVideoIndexerStructuredAnnotations:
     """Tests for structured annotation support in captioning."""
 
     def _make_loaded_video(self, num_frames=10, fps=2.0):
-        frames = [
-            np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(num_frames)
-        ]
+        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(num_frames)]
         mock_video = MagicMock()
         mock_video.metadata.extraction_fps = fps
         mock_video.metadata.path = "/fake/video.mp4"
@@ -346,7 +355,9 @@ class TestVideoIndexerStructuredAnnotations:
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
-                indexer, "_embed_captions", return_value=(np.array([[1.0]]), None),
+                indexer,
+                "_embed_captions",
+                return_value=(np.array([[1.0]]), None),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
                     result = indexer.index_video(loaded, caption_fn=caption_fn)
@@ -367,7 +378,9 @@ class TestVideoIndexerStructuredAnnotations:
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
-                indexer, "_embed_captions", return_value=(np.array([[1.0]]), None),
+                indexer,
+                "_embed_captions",
+                return_value=(np.array([[1.0]]), None),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
                     result = indexer.index_video(loaded, caption_fn=caption_fn)
@@ -396,10 +409,12 @@ class TestVideoIndexerSelfRefine:
         ]
         transcript = [{"start_time": 0.0, "end_time": 5.0, "text": "hello world"}]
 
-        refined = json.dumps({
-            "summary": {"brief": "refined caption", "detailed": "refined detailed"},
-            "action": {"brief": "running", "detailed": "running fast", "actor": "person"},
-        })
+        refined = json.dumps(
+            {
+                "summary": {"brief": "refined caption", "detailed": "refined detailed"},
+                "action": {"brief": "running", "detailed": "running fast", "actor": "person"},
+            }
+        )
         refine_fn = MagicMock(return_value=refined)
 
         indexer._refine_annotations(segments, transcript, refine_fn)
@@ -527,9 +542,7 @@ class TestVideoIndexerCache:
     """Test VideoIndexer cache_dir integration."""
 
     def _make_loaded_video(self, video_path="/fake/video.mp4", num_frames=10, fps=2.0):
-        frames = [
-            np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(num_frames)
-        ]
+        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(num_frames)]
         mock_video = MagicMock()
         mock_video.metadata.extraction_fps = fps
         mock_video.metadata.path = video_path
@@ -556,7 +569,9 @@ class TestVideoIndexerCache:
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(
-                    indexer, "_embed_captions", return_value=(fake_emb, None),
+                    indexer,
+                    "_embed_captions",
+                    return_value=(fake_emb, None),
                 ):
                     result1 = indexer.index_video(loaded, caption_fn=None)
 
@@ -596,7 +611,9 @@ class TestDetectScenesHierarchical:
             return rng.random((len(f), 16))
 
         result = detect_scenes_hierarchical(
-            frames, timestamps, embed_fn,
+            frames,
+            timestamps,
+            embed_fn,
             thresholds=(0.15, 0.30, 0.50),
             min_durations=(0.5, 2.0, 4.0),
         )
@@ -617,7 +634,9 @@ class TestDetectScenesHierarchical:
             return rng.random((len(f), 16))
 
         result = detect_scenes_hierarchical(
-            frames, timestamps, embed_fn,
+            frames,
+            timestamps,
+            embed_fn,
             thresholds=(0.10, 0.30, 0.60),
             min_durations=(0.5, 2.0, 4.0),
         )
@@ -626,8 +645,8 @@ class TestDetectScenesHierarchical:
         # Each subsequent level should have <= scenes than the previous
         for i in range(len(levels) - 1):
             assert len(levels[i]) >= len(levels[i + 1]), (
-                f"Level {i} has {len(levels[i])} scenes but level {i+1} "
-                f"has {len(levels[i+1])} — coarser should have fewer"
+                f"Level {i} has {len(levels[i])} scenes but level {i + 1} "
+                f"has {len(levels[i + 1])} — coarser should have fewer"
             )
 
     def test_empty_frames(self):
@@ -642,9 +661,7 @@ class TestHierarchicalIndexingRoundTrip:
     """Test hierarchical indexing save/load round-trip."""
 
     def _make_loaded_video(self, num_frames=20, fps=2.0):
-        frames = [
-            np.full((48, 64, 3), i * 12, dtype=np.uint8) for i in range(num_frames)
-        ]
+        frames = [np.full((48, 64, 3), i * 12, dtype=np.uint8) for i in range(num_frames)]
         mock_video = MagicMock()
         mock_video.metadata.extraction_fps = fps
         mock_video.metadata.path = "/fake/video.mp4"
@@ -675,7 +692,8 @@ class TestHierarchicalIndexingRoundTrip:
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(
-                    indexer, "_embed_captions",
+                    indexer,
+                    "_embed_captions",
                     return_value=(fake_emb, fake_action_emb),
                 ):
                     result = indexer.index_video(loaded, caption_fn=caption_fn)

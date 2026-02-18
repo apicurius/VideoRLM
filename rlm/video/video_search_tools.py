@@ -89,15 +89,20 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
     from sklearn.metrics.pairwise import cosine_similarity
 
     def _search_matrix(
-        query_emb: np.ndarray, matrix: np.ndarray,
+        query_emb: np.ndarray,
+        matrix: np.ndarray,
     ) -> np.ndarray:
         """Return per-segment cosine similarity scores."""
         return cosine_similarity(query_emb, matrix)[0]
 
     def search_video(
-        query: str, top_k: int = 5, field: str = "summary",
-        exclude_non_action: bool = True, diverse: bool = True,
-        cluster_diverse: bool = False, level: int = 0,
+        query: str,
+        top_k: int = 5,
+        field: str = "summary",
+        exclude_non_action: bool = True,
+        diverse: bool = True,
+        cluster_diverse: bool = False,
+        level: int = 0,
     ) -> list[dict[str, Any]]:
         """Search video segments by semantic similarity to *query*.
 
@@ -148,18 +153,22 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                 results = []
                 for idx in top_indices:
                     seg = h_segments[idx]
-                    results.append({
-                        "start_time": seg["start_time"],
-                        "end_time": seg["end_time"],
-                        "score": round(float(scores[idx]), 4),
-                        "caption": seg.get("caption", ""),
-                        "annotation": seg.get("annotation", {}),
-                    })
+                    results.append(
+                        {
+                            "start_time": seg["start_time"],
+                            "end_time": seg["end_time"],
+                            "score": round(float(scores[idx]), 4),
+                            "caption": seg.get("caption", ""),
+                            "annotation": seg.get("annotation", {}),
+                        }
+                    )
                 return results
 
         # Resolve which embedding matrices to use
         summary_emb = index.embeddings
-        action_emb = index.action_embeddings if index.action_embeddings is not None else index.embeddings
+        action_emb = (
+            index.action_embeddings if index.action_embeddings is not None else index.embeddings
+        )
 
         if field == "summary":
             matrices = [summary_emb]
@@ -222,7 +231,9 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
 
                 # Round-robin pick from clusters
                 top_indices: list[int] = []
-                cluster_keys = sorted(clusters.keys(), key=lambda l: scores[clusters[l][0]], reverse=True)
+                cluster_keys = sorted(
+                    clusters.keys(), key=lambda l: scores[clusters[l][0]], reverse=True
+                )
                 cluster_ptrs = {l: 0 for l in cluster_keys}
                 while len(top_indices) < top_k:
                     added_any = False
@@ -247,8 +258,12 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
             candidate_embs = active_matrix[candidate_indices] if active_matrix is not None else None
 
             top_indices = _mmr_rerank(
-                query_emb, candidate_embs, candidate_indices,
-                candidate_scores, top_k=top_k, lambda_param=0.7,
+                query_emb,
+                candidate_embs,
+                candidate_indices,
+                candidate_scores,
+                top_k=top_k,
+                lambda_param=0.7,
             )
         else:
             top_indices = list(np.argsort(scores)[::-1][:top_k])
@@ -271,16 +286,14 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
     return {
         "tool": search_video,
         "description": (
-            'search_video(query, top_k=5, field="summary", exclude_non_action=True, diverse=True, cluster_diverse=False, level=0) -> list[dict]. '
-            "Semantic search over pre-indexed video segments. field can be "
-            '"summary" (default), "action", or "all". When field="action", '
-            "non-action segments are excluded by default (exclude_non_action=True). "
-            "When diverse=True (default), MMR reranking ensures varied results. "
-            "When cluster_diverse=True, KMeans clustering with round-robin selection "
-            "ensures results span different semantic clusters (alternative to MMR). "
-            "level=0 (default) searches fine-grained segments; higher levels search "
-            "coarser hierarchy levels when available. "
-            "Returns top_k segments with start_time, end_time, score, caption, and annotation."
+            "Semantic search over pre-indexed video segments. "
+            "Parameters: query (str), top_k (int, default 5), "
+            'field (str, default "summary" — can be "summary", "action", or "all"), '
+            "exclude_non_action (bool, default True — filters non-action segments when field is action), "
+            "diverse (bool, default True — MMR reranking for varied results), "
+            "cluster_diverse (bool, default False — KMeans clustering alternative to MMR), "
+            "level (int, default 0 — higher levels search coarser hierarchy). "
+            "Returns list of dicts with start_time, end_time, score, caption, and annotation."
         ),
     }
 
@@ -321,9 +334,9 @@ def make_search_transcript(index: VideoIndex) -> dict[str, Any]:
     return {
         "tool": search_transcript,
         "description": (
-            "search_transcript(query) -> list[dict]. "
-            "Search spoken words in the video transcript (ASR). Returns matching "
-            "entries with start_time, end_time, text, and surrounding context."
+            "Search spoken words in the video transcript (ASR). "
+            "Parameters: query (str — keyword or phrase, case-insensitive). "
+            "Returns list of dicts with start_time, end_time, text, and surrounding context."
         ),
     }
 
@@ -354,8 +367,9 @@ def make_get_transcript(index: VideoIndex) -> dict[str, Any]:
     return {
         "tool": get_transcript,
         "description": (
-            "get_transcript(start_time, end_time) -> str. "
-            "Get the spoken transcript for a specific time range of the video."
+            "Get the spoken transcript for a specific time range of the video. "
+            "Parameters: start_time (float, seconds), end_time (float, seconds). "
+            "Returns concatenated transcript text as a string."
         ),
     }
 
@@ -404,15 +418,17 @@ def make_discriminative_vqa(index: VideoIndex) -> dict[str, Any]:
         for i, candidate in enumerate(candidates):
             orig_idx = int(active_indices[best_seg_indices[i]])
             seg = index.segments[orig_idx]
-            results.append({
-                "answer": candidate,
-                "confidence": round(float(max_sims[i]), 4),
-                "best_segment": {
-                    "start_time": seg["start_time"],
-                    "end_time": seg["end_time"],
-                    "caption": seg.get("caption", ""),
-                },
-            })
+            results.append(
+                {
+                    "answer": candidate,
+                    "confidence": round(float(max_sims[i]), 4),
+                    "best_segment": {
+                        "start_time": seg["start_time"],
+                        "end_time": seg["end_time"],
+                        "caption": seg.get("caption", ""),
+                    },
+                }
+            )
 
         results.sort(key=lambda x: x["confidence"], reverse=True)
         return results
@@ -420,10 +436,10 @@ def make_discriminative_vqa(index: VideoIndex) -> dict[str, Any]:
     return {
         "tool": discriminative_vqa,
         "description": (
-            "discriminative_vqa(question, candidates, time_range=None) -> list[dict]. "
             "Answer a multiple-choice question about the video by embedding matching. "
-            "candidates is a list of answer strings. Returns sorted list with "
-            "answer, confidence score, and best matching segment. "
+            "Parameters: question (str), candidates (list of answer strings), "
+            "time_range (optional tuple of start/end seconds). "
+            "Returns sorted list of dicts with answer, confidence score, and best matching segment. "
             "Faster than LLM generation for closed-form questions."
         ),
     }
@@ -455,9 +471,8 @@ def make_get_scene_list(index: VideoIndex) -> dict[str, Any]:
     return {
         "tool": get_scene_list,
         "description": (
-            "get_scene_list() -> list[dict]. "
-            "List all detected scene boundaries with scene_index, start_time, "
-            "end_time, caption, and annotation. Use this to understand the "
-            "video structure."
+            "List all detected scene boundaries. Takes no parameters. "
+            "Returns list of dicts with scene_index, start_time, end_time, "
+            "caption, and annotation. Use this to understand the video structure."
         ),
     }

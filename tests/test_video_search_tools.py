@@ -4,7 +4,6 @@ import sys
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 # Ensure sklearn is available (real or shimmed) so the lazy import inside
 # make_search_video succeeds even in environments without scikit-learn.
@@ -25,9 +24,11 @@ except ImportError:
     _metrics_mod.pairwise = _pairwise_mod
     _sklearn_mod = type(sys)("sklearn")
     _sklearn_mod.metrics = _metrics_mod
+
     class _KMeans:
         def __init__(self, n_clusters=2, random_state=None, n_init=10):
             self.n_clusters = n_clusters
+
         def fit_predict(self, X):
             X = np.asarray(X)
             return np.array([i % self.n_clusters for i in range(len(X))])
@@ -136,8 +137,10 @@ class TestSearchVideo:
         # Query close to action_emb[0]
         embed_fn = MagicMock(return_value=np.array([0.9, 0.1, 0.0]))
         index = _make_index(
-            segments=segments, embeddings=summary_emb,
-            action_embeddings=action_emb, embed_fn=embed_fn,
+            segments=segments,
+            embeddings=summary_emb,
+            action_embeddings=action_emb,
+            embed_fn=embed_fn,
         )
 
         results = make_search_video(index)["tool"]("running", top_k=2, field="action")
@@ -156,8 +159,10 @@ class TestSearchVideo:
         # Query close to [1, 0, 0] — seg0 wins via summary, seg1 wins via action
         embed_fn = MagicMock(return_value=np.array([1.0, 0.0, 0.0]))
         index = _make_index(
-            segments=segments, embeddings=summary_emb,
-            action_embeddings=action_emb, embed_fn=embed_fn,
+            segments=segments,
+            embeddings=summary_emb,
+            action_embeddings=action_emb,
+            embed_fn=embed_fn,
         )
 
         results = make_search_video(index)["tool"]("q", top_k=2, field="all")
@@ -190,8 +195,10 @@ class TestSearchVideo:
         ]
         embed_fn = MagicMock(return_value=np.array([0.9, 0.1, 0.0]))
         index = _make_index(
-            segments=segments, embeddings=summary_emb,
-            action_embeddings=None, embed_fn=embed_fn,
+            segments=segments,
+            embeddings=summary_emb,
+            action_embeddings=None,
+            embed_fn=embed_fn,
         )
 
         # Should not crash — falls back to summary embeddings
@@ -209,8 +216,10 @@ class TestSearchVideo:
         # Query aligned with summary_emb[0]
         embed_fn = MagicMock(return_value=np.array([1.0, 0.0]))
         index = _make_index(
-            segments=segments, embeddings=summary_emb,
-            action_embeddings=action_emb, embed_fn=embed_fn,
+            segments=segments,
+            embeddings=summary_emb,
+            action_embeddings=action_emb,
+            embed_fn=embed_fn,
         )
 
         # Default field="summary": seg0 should rank highest
@@ -382,11 +391,13 @@ class TestDiscriminativeVqa:
             {"start_time": 10.0, "end_time": 15.0, "caption": "person exercising"},
         ]
         # Each segment embedding is a unit vector along a different axis
-        embeddings = np.array([
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ])
+        embeddings = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
 
         def embed_fn(text: str) -> np.ndarray:
             # Return embedding close to segment 0 for "cooking", segment 1 for "reading", etc.
@@ -399,7 +410,9 @@ class TestDiscriminativeVqa:
             return np.array([0.33, 0.33, 0.33])
 
         return _make_index(
-            segments=segments, embeddings=embeddings, embed_fn=embed_fn,
+            segments=segments,
+            embeddings=embeddings,
+            embed_fn=embed_fn,
         )
 
     def test_basic_multiple_choice(self):
@@ -462,4 +475,4 @@ class TestDiscriminativeVqa:
         index = self._build_index()
         tool_dict = make_discriminative_vqa(index)
         assert "description" in tool_dict
-        assert "discriminative_vqa" in tool_dict["description"]
+        assert "multiple-choice" in tool_dict["description"]

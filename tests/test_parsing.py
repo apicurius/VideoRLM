@@ -5,7 +5,6 @@ from unittest.mock import Mock
 from rlm.core.types import CodeBlock, REPLResult, RLMIteration
 from rlm.environments.local_repl import LocalREPL
 from rlm.utils.parsing import (
-    convert_context_for_repl,
     find_code_blocks,
     find_final_answer,
     format_execution_result,
@@ -336,31 +335,3 @@ class TestFormatIteration:
         messages = format_iteration(iteration, max_character_length=100)
         # Result should be truncated
         assert len(messages[1]["content"]) < 30000
-
-
-class TestConvertContextForRepl:
-    """Tests for convert_context_for_repl function."""
-
-    def test_string_context(self):
-        context_data, context_str = convert_context_for_repl("Hello world")
-        assert context_data is None
-        assert context_str == "Hello world"
-
-    def test_dict_context(self):
-        context_data, context_str = convert_context_for_repl({"key": "value"})
-        assert context_data == {"key": "value"}
-        assert context_str is None
-
-    def test_list_of_strings(self):
-        context_data, context_str = convert_context_for_repl(["a", "b", "c"])
-        assert context_data == ["a", "b", "c"]
-        assert context_str is None
-
-    def test_list_of_message_dicts(self):
-        messages = [
-            {"content": "Hello"},
-            {"content": "World"},
-        ]
-        context_data, context_str = convert_context_for_repl(messages)
-        assert context_data == ["Hello", "World"]
-        assert context_str is None

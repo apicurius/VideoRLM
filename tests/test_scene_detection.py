@@ -10,7 +10,6 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Shim scipy.sparse.eye and sklearn.cluster.AgglomerativeClustering
 # ---------------------------------------------------------------------------
@@ -26,10 +25,12 @@ def _install_shims():
     """Install minimal scipy/sklearn shims so the lazy imports succeed."""
     # --- scipy.sparse ---
     _sparse_mod = type(sys)("scipy.sparse")
-    _sparse_mod.eye = MagicMock(return_value=MagicMock(
-        __add__=lambda self, other: self,
-        __radd__=lambda self, other: self,
-    ))
+    _sparse_mod.eye = MagicMock(
+        return_value=MagicMock(
+            __add__=lambda self, other: self,
+            __radd__=lambda self, other: self,
+        )
+    )
     _scipy_mod = type(sys)("scipy")
     _scipy_mod.sparse = _sparse_mod
     sys.modules.setdefault("scipy", _scipy_mod)
@@ -115,7 +116,10 @@ class TestDetectScenesBoundary:
 
         _set_labels([0] * 5 + [1] * 5)
         scenes = detect_scenes(
-            frames, timestamps, embed_fn=_identity_embed, threshold=0.01,
+            frames,
+            timestamps,
+            embed_fn=_identity_embed,
+            threshold=0.01,
         )
 
         assert len(scenes) == 2
@@ -138,7 +142,10 @@ class TestDetectScenesBoundary:
 
         _set_labels([0] * 5 + [1] * 5 + [2] * 5)
         scenes = detect_scenes(
-            frames, timestamps, embed_fn=_identity_embed, threshold=0.01,
+            frames,
+            timestamps,
+            embed_fn=_identity_embed,
+            threshold=0.01,
         )
         assert len(scenes) == 3
 
@@ -164,8 +171,11 @@ class TestDetectScenesMinDuration:
         # 5 frames cluster 0 (0.0-2.0), 1 frame cluster 1 (2.5-2.5), 5 frames cluster 2 (3.0-5.0)
         _set_labels([0] * 5 + [1] + [2] * 5)
         scenes = detect_scenes(
-            frames, timestamps, embed_fn=_identity_embed,
-            threshold=0.01, min_duration=1.0,
+            frames,
+            timestamps,
+            embed_fn=_identity_embed,
+            threshold=0.01,
+            min_duration=1.0,
         )
         # The 0-duration middle scene should be filtered out
         for start, end in scenes:
@@ -179,8 +189,11 @@ class TestDetectScenesMinDuration:
 
         _set_labels([0] * 5 + [1] + [2] * 5)
         scenes = detect_scenes(
-            frames, timestamps, embed_fn=_identity_embed,
-            threshold=0.01, min_duration=0,
+            frames,
+            timestamps,
+            embed_fn=_identity_embed,
+            threshold=0.01,
+            min_duration=0,
         )
         assert len(scenes) == 3
 
@@ -195,7 +208,10 @@ class TestDetectScenesTemporalConnectivity:
 
         _set_labels([0] * 5 + [1] * 5 + [2] * 5)
         scenes = detect_scenes(
-            frames, timestamps, embed_fn=_identity_embed, threshold=0.01,
+            frames,
+            timestamps,
+            embed_fn=_identity_embed,
+            threshold=0.01,
         )
 
         starts = [s for s, _e in scenes]
@@ -228,13 +244,19 @@ class TestDetectScenesThreshold:
         # Low threshold: 2 clusters
         _set_labels([0] * 5 + [1] * 5)
         scenes_low = detect_scenes(
-            frames, timestamps, embed_fn=_identity_embed, threshold=0.01,
+            frames,
+            timestamps,
+            embed_fn=_identity_embed,
+            threshold=0.01,
         )
 
         # High threshold: 1 cluster
         _set_labels([0] * 10)
         scenes_high = detect_scenes(
-            frames, timestamps, embed_fn=_identity_embed, threshold=1e6,
+            frames,
+            timestamps,
+            embed_fn=_identity_embed,
+            threshold=1e6,
         )
 
         assert len(scenes_high) == 1
