@@ -984,3 +984,220 @@ class TestVideoIndexFrameEmbeddings:
         idx.save(save_dir)
         loaded = VideoIndex.load(save_dir)
         assert loaded.frame_embeddings is None
+
+
+class TestEmbeddingGemmaIntegration:
+    """Integration tests for EmbeddingGemma text encoder cross-space guard."""
+
+    def test_score_annotations_no_scoring_with_text_model(self):
+        """When text_embedding_model is set, _score_annotations skips all segments."""
+        indexer = VideoIndexer(text_embedding_model="test-model")
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "a cat sitting on a mat"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "a dog running in the park"},
+        ]
+        frames = [np.full((48, 64, 3), 128, dtype=np.uint8)] * 20
+        timestamps = [float(i) * 0.5 for i in range(20)]
+
+        with patch.object(indexer, "_ensure_model"):
+            indexer._score_annotations(
+                segments,
+                loaded_video_frames=frames,
+                timestamps=timestamps,
+                caption_fn=None,
+            )
+
+        for seg in segments:
+            assert "caption_quality_score" not in seg, (
+                f"Segment {seg['start_time']}-{seg['end_time']} should NOT have "
+                "caption_quality_score when text_embedding_model is set"
+            )
+
+    def test_score_annotations_scores_without_text_model(self):
+        """Without text_embedding_model, _score_annotations computes scores."""
+        indexer = VideoIndexer()  # no text_embedding_model
+        segments = [
+            {"start_time": 0.0, "end_time": 2.5, "caption": "a cat sitting"},
+        ]
+        frames = [np.full((48, 64, 3), 128, dtype=np.uint8)] * 5
+        timestamps = [float(i) * 0.5 for i in range(5)]
+
+        # Return known embeddings of matching dimensions
+        text_emb = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+        frame_embs = np.array(
+            [[0.9, 0.1, 0.0, 0.0]] * 5, dtype=np.float32
+        )
+        # Normalize
+        text_emb = text_emb / np.linalg.norm(text_emb, axis=1, keepdims=True)
+        frame_embs = frame_embs / np.linalg.norm(frame_embs, axis=1, keepdims=True)
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_encode_texts", return_value=text_emb):
+                with patch.object(indexer, "_encode_frames", return_value=frame_embs):
+                    indexer._score_annotations(
+                        segments,
+                        loaded_video_frames=frames,
+                        timestamps=timestamps,
+                        caption_fn=None,
+                    )
+
+        assert "caption_quality_score" in segments[0], (
+            "caption_quality_score should be set when no text_embedding_model is configured"
+        )
+        assert isinstance(segments[0]["caption_quality_score"], float)
+
+    def test_visual_embed_fn_differs_from_embed_fn(self):
+        """_encode_query_siglip and _encode_query should be different methods."""
+        indexer = VideoIndexer(text_embedding_model="test-model")
+        # They should be distinct bound methods
+        assert indexer._encode_query_siglip is not indexer._encode_query
+        # Verify they are actually different underlying functions
+        assert (
+            indexer._encode_query_siglip.__func__ is not indexer._encode_query.__func__
+        )
+
+    @patch("rlm.video.video_indexer.detect_scenes")
+    def test_index_stores_visual_embed_fn(self, mock_detect_scenes):
+        """index_video should set visual_embed_fn bound to _encode_query_siglip."""
+        mock_detect_scenes.return_value = [(0.0, 2.5)]
+
+        indexer = VideoIndexer(text_embedding_model="test-model")
+        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(5)]
+        mock_video = MagicMock()
+        mock_video.metadata.extraction_fps = 2.0
+        mock_video.metadata.path = "/fake/video.mp4"
+        mock_video.frames = frames
+        mock_video.segments = []
+
+        fake_emb = np.random.randn(1, 4).astype(np.float32)
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_get_transcript", return_value=[]):
+                with patch.object(
+                    indexer, "_embed_captions", return_value=(fake_emb, None)
+                ):
+                    with patch.object(
+                        indexer, "_encode_frames",
+                        return_value=np.random.randn(1, 4).astype(np.float32),
+                    ):
+                        result = indexer.index_video(mock_video, caption_fn=None)
+
+        assert result.visual_embed_fn is not None
+        assert result.visual_embed_fn == indexer._encode_query_siglip
+
+
+class TestSelectiveDecodeEfficiency:
+    """Tests proving selective decoding saves caption calls."""
+
+    def test_uniform_segments_skipped_ratio(self):
+        """Create 20 segments where ~70% are uniform; assert >=60% get _skip_caption."""
+        indexer = VideoIndexer()
+
+        # 20 segments of 5s each (0-100s), 5 frames per segment at 1fps
+        num_segments = 20
+        fps = 1.0
+        seg_duration = 5.0
+        frames_per_seg = int(seg_duration * fps)
+        total_frames = num_segments * frames_per_seg
+
+        segments = [
+            {
+                "start_time": i * seg_duration,
+                "end_time": (i + 1) * seg_duration,
+                "caption": "",
+            }
+            for i in range(num_segments)
+        ]
+        frames = [
+            np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(total_frames)
+        ]
+        timestamps = [i / fps for i in range(total_frames)]
+
+        # 14 uniform segments (indices 0-13), 6 varied segments (indices 14-19)
+        num_uniform = 14
+        call_counter = {"n": 0}
+        rng = np.random.default_rng(42)
+
+        def mock_encode_frames(seg_frames, **kwargs):
+            idx = call_counter["n"]
+            call_counter["n"] += 1
+            n = len(seg_frames)
+            if idx < num_uniform:
+                # Near-identical embeddings → variance < 0.02
+                base = np.ones((1, 8), dtype=np.float32)
+                base = base / np.linalg.norm(base)
+                embs = np.tile(base, (n, 1))
+                # Add tiny noise (variance << 0.02)
+                embs += rng.normal(0, 0.001, embs.shape).astype(np.float32)
+            else:
+                # High-variance embeddings → variance >> 0.02
+                embs = rng.standard_normal((n, 8)).astype(np.float32)
+            return embs
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_encode_frames", side_effect=mock_encode_frames):
+                indexer._selective_decode(segments, frames, timestamps)
+
+        skipped = sum(1 for s in segments if s.get("_skip_caption") is True)
+        # 14/20 = 70% are uniform; assert at least 60% skipped
+        assert skipped >= int(num_segments * 0.6), (
+            f"Expected at least {int(num_segments * 0.6)} skipped, got {skipped}"
+        )
+        # Verify the savings ratio: only ~30% need captioning → ~2.85x savings
+        caption_needed = num_segments - skipped
+        assert caption_needed <= int(num_segments * 0.4), (
+            f"Expected at most {int(num_segments * 0.4)} segments needing captions, "
+            f"got {caption_needed}"
+        )
+
+    def test_mixed_video_caption_savings(self):
+        """10 segments: even=static, odd=dynamic. Verify exactly static ones skipped."""
+        indexer = VideoIndexer()
+
+        num_segments = 10
+        fps = 1.0
+        seg_duration = 5.0
+        frames_per_seg = int(seg_duration * fps)
+        total_frames = num_segments * frames_per_seg
+
+        segments = [
+            {
+                "start_time": i * seg_duration,
+                "end_time": (i + 1) * seg_duration,
+                "caption": "",
+            }
+            for i in range(num_segments)
+        ]
+        frames = [
+            np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(total_frames)
+        ]
+        timestamps = [i / fps for i in range(total_frames)]
+
+        call_counter = {"n": 0}
+        rng = np.random.default_rng(99)
+
+        def mock_encode_frames(seg_frames, **kwargs):
+            idx = call_counter["n"]
+            call_counter["n"] += 1
+            n = len(seg_frames)
+            if idx % 2 == 0:
+                # Even index → static (near-zero variance)
+                base = np.ones((1, 8), dtype=np.float32) / np.sqrt(8)
+                return np.tile(base, (n, 1))
+            else:
+                # Odd index → dynamic (high variance)
+                return rng.standard_normal((n, 8)).astype(np.float32)
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_encode_frames", side_effect=mock_encode_frames):
+                indexer._selective_decode(segments, frames, timestamps)
+
+        for i, seg in enumerate(segments):
+            if i % 2 == 0:
+                assert seg.get("_skip_caption") is True, (
+                    f"Segment {i} (static) should be skipped"
+                )
+            else:
+                assert seg.get("_skip_caption") is not True, (
+                    f"Segment {i} (dynamic) should NOT be skipped"
+                )

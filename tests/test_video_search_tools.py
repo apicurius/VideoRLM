@@ -554,3 +554,249 @@ class TestSearchVideoVisualField:
         index = _make_index(embeddings=np.array([[1.0]]))
         tool_dict = make_search_video(index)
         assert "visual" in tool_dict["description"]
+
+
+# ---------------------------------------------------------------
+# Frame embeddings bypass caption quality bottleneck
+# ---------------------------------------------------------------
+
+
+class TestFrameEmbeddingsBypassCaptionQuality:
+    """Prove that field='visual' bypasses bad/misleading captions."""
+
+    def test_bad_captions_good_frames(self):
+        """Visual search finds the right segment even when captions are misleading.
+
+        Setup: segment 0 caption says "a dog running" but its *frame*
+        embedding actually matches "cat".  Summary embeddings match the
+        (wrong) caption text.  Visual search should find segment 0 for
+        "cat" while summary search should *not*.
+        """
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "a dog running"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "a cat sleeping"},
+            {"start_time": 10.0, "end_time": 15.0, "caption": "a bird flying"},
+        ]
+
+        # Summary (caption) embeddings — aligned with the caption text:
+        #   seg0 → "dog" direction, seg1 → "cat" direction, seg2 → "bird"
+        summary_emb = np.array([
+            [1.0, 0.0, 0.0],  # dog direction
+            [0.0, 1.0, 0.0],  # cat direction
+            [0.0, 0.0, 1.0],  # bird direction
+        ])
+
+        # Frame embeddings — reflect the *actual visual content*:
+        #   seg0 actually shows a cat, seg1 shows a dog, seg2 shows a bird
+        frame_emb = np.array([
+            [0.0, 1.0, 0.0],  # cat direction (mislabelled as dog)
+            [1.0, 0.0, 0.0],  # dog direction (mislabelled as cat)
+            [0.0, 0.0, 1.0],  # bird direction (correct)
+        ])
+
+        # Query "cat" → cat direction [0, 1, 0]
+        cat_query = np.array([0.0, 0.95, 0.05])
+
+        visual_fn = MagicMock(return_value=cat_query)
+        embed_fn = MagicMock(return_value=cat_query)
+
+        index = _make_index(
+            segments=segments,
+            embeddings=summary_emb,
+            embed_fn=embed_fn,
+        )
+        index.frame_embeddings = frame_emb
+        index.visual_embed_fn = visual_fn
+
+        search = make_search_video(index)["tool"]
+
+        # Visual search: should find seg0 (frame embedding matches "cat")
+        visual_results = search("cat", top_k=3, field="visual")
+        assert visual_results[0]["caption"] == "a dog running"  # seg0
+        assert visual_results[0]["start_time"] == 0.0
+
+        # Summary search: should find seg1 (caption embedding matches "cat")
+        summary_results = search("cat", top_k=3, field="summary")
+        assert summary_results[0]["caption"] == "a cat sleeping"  # seg1
+        assert summary_results[0]["start_time"] == 5.0
+
+        # The key insight: visual and summary searches disagree on the top
+        # result, proving visual search bypasses caption quality.
+        assert visual_results[0]["caption"] != summary_results[0]["caption"]
+
+    def test_visual_search_independent_of_caption_text(self):
+        """Visual search differentiates segments even when all captions are identical.
+
+        When every segment has the same generic caption, summary embeddings
+        are identical and cannot distinguish between segments.  Frame
+        embeddings, derived from actual pixels, remain distinct.
+        """
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": "generic scene"},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "generic scene"},
+            {"start_time": 10.0, "end_time": 15.0, "caption": "generic scene"},
+        ]
+
+        # Summary embeddings are all the same (caption text is identical)
+        same_vec = np.array([0.577, 0.577, 0.577])
+        summary_emb = np.stack([same_vec, same_vec, same_vec])
+
+        # Frame embeddings are distinct (actual visual content differs)
+        frame_emb = np.array([
+            [1.0, 0.0, 0.0],  # outdoor scene
+            [0.0, 1.0, 0.0],  # indoor scene
+            [0.0, 0.0, 1.0],  # underwater scene
+        ])
+
+        # Query targets seg1 (indoor) direction
+        indoor_query = np.array([0.05, 0.95, 0.0])
+
+        visual_fn = MagicMock(return_value=indoor_query)
+        embed_fn = MagicMock(return_value=indoor_query)
+
+        index = _make_index(
+            segments=segments,
+            embeddings=summary_emb,
+            embed_fn=embed_fn,
+        )
+        index.frame_embeddings = frame_emb
+        index.visual_embed_fn = visual_fn
+
+        search = make_search_video(index)["tool"]
+
+        # Visual search: can identify seg1 as the best match
+        visual_results = search("indoor scene", top_k=3, field="visual")
+        assert visual_results[0]["start_time"] == 5.0  # seg1
+        # Scores should be meaningfully different
+        assert visual_results[0]["score"] > visual_results[1]["score"]
+        assert visual_results[0]["score"] > visual_results[2]["score"]
+
+        # Summary search: all scores are essentially identical (can't differentiate)
+        summary_results = search("indoor scene", top_k=3, field="summary")
+        score_spread = abs(summary_results[0]["score"] - summary_results[-1]["score"])
+        assert score_spread < 0.01, (
+            f"Summary scores should be nearly identical but spread was {score_spread}"
+        )
+
+
+# ---------------------------------------------------------------
+# Multi-scale search efficiency (Feature: coarse hierarchy)
+# ---------------------------------------------------------------
+
+
+class TestMultiScaleSearchEfficiency:
+    """Verify that multi-scale search reduces search space via coarse hierarchy."""
+
+    def test_coarse_level_fewer_segments(self):
+        """_build_coarse_level merges 30 fine 5s segments into 5 coarse 30s segments."""
+        from rlm.video.video_indexer import VideoIndexer
+
+        n_fine = 30
+        seg_dur = 5.0
+        segments = [
+            {
+                "start_time": float(i * seg_dur),
+                "end_time": float((i + 1) * seg_dur),
+                "caption": f"seg{i}",
+            }
+            for i in range(n_fine)
+        ]
+        embeddings = np.random.default_rng(42).random((n_fine, 8))
+        # Normalize
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = embeddings / np.maximum(norms, 1e-10)
+
+        indexer = VideoIndexer()
+        coarse_segs, coarse_embs = indexer._build_coarse_level(
+            segments, embeddings, target_duration=30.0
+        )
+
+        # 150s total / 30s target = 5 coarse segments
+        assert len(coarse_segs) == 5
+        assert coarse_embs is not None
+        assert coarse_embs.shape[0] == 5
+
+        # Each coarse segment should span 30s
+        for seg in coarse_segs:
+            duration = seg["end_time"] - seg["start_time"]
+            assert duration == 30.0, f"Expected 30s, got {duration}s"
+
+    def test_coarse_search_returns_broader_ranges(self):
+        """Searching at level=1 returns wider time ranges than level=0."""
+        dim = 4
+        rng = np.random.default_rng(99)
+
+        # Fine segments: 10 segments of 5s each
+        n_fine = 10
+        fine_segments = [
+            {
+                "start_time": float(i * 5),
+                "end_time": float((i + 1) * 5),
+                "caption": f"fine{i}",
+            }
+            for i in range(n_fine)
+        ]
+        fine_embs = rng.random((n_fine, dim)).astype(np.float32)
+        norms = np.linalg.norm(fine_embs, axis=1, keepdims=True)
+        fine_embs = fine_embs / np.maximum(norms, 1e-10)
+
+        # Coarse segments: 2 segments of 25s each
+        coarse_segments = [
+            {"start_time": 0.0, "end_time": 25.0, "caption": "coarse0"},
+            {"start_time": 25.0, "end_time": 50.0, "caption": "coarse1"},
+        ]
+        coarse_embs = rng.random((2, dim)).astype(np.float32)
+        cnorms = np.linalg.norm(coarse_embs, axis=1, keepdims=True)
+        coarse_embs = coarse_embs / np.maximum(cnorms, 1e-10)
+
+        embed_fn = MagicMock(return_value=rng.random(dim).astype(np.float32))
+
+        index = _make_index(
+            segments=fine_segments,
+            embeddings=fine_embs,
+            embed_fn=embed_fn,
+        )
+        index.segment_hierarchy = [coarse_segments]
+        index.hierarchy_embeddings = [coarse_embs]
+
+        tool = make_search_video(index)["tool"]
+
+        results_fine = tool("query", top_k=3, level=0)
+        results_coarse = tool("query", top_k=2, level=1)
+
+        # Fine results have 5s ranges, coarse have 25s ranges
+        fine_widths = [r["end_time"] - r["start_time"] for r in results_fine]
+        coarse_widths = [r["end_time"] - r["start_time"] for r in results_coarse]
+
+        assert all(w == 5.0 for w in fine_widths)
+        assert all(w == 25.0 for w in coarse_widths)
+        assert min(coarse_widths) > max(fine_widths)
+
+    def test_search_space_reduction_ratio(self):
+        """Coarse level has at least 3x fewer segments than fine level for 150s/5s video."""
+        from rlm.video.video_indexer import VideoIndexer
+
+        n_fine = 30  # 30 segments * 5s = 150s
+        seg_dur = 5.0
+        segments = [
+            {
+                "start_time": float(i * seg_dur),
+                "end_time": float((i + 1) * seg_dur),
+                "caption": f"seg{i}",
+            }
+            for i in range(n_fine)
+        ]
+        embeddings = np.random.default_rng(7).random((n_fine, 8))
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = embeddings / np.maximum(norms, 1e-10)
+
+        indexer = VideoIndexer()
+        coarse_segs, coarse_embs = indexer._build_coarse_level(
+            segments, embeddings, target_duration=30.0
+        )
+
+        # 30 fine / 5 coarse = 6x reduction, well above 3x minimum
+        reduction = n_fine / len(coarse_segs)
+        assert reduction >= 3.0, f"Expected >=3x reduction, got {reduction}x"
+        assert coarse_embs is not None
+        assert coarse_embs.shape[0] == len(coarse_segs)
