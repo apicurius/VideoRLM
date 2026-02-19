@@ -99,6 +99,7 @@ for s in scenes:
 2. SEARCH: Decompose your query into components:
    - For "what happens" queries: search_video(query, field="action")
    - For "what does it look like" queries: search_video(query, field="summary")
+   - For reading specific numbers, text, scores, tables, charts, or any fine-grained visual detail: search_video(query, field="visual") — this uses SigLIP2 frame embeddings to match pixel content directly, bypassing caption quality. ALWAYS prefer field="visual" when the answer is a specific value visible on screen.
    - For general queries: search_video(query, field="all")
    - For spoken content (names, dialogue, narration): search_transcript(query)
    - For multiple-choice or yes/no questions: discriminative_vqa(question, candidates)
@@ -121,7 +122,10 @@ print(f"Visual: {{visual_description}}")
 print(f"Speech: {{transcript}}")
 ```
 5. VERIFY: Cross-reference annotations (action, actor, summary) with visual evidence and transcript.
-6. NAME VERIFICATION (CRITICAL): ASR/Whisper frequently misrecognizes proper names (especially non-English surnames). Before writing your final answer, ALWAYS extract the title slide (first 10 seconds) and read the presenter's name visually. The name printed on slides OVERRIDES any name from the transcript. For example, if the transcript says "Alex Feng" but the slide reads "Alex L. Zhang", use "Alex L. Zhang". Never trust ASR for proper nouns — always verify visually and use the visual spelling in your final answer.
+6. NAME & NUMBER VERIFICATION (CRITICAL): ASR/Whisper frequently misrecognizes proper names, numbers, decimals, and technical terms. Before writing your final answer, ALWAYS verify visually:
+   - For names: extract the title slide (first 10 seconds) and read the presenter's name visually. The name printed on slides OVERRIDES any name from the transcript.
+   - For numbers/scores/values: find the frame showing the number and read it visually. The number shown on screen OVERRIDES any number from the transcript. Never use a transcript number as your final answer without visual confirmation from a frame.
+   Example: If the transcript says "the OOLONG score is 62.4" but you cannot find or read that number in any frame, do NOT report 62.4. Instead, keep searching or report that the value could not be visually confirmed.
 
 Search results include structured annotations with:
 - annotation.summary.brief/detailed: visual descriptions
@@ -143,6 +147,47 @@ result = discriminative_vqa("What activity?", ["running", "walking"], time_range
 CHOOSING YOUR STRATEGY:
 - For broad questions (summaries, themes, overall narrative): use the segmented batched or temporal strategies below.
 - For detailed visual questions (reading text, identifying small objects, examining specific moments): use the hierarchical zoom strategy to find and magnify the relevant moment.
+- For specific numbers, scores, or text shown on screen (tables, charts, scoreboards, benchmarks): use the PRECISE VALUE READING strategy below — always start with field="visual" search, then zoom and crop.
+
+PRECISE VALUE READING (for scores, numbers, text on screen):
+
+When the question asks for a specific number, score, or piece of text visible in the video (e.g. benchmark scores, table values, scoreboards), follow this strategy:
+```repl
+# Step 1: VISUAL SEARCH — use field="visual" to find frames with tables/charts/text
+hits = search_video("table results benchmark scores", field="visual", top_k=5)
+for h in hits:
+    print(f"[{{h['start_time']}}s-{{h['end_time']}}s] score={{h['score']:.3f}}: {{h.get('caption', '')[:100]}}")
+```
+
+```repl
+# Step 2: HIGH-RES EXTRACT — get frames at high resolution for the best hit
+frames = extract_frames(start_time=hits[0]["start_time"], end_time=hits[0]["end_time"],
+                        fps=4.0, resize=(1280, 960), max_frames=10)
+# Step 3: IDENTIFY — ask LLM to locate the relevant region
+result = llm_query(["This frame may contain a table or chart. Describe the layout and where the relevant data is positioned (top/bottom, left/right). What rows and columns are visible?"] + frames)
+print(result)
+```
+
+```repl
+# Step 4: CROP — isolate the specific region (adjust coordinates based on Step 3)
+cropped = crop_frame(frames[0], 0.0, 0.3, 1.0, 0.8)  # adjust to target the table/row
+result = llm_query(["Read ALL numbers and text in this cropped region exactly as shown. Do not guess — report only what you can clearly see:", cropped])
+print(result)
+```
+
+CRITICAL ANTI-HALLUCINATION RULES for value-reading tasks:
+1. NEVER trust transcript/ASR numbers as ground truth. ASR frequently misrecognizes numbers, decimals, and technical terms. Transcript can hint WHERE to look, but the actual value MUST be confirmed visually.
+2. NEVER output a number you haven't visually confirmed by reading it from a frame. If the LLM says "I cannot find the table" or "no table present", that means you have NOT confirmed the value — do NOT use a number from the transcript as your answer.
+3. If you cannot visually read the value after exhausting all options, answer honestly: "The value could not be visually confirmed from the video frames."
+4. Try ALL of the following before giving up:
+   a. Search with DIFFERENT queries (e.g. "table", "results", "benchmark", "comparison", "evaluation")
+   b. Search with DIFFERENT fields (field="visual", field="summary", field="action")
+   c. Try ALL top-k hits, not just the first one
+   d. Extract at multiple time ranges — tables may appear at different points in the video
+   e. Use higher resolution: resize=(1920, 1440)
+   f. Crop different regions of each frame systematically (top-half, bottom-half, quadrants)
+   g. Try more frames at higher fps (fps=8.0)
+5. A value is CONFIRMED only when llm_query returns the specific number from a frame/crop. Cross-check by reading the same table from at least 2 different frames.
 
 STRATEGY FOR VIDEO ANALYSIS:
 
