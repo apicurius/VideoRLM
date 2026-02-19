@@ -874,29 +874,42 @@ class TestSelectiveDecode:
     """Tests for Feature 4: Selective decoding."""
 
     def test_selective_decode_marks_uniform(self):
-        """Segments with low visual variance should be marked _skip_caption."""
+        """Segments with high pairwise similarity should be marked _skip_caption."""
         indexer = VideoIndexer()
+        # Need at least 2 segments: one uniform (skip), one varied (keep)
         segments = [
             {"start_time": 0.0, "end_time": 5.0, "caption": ""},
+            {"start_time": 5.0, "end_time": 10.0, "caption": ""},
         ]
-        # Create very similar frames (nearly identical)
-        frames = [np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(10)]
-        timestamps = [float(i) * 0.5 for i in range(10)]
+        frames = [np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(20)]
+        timestamps = [float(i) * 0.5 for i in range(20)]
 
-        # Mock _encode_frames to return near-identical embeddings (low variance)
+        # First segment: identical unit vectors → pairwise sim = 1.0 → SKIP
         uniform_embs = np.ones((10, 8), dtype=np.float32)
         uniform_embs = uniform_embs / np.linalg.norm(uniform_embs[0])
+        # Second segment: orthogonal unit vectors → pairwise sim ≈ 0 → KEEP
+        varied_embs = np.eye(8, dtype=np.float32)
+        varied_embs = np.vstack([varied_embs, varied_embs[:2]])  # 10 rows
+
+        call_count = [0]
+
+        def mock_encode(seg_frames):
+            idx = call_count[0]
+            call_count[0] += 1
+            return uniform_embs if idx == 0 else varied_embs
 
         with patch.object(indexer, "_ensure_model"):
-            with patch.object(indexer, "_encode_frames", return_value=uniform_embs):
+            with patch.object(indexer, "_encode_frames", side_effect=mock_encode):
                 indexer._selective_decode(segments, frames, timestamps)
 
         assert segments[0].get("_skip_caption") is True
         assert segments[0]["caption"] == "Static or visually uniform content"
         assert segments[0].get("is_non_action") is True
+        # Second segment should NOT be skipped
+        assert segments[1].get("_skip_caption") is None
 
     def test_selective_decode_keeps_varied(self):
-        """Segments with high visual variance should not be skipped."""
+        """Segments with low pairwise similarity should not be skipped."""
         indexer = VideoIndexer()
         segments = [
             {"start_time": 0.0, "end_time": 5.0, "caption": ""},
@@ -904,9 +917,11 @@ class TestSelectiveDecode:
         frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(10)]
         timestamps = [float(i) * 0.5 for i in range(10)]
 
-        # High variance embeddings
+        # Diverse L2-normalized embeddings (low pairwise similarity)
         rng = np.random.default_rng(42)
         varied_embs = rng.random((10, 8)).astype(np.float32)
+        norms = np.linalg.norm(varied_embs, axis=1, keepdims=True)
+        varied_embs = varied_embs / np.maximum(norms, 1e-10)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_encode_frames", return_value=varied_embs):
@@ -1123,15 +1138,17 @@ class TestSelectiveDecodeEfficiency:
             call_counter["n"] += 1
             n = len(seg_frames)
             if idx < num_uniform:
-                # Near-identical embeddings → variance < 0.02
+                # Near-identical unit vectors → pairwise sim ≈ 1.0
                 base = np.ones((1, 8), dtype=np.float32)
                 base = base / np.linalg.norm(base)
                 embs = np.tile(base, (n, 1))
-                # Add tiny noise (variance << 0.02)
                 embs += rng.normal(0, 0.001, embs.shape).astype(np.float32)
+                norms = np.linalg.norm(embs, axis=1, keepdims=True)
+                embs = embs / np.maximum(norms, 1e-10)
             else:
-                # High-variance embeddings → variance >> 0.02
-                embs = rng.standard_normal((n, 8)).astype(np.float32)
+                # Orthogonal unit vectors → pairwise sim ≈ 0
+                embs = np.eye(8, dtype=np.float32)
+                embs = np.tile(embs, (max(1, n // 8 + 1), 1))[:n]
             return embs
 
         with patch.object(indexer, "_ensure_model"):
@@ -1181,12 +1198,13 @@ class TestSelectiveDecodeEfficiency:
             call_counter["n"] += 1
             n = len(seg_frames)
             if idx % 2 == 0:
-                # Even index → static (near-zero variance)
+                # Even index → static (identical unit vectors, sim = 1.0)
                 base = np.ones((1, 8), dtype=np.float32) / np.sqrt(8)
                 return np.tile(base, (n, 1))
             else:
-                # Odd index → dynamic (high variance)
-                return rng.standard_normal((n, 8)).astype(np.float32)
+                # Odd index → dynamic (orthogonal unit vectors, sim ≈ 0)
+                embs = np.eye(8, dtype=np.float32)
+                return np.tile(embs, (max(1, n // 8 + 1), 1))[:n]
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_encode_frames", side_effect=mock_encode_frames):

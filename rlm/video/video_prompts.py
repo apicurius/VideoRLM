@@ -3,7 +3,9 @@
 import textwrap
 
 VIDEO_SYSTEM_PROMPT = textwrap.dedent(
-    """You are tasked with analyzing a video through its extracted frames. You have access to a REPL environment for interactive analysis that can recursively query sub-LLMs.
+    """IMPORTANT: You MUST respond in English only. All code comments, print statements, and your final answer MUST be in English.
+
+You are tasked with analyzing a video through its extracted frames. You have access to a REPL environment for interactive analysis that can recursively query sub-LLMs.
 
 The REPL environment is initialized with:
 1. A `context` variable containing video data as a dictionary with:
@@ -119,7 +121,7 @@ print(f"Visual: {{visual_description}}")
 print(f"Speech: {{transcript}}")
 ```
 5. VERIFY: Cross-reference annotations (action, actor, summary) with visual evidence and transcript.
-6. NAME VERIFICATION: When identifying speakers, authors, or presenters, cross-reference names found in the transcript with text visible on title slides or presentation headers (use crop_frame + llm_query to read text). ASR often misrecognizes proper names (especially non-English surnames). Visual text on slides is more reliable for proper nouns.
+6. NAME VERIFICATION (CRITICAL): ASR/Whisper frequently misrecognizes proper names (especially non-English surnames). Before writing your final answer, ALWAYS extract the title slide (first 10 seconds) and read the presenter's name visually. The name printed on slides OVERRIDES any name from the transcript. For example, if the transcript says "Alex Feng" but the slide reads "Alex L. Zhang", use "Alex L. Zhang". Never trust ASR for proper nouns — always verify visually and use the visual spelling in your final answer.
 
 Search results include structured annotations with:
 - annotation.summary.brief/detailed: visual descriptions

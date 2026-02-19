@@ -549,7 +549,7 @@ class VideoIndexer:
         if action_embeddings is not None:
             action_embeddings = self._smooth_embeddings(action_embeddings, window=3)
 
-        quality = self._check_embedding_quality(embeddings)
+        quality = self._check_embedding_quality(embeddings, label="caption")
 
         # 7c. Embed representative frame per segment for visual search
         frame_embeddings = None
@@ -568,6 +568,7 @@ class VideoIndexer:
             self._ensure_model()
             frame_embeddings = self._encode_frames(rep_frames)
             frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
+            self._check_embedding_quality(frame_embeddings, label="frame")
         except Exception:
             logger.warning("Failed to compute frame embeddings", exc_info=True)
 
@@ -803,7 +804,9 @@ class VideoIndexer:
         filtered_real = [real_frames[i] for i in sorted(keep_indices)]
         return str_tokens + filtered_real
 
-    def _check_embedding_quality(self, embeddings: np.ndarray) -> dict:
+    def _check_embedding_quality(
+        self, embeddings: np.ndarray, label: str = "caption"
+    ) -> dict:
         """Compute embedding quality metrics (uniformity, pairwise similarity).
 
         Returns an empty dict if embeddings are None or have fewer than 2 rows.
@@ -832,10 +835,17 @@ class VideoIndexer:
         dot_products = np.sum(ei * ej, axis=1)
         mean_pairwise_similarity = float(np.mean(dot_products))
 
-        is_degenerate = mean_pairwise_similarity > 0.9
+        is_degenerate = mean_pairwise_similarity > 0.99
         if is_degenerate:
             logger.warning(
-                "Embedding quality check: DEGENERATE — mean pairwise similarity %.4f > 0.9",
+                "Embedding quality check (%s): DEGENERATE — mean pairwise similarity %.4f > 0.99",
+                label,
+                mean_pairwise_similarity,
+            )
+        else:
+            logger.info(
+                "Embedding quality check (%s): OK — mean pairwise similarity %.4f",
+                label,
                 mean_pairwise_similarity,
             )
 
@@ -1355,12 +1365,18 @@ class VideoIndexer:
         segments: list[dict],
         frames: list[np.ndarray],
         timestamps: list[float],
-        variance_threshold: float = 0.02,
+        similarity_threshold: float = 0.98,
     ) -> None:
         """Skip captioning for visually uniform segments.
 
-        Computes per-frame embedding variance within each segment.
-        Low-variance segments get a generic caption and _skip_caption=True.
+        Computes mean pairwise cosine similarity of frame embeddings within
+        each segment.  Only segments where similarity exceeds the threshold
+        (i.e. nearly identical frames) are marked as static.
+
+        Args:
+            similarity_threshold: Mean pairwise cosine similarity above which
+                a segment is considered static (default 0.98).  Typical lecture
+                segments score ~0.82; truly static content scores >0.99.
         """
         self._ensure_model()
 
@@ -1375,9 +1391,16 @@ class VideoIndexer:
                 continue
             try:
                 embs = self._encode_frames(seg_frames)
-                variance = float(np.var(embs, axis=0).mean())
-                seg["_visual_variance"] = round(variance, 6)
-                if variance < variance_threshold:
+                # Mean pairwise cosine similarity (embeddings are L2-normalized)
+                sim_matrix = embs @ embs.T
+                n = len(sim_matrix)
+                if n < 2:
+                    continue
+                mean_sim = float(
+                    (sim_matrix.sum() - np.trace(sim_matrix)) / (n * (n - 1))
+                )
+                seg["_visual_variance"] = round(1.0 - mean_sim, 6)
+                if mean_sim > similarity_threshold:
                     seg["_skip_caption"] = True
                     seg["caption"] = "Static or visually uniform content"
                     seg["annotation"] = {
@@ -1397,10 +1420,10 @@ class VideoIndexer:
         )
         if skipped:
             logger.info(
-                "Selective decode: %d/%d segments skipped (variance < %.4f)",
+                "Selective decode: %d/%d segments skipped (similarity > %.2f)",
                 skipped,
                 len(segments),
-                variance_threshold,
+                similarity_threshold,
             )
 
     def _build_coarse_level(
