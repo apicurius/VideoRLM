@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import re
 import shutil
@@ -107,59 +108,119 @@ async def arch_info():
     })
 
 
-def _direct_analyze(video_path: str, question: str, model: str, api_key: str, preset: dict) -> str:
-    n_segs = preset["num_segments"]
-    n_per_seg = preset["max_frames_per_segment"]
-    resize = preset["resize"]
-    quality = preset["quality"]
+# Lazily loaded V-JEPA indexer — persists across requests so the model loads only once.
+_vjepa_indexer = None
+_log = logging.getLogger(__name__)
 
+
+def _get_vjepa_indexer():
+    global _vjepa_indexer
+    if _vjepa_indexer is None:
+        from rlm.video.video_indexer import VideoIndexer
+        _vjepa_indexer = VideoIndexer(
+            embedding_model=VISUAL_EMBED_MODEL,
+            scene_model=SCENE_MODEL,
+        )
+    return _vjepa_indexer
+
+
+def _vjepa_keyframes(
+    video_path: str,
+    max_frames: int = 12,
+    resize: tuple[int, int] = (640, 480),
+    quality: int = 75,
+) -> list[tuple[float, bytes]]:
+    """V-JEPA 2 scene detection → representative keyframes.
+
+    Extracts frames at ~1 fps, groups them into 16-frame clips, encodes
+    with V-JEPA 2 (Ward-linkage clustering), and returns one keyframe per
+    detected scene.  Falls back to uniform sampling on any error.
+    """
     cap = cv2.VideoCapture(video_path)
-    total_frames_cv = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     native_fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-    duration = total_frames_cv / native_fps if total_frames_cv > 0 else 0.0
+    duration = total / native_fps if total > 0 else 0.0
+    step = max(1, int(native_fps))  # ~1 fps pass for scene detection
 
-    # Sample evenly: divide into n_segs segments, take n_per_seg evenly-spaced
-    # frames inside each segment (centered in each sub-interval so we never
-    # sample only the very first frame of a segment).
-    timestamps: list[float] = []
-    for seg_i in range(n_segs):
-        seg_start = seg_i * duration / n_segs
-        seg_end = (seg_i + 1) * duration / n_segs
-        sub_dur = (seg_end - seg_start) / n_per_seg
-        for j in range(n_per_seg):
-            t = seg_start + (j + 0.5) * sub_dur   # centre of sub-interval
-            timestamps.append(min(t, duration - 0.05))
+    frames_1fps: list = []
+    ts_1fps: list[float] = []
+    idx = 0
+    while idx < total:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, f = cap.read()
+        if ret:
+            frames_1fps.append(f)
+            ts_1fps.append(idx / native_fps)
+        idx += step
+    cap.release()
+
+    scene_ts: list[float] = []
+    try:
+        from rlm.video.scene_detection import detect_scenes
+
+        indexer = _get_vjepa_indexer()
+        indexer._ensure_scene_model()
+        clips, clip_ts = indexer._group_frames_into_clips(frames_1fps, ts_1fps, 16)
+        clip_embs = indexer._encode_clips_vjepa(clips)
+        clip_reps = [c[len(c) // 2] for c in clips]
+
+        def _embed_fn(_frames):
+            return clip_embs  # pre-computed — ignore passed frame list
+
+        scenes = detect_scenes(clip_reps, clip_ts, embed_fn=_embed_fn, threshold=0.3, min_duration=2.0)
+        scene_ts = [(s + e) / 2 for s, e in scenes]
+        _log.info("V-JEPA 2: %d scenes detected in %s", len(scenes), video_path)
+    except Exception as exc:
+        _log.warning("V-JEPA scene detection failed (%s) — uniform fallback", exc)
+
+    if not scene_ts:
+        n = min(max_frames, 8)
+        scene_ts = [(i + 0.5) * duration / n for i in range(n)]
+
+    if len(scene_ts) > max_frames:
+        step_f = len(scene_ts) / max_frames
+        scene_ts = [scene_ts[int(i * step_f)] for i in range(max_frames)]
+
+    result: list[tuple[float, bytes]] = []
+    cap = cv2.VideoCapture(video_path)
+    for t in scene_ts:
+        fidx = int(t * native_fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        if resize:
+            frame = cv2.resize(frame, resize)
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        result.append((t, buf.tobytes()))
+    cap.release()
+    return result
+
+
+def _direct_analyze(video_path: str, question: str, model: str, api_key: str) -> str:
+    """Single VLM call using V-JEPA 2 scene-aware keyframe selection."""
+    keyframes = _vjepa_keyframes(video_path)
 
     content: list[dict] = [
         {
             "type": "text",
             "text": (
                 f"{question}\n\n"
-                "Below are frames sampled uniformly across the entire video. "
+                "Below are keyframes selected by V-JEPA 2 scene detection — "
+                "each represents a distinct scene in the video. "
                 "Examine every frame carefully before answering. "
-                "When referencing a specific moment, cite it as [TS: X.X] "
-                "(seconds) placed right after the relevant statement."
+                "Cite specific moments as [TS: X.X] (seconds) "
+                "placed right after the relevant statement."
             ),
         }
     ]
-
-    for t in timestamps:
-        frame_idx = int(t * native_fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        if resize:
-            frame = cv2.resize(frame, resize)
+    for t, jpeg_bytes in keyframes:
         content.append({"type": "text", "text": f"[Frame at {t:.1f}s]"})
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        b64 = base64.b64encode(buf.tobytes()).decode()
+        b64 = base64.b64encode(jpeg_bytes).decode()
         content.append({
             "type": "image_url",
             "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "auto"},
         })
-
-    cap.release()
 
     resp = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -177,16 +238,8 @@ async def analyze(
     question: str = Form(...),
     backend: str = Form(default="openrouter"),
     model: str = Form(default="openai/gpt-4o"),
-    full_index: bool = Form(default=False),
-    detail: str = Form(default="low"),
     mode: str = Form(default="direct"),
 ):
-    DETAIL_PRESETS = {
-        "low":    dict(num_segments=3, max_frames_per_segment=2, resize=(320, 240), quality=55,  max_iterations=10, token_budget=60_000),
-        "medium": dict(num_segments=4, max_frames_per_segment=3, resize=(480, 360), quality=65,  max_iterations=15, token_budget=90_000),
-        "high":   dict(num_segments=5, max_frames_per_segment=4, resize=(640, 480), quality=75,  max_iterations=20, token_budget=None),
-    }
-    preset = DETAIL_PRESETS.get(detail, DETAIL_PRESETS["low"])
     suffix = Path(video.filename or "upload.mp4").suffix or ".mp4"
     video_id = str(uuid.uuid4())
     video_path = UPLOAD_DIR / f"{video_id}{suffix}"
@@ -195,26 +248,24 @@ async def analyze(
         shutil.copyfileobj(video.file, f)
 
     try:
-        backend_map = {
+        api_key = {
             "openai": os.getenv("OPENAI_API_KEY"),
             "openrouter": os.getenv("OPENROUTER_API_KEY"),
             "anthropic": os.getenv("ANTHROPIC_API_KEY"),
             "gemini": os.getenv("GEMINI_API_KEY"),
-        }
-        api_key = backend_map.get(backend)
+        }.get(backend)
 
         if mode == "direct":
             response_text = _direct_analyze(
                 str(video_path), question, model,
                 api_key or os.getenv("OPENROUTER_API_KEY", ""),
-                preset,
             )
         else:
             from rlm.video.video_rlm import VideoRLM
 
             openrouter_key = os.getenv("OPENROUTER_API_KEY")
             caption_fn = None
-            if full_index and openrouter_key:
+            if openrouter_key:
                 from rlm.clients.openai import OpenAIClient
 
                 _caption_lm = OpenAIClient(
@@ -231,17 +282,14 @@ async def analyze(
             video_rlm = VideoRLM(
                 backend=backend,
                 backend_kwargs={"model_name": model, "api_key": api_key},
-                num_segments=preset["num_segments"],
-                max_frames_per_segment=preset["max_frames_per_segment"],
-                resize=preset["resize"],
-                image_quality=preset["quality"],
+                num_segments=4,
+                max_frames_per_segment=3,
+                resize=(480, 360),
+                image_quality=65,
                 auto_fps=True,
-                max_iterations=preset["max_iterations"],
-                token_budget=preset["token_budget"],
-                enable_search=full_index,
-                embedding_model=VISUAL_EMBED_MODEL if full_index else None,
-                scene_model=SCENE_MODEL if full_index else None,
-                text_embedding_model=TEXT_EMBED_MODEL if full_index else None,
+                max_iterations=15,
+                token_budget=90_000,
+                enable_search=False,
                 caption_fn=caption_fn,
             )
 
