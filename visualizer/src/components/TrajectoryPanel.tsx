@@ -17,7 +17,7 @@ interface TrajectoryPanelProps {
 function formatMessageContent(content: string | unknown[]): string {
   const text = getContentText(content);
   // Replace raw base64 image data with a clean placeholder
-  let cleaned = containsBase64ImageData(text)
+  const cleaned = containsBase64ImageData(text)
     ? replaceBase64WithPlaceholder(text)
     : text;
 

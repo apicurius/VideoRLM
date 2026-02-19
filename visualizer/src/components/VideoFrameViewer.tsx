@@ -93,6 +93,7 @@ function FrameThumb({ frame, size, index }: { frame: ImageFrame; size: number; i
         onClick={() => setIsExpanded(true)}
         className="group relative rounded-md overflow-hidden border border-border hover:border-cyan-500/50 transition-all hover:shadow-md hover:shadow-cyan-500/10 focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
       >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={`data:${frame.mime_type};base64,${frame.data}`}
           alt={`Frame ${index + 1}`}
@@ -112,6 +113,7 @@ function FrameThumb({ frame, size, index }: { frame: ImageFrame; size: number; i
           className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-8 cursor-pointer"
           onClick={() => setIsExpanded(false)}
         >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={`data:${frame.mime_type};base64,${frame.data}`}
             alt={`Frame ${index + 1} (expanded)`}

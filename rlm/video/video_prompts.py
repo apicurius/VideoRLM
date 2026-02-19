@@ -119,6 +119,7 @@ print(f"Visual: {{visual_description}}")
 print(f"Speech: {{transcript}}")
 ```
 5. VERIFY: Cross-reference annotations (action, actor, summary) with visual evidence and transcript.
+6. NAME VERIFICATION: When identifying speakers, authors, or presenters, cross-reference names found in the transcript with text visible on title slides or presentation headers (use crop_frame + llm_query to read text). ASR often misrecognizes proper names (especially non-English surnames). Visual text on slides is more reliable for proper nouns.
 
 Search results include structured annotations with:
 - annotation.summary.brief/detailed: visual descriptions
