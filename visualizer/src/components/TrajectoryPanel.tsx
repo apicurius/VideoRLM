@@ -116,7 +116,7 @@ export function TrajectoryPanel({
             {/* Prompt messages */}
             {currentIteration?.prompt.map((msg, idx) => (
               <div 
-                key={idx}
+                key={`msg-${msg.role}-${idx}`}
                 className={cn(
                   'rounded-xl border p-4 transition-all',
                   msg.role === 'system' && 'bg-violet-500/5 border-violet-500/20 dark:bg-violet-500/10',

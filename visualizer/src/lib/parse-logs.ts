@@ -72,7 +72,6 @@ export function parseJSONL(content: string): ParsedJSONL {
         iterations.push(parsed as RLMIteration);
       }
     } catch (e) {
-      console.error('Failed to parse line:', line, e);
     }
   }
   

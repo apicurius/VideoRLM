@@ -58,7 +58,6 @@ export function Dashboard() {
 
         setDemoLogs(previews);
       } catch (e) {
-        console.error('Failed to load demo logs:', e);
       } finally {
         setLoadingDemos(false);
       }
@@ -85,7 +84,6 @@ export function Dashboard() {
       const content = await response.text();
       handleFileLoaded(fileName, content);
     } catch (error) {
-      console.error('Error loading demo log:', error);
       alert('Failed to load demo log. Make sure the log files are in the public/logs folder.');
     }
   }, [handleFileLoaded]);

@@ -142,7 +142,7 @@ export function VideoFrameViewer({ frames, segments, thumbSize = 120, className 
   return (
     <div className={cn('space-y-3', className)}>
       {resolvedSegments.map((segment, segIdx) => (
-        <div key={segIdx}>
+        <div key={`seg-${segment.label ?? segIdx}-${segment.frames.length}`}>
           {/* Segment header (only when there are multiple segments or a label) */}
           {(resolvedSegments.length > 1 || segment.label) && (
             <div className="flex items-center gap-2 mb-2">
@@ -167,7 +167,7 @@ export function VideoFrameViewer({ frames, segments, thumbSize = 120, className 
 
               return (
                 <FrameThumb
-                  key={globalIdx}
+                  key={`frame-${segIdx}-${frameIdx}`}
                   frame={frame}
                   size={thumbSize}
                   index={globalIdx}

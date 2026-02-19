@@ -152,7 +152,7 @@ export function CodeBlock({ block, index }: CodeBlockProps) {
                 <div className="p-4 space-y-3">
                   {block.result.rlm_calls.map((call, i) => (
                     <div 
-                      key={i}
+                      key={`sublm-${call.prompt_tokens}-${call.completion_tokens}-${i}`}
                       className="border border-fuchsia-500/30 dark:border-fuchsia-400/30 rounded-lg p-3 bg-background"
                     >
                       <div className="flex items-center justify-between mb-2">

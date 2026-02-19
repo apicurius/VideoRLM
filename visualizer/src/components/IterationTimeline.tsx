@@ -116,7 +116,7 @@ export function IterationTimeline({
             
             return (
               <div
-                key={idx}
+                key={`iter-${iteration.iteration}`}
                 ref={isSelected ? selectedRef : null}
                 onClick={() => onSelectIteration(idx)}
                 className={cn(
