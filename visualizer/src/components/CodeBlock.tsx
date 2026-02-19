@@ -90,7 +90,7 @@ export function CodeBlock({ block, index }: CodeBlockProps) {
                 </div>
                 <pre className="code-block p-4 overflow-x-auto">
                   <code className="text-emerald-700 dark:text-emerald-300">
-                    {block.result.stdout}
+                    {block.result?.stdout}
                   </code>
                 </pre>
               </div>
@@ -106,7 +106,7 @@ export function CodeBlock({ block, index }: CodeBlockProps) {
                 </div>
                 <pre className="code-block p-4 overflow-x-auto">
                   <code className="text-red-700 dark:text-red-300">
-                    {block.result.stderr}
+                    {block.result?.stderr}
                   </code>
                 </pre>
               </div>

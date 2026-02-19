@@ -13,19 +13,19 @@ export interface REPLResult {
   stderr: string;
   locals: Record<string, unknown>;
   execution_time: number;
-  rlm_calls: RLMChatCompletion[];
+  rlm_calls?: RLMChatCompletion[];
 }
 
 export interface CodeBlock {
   code: string;
-  result: REPLResult;
+  result: REPLResult | null;
 }
 
 export interface RLMIteration {
   type?: string;
   iteration: number;
   timestamp: string;
-  prompt: Array<{ role: string; content: string }>;
+  prompt: Array<{ role: string; content: string | unknown[] }>;
   response: string;
   code_blocks: CodeBlock[];
   final_answer: string | [string, string] | null;
@@ -34,6 +34,7 @@ export interface RLMIteration {
 
 // Metadata saved at the start of a log file about RLM configuration
 export interface RLMConfigMetadata {
+  timestamp: string | null;
   root_model: string | null;
   max_depth: number | null;
   max_iterations: number | null;

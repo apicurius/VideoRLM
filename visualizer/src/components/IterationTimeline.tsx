@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { RLMIteration, extractFinalAnswer } from '@/lib/types';
-import { countImageTags } from '@/lib/parse-logs';
+import { countImageTags, getContentText } from '@/lib/parse-logs';
 
 interface IterationTimelineProps {
   iterations: RLMIteration[];
@@ -41,11 +41,10 @@ function getIterationStats(iteration: RLMIteration, isVideoRun?: boolean) {
   // Count images in iteration prompts
   if (isVideoRun) {
     for (const msg of iteration.prompt) {
-      if (typeof msg.content === 'string') {
-        imageCount += countImageTags(msg.content);
-      } else if (typeof msg.content === 'object') {
-        imageCount += countImageTags(JSON.stringify(msg.content));
-      }
+      const contentStr = typeof msg.content === 'string'
+        ? msg.content
+        : JSON.stringify(msg.content);
+      imageCount += countImageTags(contentStr);
     }
   }
 
@@ -53,7 +52,7 @@ function getIterationStats(iteration: RLMIteration, isVideoRun?: boolean) {
   const iterTime = iteration.iteration_time ?? codeExecTime;
 
   // Estimate token counts from prompt (rough estimation)
-  const promptText = iteration.prompt.map(m => m.content).join('');
+  const promptText = iteration.prompt.map(m => getContentText(m.content)).join('');
   const estimatedInputTokens = Math.round(promptText.length / 4);
   const estimatedOutputTokens = Math.round(iteration.response.length / 4);
 
