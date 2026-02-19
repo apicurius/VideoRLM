@@ -347,6 +347,56 @@ The agent starts broad (coarse level=1, ~30s chunks) to localize relevant region
 
 ## Quick Start
 
+### CLI
+
+```bash
+# Comprehensive analysis (default prompt)
+uv run python run_video.py --video path/to/video.mp4
+
+# Ask a specific question
+uv run python run_video.py --video path/to/video.mp4 \
+    --question "What is the OOLONG score of RLM shown in this video?"
+
+# Lightweight run — no scene detection or text embedding
+uv run python run_video.py --video path/to/video.mp4 --no-scene-model --no-text-embedding
+
+# Auto-compute FPS for long videos
+uv run python run_video.py --video path/to/long_video.mp4 --auto-fps
+
+# Use a different backend
+uv run python run_video.py --video path/to/video.mp4 --backend portkey --model "@openai/gpt-5-nano"
+```
+
+**All CLI flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--video` | *(required)* | Path to the video file |
+| `--question` | comprehensive analysis prompt | Question to ask about the video |
+| `--backend` | `gemini` | LLM backend (`gemini`, `portkey`, `openai`, `anthropic`) |
+| `--model` | `gemini-3-flash-preview` | Model name |
+| `--fps` | `0.5` | Frames per second to extract |
+| `--num-segments` | `5` | Number of temporal segments |
+| `--max-frames-per-segment` | `3` | Max frames per segment in LLM context |
+| `--max-iterations` | `15` | Max REPL iterations per completion |
+| `--embedding-model` | `google/siglip2-base-patch16-256` | SigLIP2 vision-text embedding model |
+| `--no-search` | *(off)* | Disable semantic search tools |
+| `--no-scene-model` | *(off)* | Disable V-JEPA 2 scene detection |
+| `--no-text-embedding` | *(off)* | Disable EmbeddingGemma text encoder |
+| `--cache-dir` | `None` | Directory to cache video indexes |
+| `--auto-fps` | *(off)* | Auto-compute FPS based on video duration |
+
+**Test scripts** (same flags as `run_video.py`):
+
+```bash
+uv run python run_test_oolong.py --video test_video.mp4   # Fine-grained detail (OOLONG score)
+uv run python run_test_blend.py  --video test_video.mp4   # blend_frames + llm_query_batched
+uv run python run_test_pixel.py  --video test_video.mp4   # Pixel manipulation tools
+uv run python run_test_vqa.py    --video test_video.mp4   # discriminative_vqa + search_video
+```
+
+### Python API
+
 ```python
 from rlm.logger import RLMLogger
 from rlm.video import VideoRLM
@@ -364,6 +414,7 @@ vrlm = VideoRLM(
     logger=logger,
     verbose=True,
     enable_search=True,
+    embedding_model="google/siglip2-base-patch16-256",
     scene_model="facebook/vjepa2-vitl-fpc64-256",
     text_embedding_model="google/embeddinggemma-300m",
 )
