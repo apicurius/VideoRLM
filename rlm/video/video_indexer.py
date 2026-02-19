@@ -552,25 +552,21 @@ class VideoIndexer:
         quality = self._check_embedding_quality(embeddings, label="caption")
 
         # 7c. Embed representative frame per segment for visual search
-        frame_embeddings = None
-        try:
-            rep_frames = []
-            for seg in segment_infos:
-                seg_frames_list = [
-                    f for f, t in zip(frames, timestamps)
-                    if seg["start_time"] <= t <= seg["end_time"]
-                ]
-                if seg_frames_list:
-                    rep_frames.append(seg_frames_list[len(seg_frames_list) // 2])
-                else:
-                    rep_frames.append(frames[0])  # fallback
+        rep_frames = []
+        for seg in segment_infos:
+            seg_frames_list = [
+                f for f, t in zip(frames, timestamps)
+                if seg["start_time"] <= t <= seg["end_time"]
+            ]
+            if seg_frames_list:
+                rep_frames.append(seg_frames_list[len(seg_frames_list) // 2])
+            else:
+                rep_frames.append(frames[0])  # fallback
 
-            self._ensure_model()
-            frame_embeddings = self._encode_frames(rep_frames)
-            frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
-            self._check_embedding_quality(frame_embeddings, label="frame")
-        except Exception:
-            logger.warning("Failed to compute frame embeddings", exc_info=True)
+        self._ensure_model()
+        frame_embeddings = self._encode_frames(rep_frames)
+        frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
+        self._check_embedding_quality(frame_embeddings, label="frame")
 
         # 8. Build hierarchy levels (when hierarchical mode is enabled)
         segment_hierarchy: list[list[dict]] = []
