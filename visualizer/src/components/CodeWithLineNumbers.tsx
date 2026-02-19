@@ -22,7 +22,7 @@ export function CodeWithLineNumbers({
       <div className="flex-shrink-0 pr-4 border-r border-border/30 select-none">
         {lines.map((_, idx) => (
           <div 
-            key={idx} 
+            key={`line-${idx}`}
             className="text-right text-muted-foreground/50 text-xs leading-relaxed"
             style={{ width: `${lineNumberWidth}ch` }}
           >

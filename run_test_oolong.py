@@ -1,10 +1,9 @@
-"""Run VideoRLM on a local video file with Gemini.
+"""Test: Ask a fine-grained detail question - OOLONG score of RLM.
 
 Usage:
-    uv run python run_video.py --video test_video.mp4
-    uv run python run_video.py --video test_video.mp4 \
+    uv run python run_test_oolong.py --video test_video.mp4
+    uv run python run_test_oolong.py --video test_video.mp4 \
         --question "What is the OOLONG score of RLM shown in this video?"
-    uv run python run_video.py --video test_video.mp4 --no-search --fps 1.0
 """
 
 import argparse
@@ -12,19 +11,11 @@ import argparse
 from rlm.logger import RLMLogger
 from rlm.video import VideoRLM
 
-DEFAULT_PROMPT = (
-    "Respond in English. Provide a comprehensive analysis of this video. "
-    "First, search for all distinct scenes and topics covered. Then zoom into "
-    "each key section to identify: (1) the main concepts being presented, "
-    "(2) any diagrams, text, or visual aids shown on screen, (3) the speaker's "
-    "key arguments and examples, and (4) how the sections connect to form the "
-    "overall narrative. Finally, summarize the video's thesis and the evidence "
-    "used to support it."
-)
+DEFAULT_PROMPT = "What is the OOLONG score of RLM shown in this video?"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run VideoRLM on a local video file")
+    parser = argparse.ArgumentParser(description="Test fine-grained detail question")
     parser.add_argument("--video", required=True, help="Path to the video file")
     parser.add_argument("--question", default=DEFAULT_PROMPT, help="Question to ask about the video")
     parser.add_argument("--backend", default="gemini", help="LLM backend (default: gemini)")

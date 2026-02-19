@@ -8,6 +8,23 @@ import numpy as np
 from rlm.video.video_indexer import VideoIndex, VideoIndexer, _cache_key
 
 
+def _fake_encode(frames, *, dim=4, **kw):
+    """Return L2-normalized embeddings unique to each frame's content.
+
+    Uses mean pixel value as a seed so different frames produce different
+    embedding directions.  This prevents ``_pre_caption_dedup`` from
+    merging segments that should remain distinct, while keeping within-
+    segment diversity high enough to avoid ``_selective_decode`` skipping.
+    """
+    rows = []
+    for f in frames:
+        seed = int(np.mean(f)) + 1  # +1 to avoid seed=0
+        rows.append(np.random.default_rng(seed).standard_normal(dim))
+    embs = np.stack(rows).astype(np.float32)
+    norms = np.linalg.norm(embs, axis=1, keepdims=True)
+    return embs / np.maximum(norms, 1e-10)
+
+
 class TestVideoIndex:
     """Tests for the VideoIndex dataclass."""
 
@@ -77,14 +94,12 @@ class TestVideoIndexerIndexVideo:
         indexer = VideoIndexer()
         loaded = self._make_loaded_video(num_frames=10, fps=2.0)
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    result = indexer.index_video(loaded, caption_fn=None)
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=None)
 
         assert isinstance(result, VideoIndex)
         assert len(result.segments) == 2
@@ -107,6 +122,7 @@ class TestVideoIndexerIndexVideo:
         fake_embeddings = np.array([[1.0, 0.0], [0.0, 1.0]])
         fake_action_embeddings = np.array([[0.5, 0.5], [0.3, 0.7]])
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
                 indexer,
@@ -114,7 +130,8 @@ class TestVideoIndexerIndexVideo:
                 return_value=(fake_embeddings, fake_action_embeddings),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         assert result.segments[0]["caption"] == "a cat sitting"
         assert result.segments[1]["caption"] == "a dog running"
@@ -142,14 +159,12 @@ class TestVideoIndexerIndexVideo:
 
         loaded.segments = [seg1, seg2]
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    result = indexer.index_video(loaded, caption_fn=None)
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=None)
 
         assert len(result.segments) == 2
         assert result.segments[0]["start_time"] == 0.0
@@ -162,14 +177,12 @@ class TestVideoIndexerIndexVideo:
         indexer = VideoIndexer()
         loaded = self._make_loaded_video(num_frames=10, fps=2.0)
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    result = indexer.index_video(loaded, caption_fn=None)
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=None)
 
         assert result.scene_boundaries == [0.0, 3.0]
 
@@ -189,6 +202,7 @@ class TestVideoIndexerIndexVideo:
         fake_embeddings = np.array([[1.0, 0.0]])
         fake_action_emb = np.array([[0.0, 1.0]])
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
                 indexer,
@@ -196,7 +210,8 @@ class TestVideoIndexerIndexVideo:
                 return_value=(fake_embeddings, fake_action_emb),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         assert result.segments[0]["annotation"] == annotation
         assert result.segments[0]["caption"] == "cat sits"
@@ -216,18 +231,16 @@ class TestVideoIndexerIndexVideo:
             '"action":{"brief":"walk","detailed":"walking","actor":"person"}}',
         )
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    indexer.index_video(
-                        loaded,
-                        caption_fn=caption_fn,
-                        refine_fn=refine_fn,
-                    )
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        indexer.index_video(
+                            loaded,
+                            caption_fn=caption_fn,
+                            refine_fn=refine_fn,
+                        )
 
         # 3 rounds × 1 segment = 3 calls
         assert refine_fn.call_count == 3
@@ -249,14 +262,12 @@ class TestVideoIndexerIndexVideo:
             received_frames.extend(frames)
             return "caption"
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=transcript):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    indexer.index_video(loaded, caption_fn=capture_caption_fn)
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        indexer.index_video(loaded, caption_fn=capture_caption_fn)
 
         # First element should be the transcript context string
         assert any(isinstance(f, str) and "[transcript]" in f for f in received_frames)
@@ -353,6 +364,7 @@ class TestVideoIndexerStructuredAnnotations:
         }
         caption_fn = MagicMock(return_value=annotation)
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
                 indexer,
@@ -360,7 +372,8 @@ class TestVideoIndexerStructuredAnnotations:
                 return_value=(np.array([[1.0]]), None),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         seg = result.segments[0]
         assert seg["annotation"] == annotation
@@ -376,6 +389,7 @@ class TestVideoIndexerStructuredAnnotations:
 
         caption_fn = MagicMock(return_value="A dog running")
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
                 indexer,
@@ -383,7 +397,8 @@ class TestVideoIndexerStructuredAnnotations:
                 return_value=(np.array([[1.0]]), None),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         seg = result.segments[0]
         assert seg["caption"] == "A dog running"
@@ -566,14 +581,12 @@ class TestVideoIndexerCache:
 
         fake_emb = np.random.randn(2, 4).astype(np.float32)
 
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(fake_emb, None),
-                ):
-                    result1 = indexer.index_video(loaded, caption_fn=None)
+                with patch.object(indexer, "_embed_captions", return_value=(fake_emb, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result1 = indexer.index_video(loaded, caption_fn=None)
 
         # Cache directory should now exist
         assert cache_dir.exists()
@@ -696,7 +709,8 @@ class TestHierarchicalIndexingRoundTrip:
                     "_embed_captions",
                     return_value=(fake_emb, fake_action_emb),
                 ):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         # Primary segments from finest level
         assert len(result.segments) == 4
@@ -874,29 +888,42 @@ class TestSelectiveDecode:
     """Tests for Feature 4: Selective decoding."""
 
     def test_selective_decode_marks_uniform(self):
-        """Segments with low visual variance should be marked _skip_caption."""
+        """Segments with high pairwise similarity should be marked _skip_caption."""
         indexer = VideoIndexer()
+        # Need at least 2 segments: one uniform (skip), one varied (keep)
         segments = [
             {"start_time": 0.0, "end_time": 5.0, "caption": ""},
+            {"start_time": 5.0, "end_time": 10.0, "caption": ""},
         ]
-        # Create very similar frames (nearly identical)
-        frames = [np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(10)]
-        timestamps = [float(i) * 0.5 for i in range(10)]
+        frames = [np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(20)]
+        timestamps = [float(i) * 0.5 for i in range(20)]
 
-        # Mock _encode_frames to return near-identical embeddings (low variance)
+        # First segment: identical unit vectors → pairwise sim = 1.0 → SKIP
         uniform_embs = np.ones((10, 8), dtype=np.float32)
         uniform_embs = uniform_embs / np.linalg.norm(uniform_embs[0])
+        # Second segment: orthogonal unit vectors → pairwise sim ≈ 0 → KEEP
+        varied_embs = np.eye(8, dtype=np.float32)
+        varied_embs = np.vstack([varied_embs, varied_embs[:2]])  # 10 rows
+
+        call_count = [0]
+
+        def mock_encode(seg_frames):
+            idx = call_count[0]
+            call_count[0] += 1
+            return uniform_embs if idx == 0 else varied_embs
 
         with patch.object(indexer, "_ensure_model"):
-            with patch.object(indexer, "_encode_frames", return_value=uniform_embs):
+            with patch.object(indexer, "_encode_frames", side_effect=mock_encode):
                 indexer._selective_decode(segments, frames, timestamps)
 
         assert segments[0].get("_skip_caption") is True
         assert segments[0]["caption"] == "Static or visually uniform content"
         assert segments[0].get("is_non_action") is True
+        # Second segment should NOT be skipped
+        assert segments[1].get("_skip_caption") is None
 
     def test_selective_decode_keeps_varied(self):
-        """Segments with high visual variance should not be skipped."""
+        """Segments with low pairwise similarity should not be skipped."""
         indexer = VideoIndexer()
         segments = [
             {"start_time": 0.0, "end_time": 5.0, "caption": ""},
@@ -904,9 +931,11 @@ class TestSelectiveDecode:
         frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(10)]
         timestamps = [float(i) * 0.5 for i in range(10)]
 
-        # High variance embeddings
+        # Diverse L2-normalized embeddings (low pairwise similarity)
         rng = np.random.default_rng(42)
         varied_embs = rng.random((10, 8)).astype(np.float32)
+        norms = np.linalg.norm(varied_embs, axis=1, keepdims=True)
+        varied_embs = varied_embs / np.maximum(norms, 1e-10)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_encode_frames", return_value=varied_embs):
@@ -1123,15 +1152,17 @@ class TestSelectiveDecodeEfficiency:
             call_counter["n"] += 1
             n = len(seg_frames)
             if idx < num_uniform:
-                # Near-identical embeddings → variance < 0.02
+                # Near-identical unit vectors → pairwise sim ≈ 1.0
                 base = np.ones((1, 8), dtype=np.float32)
                 base = base / np.linalg.norm(base)
                 embs = np.tile(base, (n, 1))
-                # Add tiny noise (variance << 0.02)
                 embs += rng.normal(0, 0.001, embs.shape).astype(np.float32)
+                norms = np.linalg.norm(embs, axis=1, keepdims=True)
+                embs = embs / np.maximum(norms, 1e-10)
             else:
-                # High-variance embeddings → variance >> 0.02
-                embs = rng.standard_normal((n, 8)).astype(np.float32)
+                # Orthogonal unit vectors → pairwise sim ≈ 0
+                embs = np.eye(8, dtype=np.float32)
+                embs = np.tile(embs, (max(1, n // 8 + 1), 1))[:n]
             return embs
 
         with patch.object(indexer, "_ensure_model"):
@@ -1181,12 +1212,13 @@ class TestSelectiveDecodeEfficiency:
             call_counter["n"] += 1
             n = len(seg_frames)
             if idx % 2 == 0:
-                # Even index → static (near-zero variance)
+                # Even index → static (identical unit vectors, sim = 1.0)
                 base = np.ones((1, 8), dtype=np.float32) / np.sqrt(8)
                 return np.tile(base, (n, 1))
             else:
-                # Odd index → dynamic (high variance)
-                return rng.standard_normal((n, 8)).astype(np.float32)
+                # Odd index → dynamic (orthogonal unit vectors, sim ≈ 0)
+                embs = np.eye(8, dtype=np.float32)
+                return np.tile(embs, (max(1, n // 8 + 1), 1))[:n]
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_encode_frames", side_effect=mock_encode_frames):

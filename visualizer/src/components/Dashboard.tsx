@@ -36,30 +36,28 @@ export function Dashboard() {
         }
         const { files } = await listResponse.json();
         
-        const previews: DemoLogInfo[] = [];
-        
-        for (const fileName of files) {
-          try {
+        const results = await Promise.allSettled(
+          files.map(async (fileName: string) => {
             const response = await fetch(`/api/logs/${fileName}`);
-            if (!response.ok) continue;
+            if (!response.ok) throw new Error(`Failed to fetch ${fileName}`);
             const content = await response.text();
             const parsed = parseLogFile(fileName, content);
             const contextVar = extractContextVariable(parsed.iterations);
-            
-            previews.push({
+            return {
               fileName,
               contextPreview: contextVar,
               hasFinalAnswer: !!parsed.metadata.finalAnswer,
               iterations: parsed.metadata.totalIterations,
-            });
-          } catch (e) {
-            console.error('Failed to load demo preview:', fileName, e);
-          }
-        }
-        
+            } as DemoLogInfo;
+          })
+        );
+
+        const previews = results
+          .filter((r): r is PromiseFulfilledResult<DemoLogInfo> => r.status === 'fulfilled')
+          .map(r => r.value);
+
         setDemoLogs(previews);
       } catch (e) {
-        console.error('Failed to load demo logs:', e);
       } finally {
         setLoadingDemos(false);
       }
@@ -86,7 +84,6 @@ export function Dashboard() {
       const content = await response.text();
       handleFileLoaded(fileName, content);
     } catch (error) {
-      console.error('Error loading demo log:', error);
       alert('Failed to load demo log. Make sure the log files are in the public/logs folder.');
     }
   }, [handleFileLoaded]);

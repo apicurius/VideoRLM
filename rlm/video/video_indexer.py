@@ -549,27 +549,24 @@ class VideoIndexer:
         if action_embeddings is not None:
             action_embeddings = self._smooth_embeddings(action_embeddings, window=3)
 
-        quality = self._check_embedding_quality(embeddings)
+        quality = self._check_embedding_quality(embeddings, label="caption")
 
         # 7c. Embed representative frame per segment for visual search
-        frame_embeddings = None
-        try:
-            rep_frames = []
-            for seg in segment_infos:
-                seg_frames_list = [
-                    f for f, t in zip(frames, timestamps)
-                    if seg["start_time"] <= t <= seg["end_time"]
-                ]
-                if seg_frames_list:
-                    rep_frames.append(seg_frames_list[len(seg_frames_list) // 2])
-                else:
-                    rep_frames.append(frames[0])  # fallback
+        rep_frames = []
+        for seg in segment_infos:
+            seg_frames_list = [
+                f for f, t in zip(frames, timestamps)
+                if seg["start_time"] <= t <= seg["end_time"]
+            ]
+            if seg_frames_list:
+                rep_frames.append(seg_frames_list[len(seg_frames_list) // 2])
+            else:
+                rep_frames.append(frames[0])  # fallback
 
-            self._ensure_model()
-            frame_embeddings = self._encode_frames(rep_frames)
-            frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
-        except Exception:
-            logger.warning("Failed to compute frame embeddings", exc_info=True)
+        self._ensure_model()
+        frame_embeddings = self._encode_frames(rep_frames)
+        frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
+        self._check_embedding_quality(frame_embeddings, label="frame")
 
         # 8. Build hierarchy levels (when hierarchical mode is enabled)
         segment_hierarchy: list[list[dict]] = []
@@ -803,7 +800,9 @@ class VideoIndexer:
         filtered_real = [real_frames[i] for i in sorted(keep_indices)]
         return str_tokens + filtered_real
 
-    def _check_embedding_quality(self, embeddings: np.ndarray) -> dict:
+    def _check_embedding_quality(
+        self, embeddings: np.ndarray, label: str = "caption"
+    ) -> dict:
         """Compute embedding quality metrics (uniformity, pairwise similarity).
 
         Returns an empty dict if embeddings are None or have fewer than 2 rows.
@@ -832,10 +831,17 @@ class VideoIndexer:
         dot_products = np.sum(ei * ej, axis=1)
         mean_pairwise_similarity = float(np.mean(dot_products))
 
-        is_degenerate = mean_pairwise_similarity > 0.9
+        is_degenerate = mean_pairwise_similarity > 0.99
         if is_degenerate:
             logger.warning(
-                "Embedding quality check: DEGENERATE — mean pairwise similarity %.4f > 0.9",
+                "Embedding quality check (%s): DEGENERATE — mean pairwise similarity %.4f > 0.99",
+                label,
+                mean_pairwise_similarity,
+            )
+        else:
+            logger.info(
+                "Embedding quality check (%s): OK — mean pairwise similarity %.4f",
+                label,
                 mean_pairwise_similarity,
             )
 
@@ -1355,12 +1361,18 @@ class VideoIndexer:
         segments: list[dict],
         frames: list[np.ndarray],
         timestamps: list[float],
-        variance_threshold: float = 0.02,
+        similarity_threshold: float = 0.98,
     ) -> None:
         """Skip captioning for visually uniform segments.
 
-        Computes per-frame embedding variance within each segment.
-        Low-variance segments get a generic caption and _skip_caption=True.
+        Computes mean pairwise cosine similarity of frame embeddings within
+        each segment.  Only segments where similarity exceeds the threshold
+        (i.e. nearly identical frames) are marked as static.
+
+        Args:
+            similarity_threshold: Mean pairwise cosine similarity above which
+                a segment is considered static (default 0.98).  Typical lecture
+                segments score ~0.82; truly static content scores >0.99.
         """
         self._ensure_model()
 
@@ -1375,9 +1387,16 @@ class VideoIndexer:
                 continue
             try:
                 embs = self._encode_frames(seg_frames)
-                variance = float(np.var(embs, axis=0).mean())
-                seg["_visual_variance"] = round(variance, 6)
-                if variance < variance_threshold:
+                # Mean pairwise cosine similarity (embeddings are L2-normalized)
+                sim_matrix = embs @ embs.T
+                n = len(sim_matrix)
+                if n < 2:
+                    continue
+                mean_sim = float(
+                    (sim_matrix.sum() - np.trace(sim_matrix)) / (n * (n - 1))
+                )
+                seg["_visual_variance"] = round(1.0 - mean_sim, 6)
+                if mean_sim > similarity_threshold:
                     seg["_skip_caption"] = True
                     seg["caption"] = "Static or visually uniform content"
                     seg["annotation"] = {
@@ -1397,10 +1416,10 @@ class VideoIndexer:
         )
         if skipped:
             logger.info(
-                "Selective decode: %d/%d segments skipped (variance < %.4f)",
+                "Selective decode: %d/%d segments skipped (similarity > %.2f)",
                 skipped,
                 len(segments),
-                variance_threshold,
+                similarity_threshold,
             )
 
     def _build_coarse_level(
@@ -1490,31 +1509,43 @@ class VideoIndexer:
         Each clip is a list of BGR frames. Returns an ``(N_clips, 1024)``
         embedding matrix where each row is the mean-pooled patch token
         representation for one clip.
+
+        Clips are grouped by frame count before batching because the video
+        processor requires all clips in a batch to have the same temporal
+        length (e.g. the remainder clip may be shorter than the rest).
         """
         import torch
+        from itertools import groupby
 
-        all_embs = []
+        # Group clips by frame count, preserving original order via index
+        indexed_clips = list(enumerate(clips))
+        indexed_clips.sort(key=lambda x: len(x[1]))
+
+        result_embs = [None] * len(clips)
         batch_size = 4
-        for i in range(0, len(clips), batch_size):
-            batch_clips = clips[i : i + batch_size]
-            # Convert each clip: BGR→RGB, stack to (T, H, W, 3) list-of-arrays
-            rgb_clips = []
-            for clip in batch_clips:
-                rgb_frames = [f[:, :, ::-1] for f in clip]  # BGR → RGB
-                rgb_clips.append(rgb_frames)
 
-            inputs = self._scene_processor(rgb_clips, return_tensors="pt").to(
-                self._scene_torch_device
-            )
-            with torch.no_grad():
-                outputs = self._scene_model(**inputs)
-                # outputs.last_hidden_state: (batch, seq_len, 1024)
-                patch_tokens = outputs.last_hidden_state
-                clip_embs = patch_tokens.mean(dim=1)  # (batch, 1024)
-                clip_embs = clip_embs / clip_embs.norm(p=2, dim=-1, keepdim=True)
-            all_embs.append(clip_embs.cpu().float().numpy())
+        for _frame_count, group in groupby(indexed_clips, key=lambda x: len(x[1])):
+            group_items = list(group)
+            for i in range(0, len(group_items), batch_size):
+                batch_items = group_items[i : i + batch_size]
+                rgb_clips = []
+                for _idx, clip in batch_items:
+                    rgb_frames = [f[:, :, ::-1] for f in clip]  # BGR → RGB
+                    rgb_clips.append(rgb_frames)
 
-        return np.concatenate(all_embs, axis=0)
+                inputs = self._scene_processor(rgb_clips, return_tensors="pt").to(
+                    self._scene_torch_device
+                )
+                with torch.no_grad():
+                    outputs = self._scene_model(**inputs)
+                    patch_tokens = outputs.last_hidden_state
+                    clip_embs = patch_tokens.mean(dim=1)  # (batch, 1024)
+                    clip_embs = clip_embs / clip_embs.norm(p=2, dim=-1, keepdim=True)
+                embs_np = clip_embs.cpu().float().numpy()
+                for j, (orig_idx, _clip) in enumerate(batch_items):
+                    result_embs[orig_idx] = embs_np[j]
+
+        return np.stack(result_embs)
 
     def _group_frames_into_clips(
         self,

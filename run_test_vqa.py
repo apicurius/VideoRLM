@@ -1,10 +1,8 @@
-"""Run VideoRLM on a local video file with Gemini.
+"""Test prompt targeting discriminative_vqa and search_video.
 
 Usage:
-    uv run python run_video.py --video test_video.mp4
-    uv run python run_video.py --video test_video.mp4 \
-        --question "What is the OOLONG score of RLM shown in this video?"
-    uv run python run_video.py --video test_video.mp4 --no-search --fps 1.0
+    uv run python run_test_vqa.py --video test_video.mp4
+    uv run python run_test_vqa.py --video test_video.mp4 --no-scene-model
 """
 
 import argparse
@@ -13,18 +11,20 @@ from rlm.logger import RLMLogger
 from rlm.video import VideoRLM
 
 DEFAULT_PROMPT = (
-    "Respond in English. Provide a comprehensive analysis of this video. "
-    "First, search for all distinct scenes and topics covered. Then zoom into "
-    "each key section to identify: (1) the main concepts being presented, "
-    "(2) any diagrams, text, or visual aids shown on screen, (3) the speaker's "
-    "key arguments and examples, and (4) how the sections connect to form the "
-    "overall narrative. Finally, summarize the video's thesis and the evidence "
-    "used to support it."
+    "Answer these questions about the video using the available tools: "
+    "(1) Use discriminative_vqa to determine: Is this video about (a) cooking, "
+    "(b) machine learning, (c) sports, or (d) music? "
+    "(2) Use search_video with field='action' to find what activities the "
+    "presenter performs. "
+    "(3) Use search_video with field='summary' to find scenes with diagrams or "
+    "charts. "
+    "(4) Use discriminative_vqa to determine: Is the presentation style "
+    "(a) lecture with slides, (b) live coding, (c) whiteboard, or (d) interview?"
 )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run VideoRLM on a local video file")
+    parser = argparse.ArgumentParser(description="Test discriminative_vqa and search_video")
     parser.add_argument("--video", required=True, help="Path to the video file")
     parser.add_argument("--question", default=DEFAULT_PROMPT, help="Question to ask about the video")
     parser.add_argument("--backend", default="gemini", help="LLM backend (default: gemini)")

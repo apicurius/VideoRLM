@@ -18,6 +18,7 @@ export function extractContextVariable(iterations: RLMIteration[]): string | nul
 // Default config when metadata is not present (backwards compatibility)
 function getDefaultConfig(): RLMConfigMetadata {
   return {
+    timestamp: null,
     root_model: null,
     max_depth: null,
     max_iterations: null,
@@ -51,6 +52,7 @@ export function parseJSONL(content: string): ParsedJSONL {
       // Check if this is a metadata entry
       if (parsed.type === 'metadata') {
         config = {
+          timestamp: parsed.timestamp ?? null,
           root_model: parsed.root_model ?? null,
           max_depth: parsed.max_depth ?? null,
           max_iterations: parsed.max_iterations ?? null,
@@ -65,49 +67,65 @@ export function parseJSONL(content: string): ParsedJSONL {
           max_frames_per_segment: parsed.max_frames_per_segment ?? null,
           resize: parsed.resize ?? null,
         };
-      } else {
+      } else if (parsed.type === 'iteration' || parsed.iteration != null) {
         // This is an iteration entry
         iterations.push(parsed as RLMIteration);
       }
     } catch (e) {
-      console.error('Failed to parse line:', line, e);
     }
   }
   
   return { iterations, config };
 }
 
+/** Safely get string representation of message content (handles multimodal arrays) */
+export function getContentText(content: string | unknown[]): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    // Extract text parts from multimodal content arrays
+    return content
+      .filter((part): part is { type: string; text: string } =>
+        typeof part === 'object' && part !== null && 'text' in part && typeof (part as Record<string, unknown>).text === 'string'
+      )
+      .map(part => part.text)
+      .join('\n');
+  }
+  return String(content ?? '');
+}
+
 export function extractContextQuestion(iterations: RLMIteration[]): string {
   if (iterations.length === 0) return 'No context found';
-  
+
   const firstIteration = iterations[0];
   const prompt = firstIteration.prompt;
-  
+
   // Look for user message that contains the actual question
   for (const msg of prompt) {
     if (msg.role === 'user' && msg.content) {
+      const text = getContentText(msg.content);
       // Try to extract quoted query
-      const queryMatch = msg.content.match(/original query: "([^"]+)"/);
+      const queryMatch = text.match(/original query: "([^"]+)"/);
       if (queryMatch) {
         return queryMatch[1];
       }
-      
+
       // Check if it contains the actual query pattern
-      if (msg.content.includes('answer the prompt')) {
+      if (text.includes('answer the prompt')) {
         continue;
       }
-      
+
       // Take first substantial user message
-      if (msg.content.length > 50 && msg.content.length < 500) {
-        return msg.content.slice(0, 200) + (msg.content.length > 200 ? '...' : '');
+      if (text.length > 50 && text.length < 500) {
+        return text.slice(0, 200) + (text.length > 200 ? '...' : '');
       }
     }
   }
-  
+
   // Fallback: look in system prompt for context info
   const systemMsg = prompt.find(m => m.role === 'system');
   if (systemMsg?.content) {
-    const contextMatch = systemMsg.content.match(/context variable.*?:(.*?)(?:\n|$)/i);
+    const text = getContentText(systemMsg.content);
+    const contextMatch = text.match(/context variable.*?:(.*?)(?:\n|$)/i);
     if (contextMatch) {
       return contextMatch[1].trim().slice(0, 200);
     }
@@ -161,8 +179,11 @@ export function computeMetadata(iterations: RLMIteration[], config: RLMConfigMet
   // Also check the system prompt of the first iteration for video-related content
   if (!isVideoRun && iterations.length > 0) {
     const systemMsg = iterations[0].prompt.find(m => m.role === 'system');
-    if (systemMsg?.content && /analyzing a video|video.*frames|extracted frames/i.test(systemMsg.content)) {
-      isVideoRun = true;
+    if (systemMsg?.content) {
+      const contentStr = getContentText(systemMsg.content);
+      if (/analyzing a video|video.*frames|extracted frames/i.test(contentStr)) {
+        isVideoRun = true;
+      }
     }
   }
 
@@ -203,11 +224,10 @@ export function computeMetadata(iterations: RLMIteration[], config: RLMConfigMet
     // Count frames in iteration prompts
     if (isVideoRun) {
       for (const msg of iter.prompt) {
-        if (typeof msg.content === 'string') {
-          totalFramesSent += countImageTags(msg.content);
-        } else if (typeof msg.content === 'object') {
-          totalFramesSent += countImageTags(JSON.stringify(msg.content));
-        }
+        const contentStr = typeof msg.content === 'string'
+          ? msg.content
+          : JSON.stringify(msg.content);
+        totalFramesSent += countImageTags(contentStr);
       }
     }
 

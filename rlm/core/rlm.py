@@ -313,6 +313,18 @@ class RLM:
 
                 # Check if RLM is done and has a final answer.
                 final_answer = find_final_answer(iteration.response, environment=environment)
+
+                # If response has BOTH code blocks AND a FINAL, the LLM hasn't
+                # seen actual execution results yet — defer the FINAL to next iteration.
+                if final_answer is not None and len(iteration.code_blocks) > 0:
+                    import re
+                    cleaned = re.sub(
+                        r"^\s*FINAL\(.*\)\s*$", "", iteration.response,
+                        flags=re.MULTILINE | re.DOTALL,
+                    )
+                    iteration.response = cleaned.strip()
+                    final_answer = None
+
                 iteration.final_answer = final_answer
 
                 # If logger is used, log the iteration.
@@ -405,8 +417,12 @@ class RLM:
         """
         current_prompt = message_history + [
             {
-                "role": "assistant",
-                "content": "Please provide a final answer to the user's question based on the information provided.",
+                "role": "user",
+                "content": (
+                    "You have run out of iterations. Based on all the information gathered so far, "
+                    "provide your final answer now. Do NOT write any code blocks. "
+                    "Respond with ONLY: FINAL(your answer)"
+                ),
             }
         ]
         response = lm_handler.completion(current_prompt)

@@ -24,7 +24,6 @@ export function FileUploader({ onFileLoaded }: FileUploaderProps) {
       const content = await file.text();
       onFileLoaded(file.name, content);
     } catch (error) {
-      console.error('Error reading file:', error);
       alert('Failed to read file');
     } finally {
       setIsLoading(false);

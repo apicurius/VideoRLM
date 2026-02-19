@@ -199,6 +199,11 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                     )
                 return results
             # Fallback to summary embeddings if no frame embeddings
+            import logging
+            logging.getLogger(__name__).warning(
+                "No frame embeddings available — field='visual' falling back to 'summary'. "
+                "Visual search requires SigLIP2 frame embeddings from indexing."
+            )
             field = "summary"
 
         # Resolve which embedding matrices to use

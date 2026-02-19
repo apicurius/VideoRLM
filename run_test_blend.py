@@ -1,10 +1,8 @@
-"""Run VideoRLM on a local video file with Gemini.
+"""Test prompt targeting blend_frames and llm_query_batched.
 
 Usage:
-    uv run python run_video.py --video test_video.mp4
-    uv run python run_video.py --video test_video.mp4 \
-        --question "What is the OOLONG score of RLM shown in this video?"
-    uv run python run_video.py --video test_video.mp4 --no-search --fps 1.0
+    uv run python run_test_blend.py --video test_video.mp4
+    uv run python run_test_blend.py --video test_video.mp4 --no-scene-model
 """
 
 import argparse
@@ -13,18 +11,16 @@ from rlm.logger import RLMLogger
 from rlm.video import VideoRLM
 
 DEFAULT_PROMPT = (
-    "Respond in English. Provide a comprehensive analysis of this video. "
-    "First, search for all distinct scenes and topics covered. Then zoom into "
-    "each key section to identify: (1) the main concepts being presented, "
-    "(2) any diagrams, text, or visual aids shown on screen, (3) the speaker's "
-    "key arguments and examples, and (4) how the sections connect to form the "
-    "overall narrative. Finally, summarize the video's thesis and the evidence "
-    "used to support it."
+    "Create a visual summary of this video. First use get_scene_list() to find "
+    "all scenes. Then for each scene, use extract_frames to get frames and "
+    "blend_frames to create a single composite image per scene. Use "
+    "llm_query_batched to analyze all composites in parallel. Also use "
+    "SHOW_VARS() to see what tools are available. What are the main visual themes?"
 )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run VideoRLM on a local video file")
+    parser = argparse.ArgumentParser(description="Test blend_frames and llm_query_batched")
     parser.add_argument("--video", required=True, help="Path to the video file")
     parser.add_argument("--question", default=DEFAULT_PROMPT, help="Question to ask about the video")
     parser.add_argument("--backend", default="gemini", help="LLM backend (default: gemini)")

@@ -88,7 +88,7 @@ export function ExecutionPanel({ iteration }: ExecutionPanelProps) {
               <div className="p-4 space-y-4">
                 {iteration.code_blocks.length > 0 ? (
                   iteration.code_blocks.map((block, idx) => (
-                    <CodeBlock key={idx} block={block} index={idx} />
+                    <CodeBlock key={`block-${idx}`} block={block} index={idx} />
                   ))
                 ) : (
                   <Card className="border-dashed">

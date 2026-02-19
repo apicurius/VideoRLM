@@ -39,9 +39,9 @@ export function AsciiRLM() {
   // Colorize the ASCII art
   const colorize = (text: string) => {
     return text.split('\n').map((line, lineIdx) => (
-      <div key={lineIdx} className="whitespace-pre">
+      <div key={`line-${lineIdx}`} className="whitespace-pre">
         {line.split('').map((char, charIdx) => {
-          const key = `${lineIdx}-${charIdx}`;
+          const key = `char-${lineIdx}-${charIdx}`;
           
           // Box drawing characters - dim
           if ('┌┐└┘├┤┬┴┼─│╔╗╚╝║═'.includes(char)) {

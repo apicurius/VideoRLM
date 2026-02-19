@@ -1,84 +1,88 @@
 """
 Example: Long Video Understanding (LVU) with RLM.
 
-This demonstrates how to use the RLM video modules to analyse a video file
-by extracting frames, building context, and querying an LLM recursively.
+This demonstrates how to use VideoRLM to analyse a video file end-to-end:
+frame extraction, scene detection (V-JEPA 2), captioning, semantic search
+(SigLIP2 + EmbeddingGemma), and recursive LLM querying — all handled by
+a single high-level class.
 
 Usage:
     uv run python examples/video_understanding.py --video /path/to/video.mp4
+    uv run python examples/video_understanding.py --video /path/to/video.mp4 \
+        --question "What is the OOLONG score of RLM shown in this video?"
+    uv run python examples/video_understanding.py --video /path/to/video.mp4 \
+        --no-search --fps 1.0
 
 Requirements:
     - opencv-python (cv2)
     - numpy
-    - A configured LLM backend (e.g. Portkey with PORTKEY_API_KEY)
+    - A configured LLM backend (e.g. Gemini with GEMINI_API_KEY)
 """
 
 import argparse
-import os
 
-from dotenv import load_dotenv
-
-from rlm import RLM
 from rlm.logger import RLMLogger
-from rlm.video import VideoContext, VideoLoader
+from rlm.video import VideoRLM
 
-load_dotenv()
+DEFAULT_PROMPT = (
+    "Respond in English. Provide a comprehensive analysis of this video. "
+    "First, search for all distinct scenes and topics covered. Then zoom into "
+    "each key section to identify: (1) the main concepts being presented, "
+    "(2) any diagrams, text, or visual aids shown on screen, (3) the speaker's "
+    "key arguments and examples, and (4) how the sections connect to form the "
+    "overall narrative. Finally, summarize the video's thesis and the evidence "
+    "used to support it."
+)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Video understanding with RLM")
+    parser = argparse.ArgumentParser(description="Run VideoRLM on a local video file")
     parser.add_argument("--video", required=True, help="Path to the video file")
-    parser.add_argument(
-        "--question",
-        default="Describe what happens in this video.",
-        help="Question to ask about the video",
-    )
-    parser.add_argument("--fps", type=float, default=1.0, help="Frames per second to extract")
-    parser.add_argument("--num-segments", type=int, default=4, help="Number of segments")
-    parser.add_argument(
-        "--max-frames-per-segment", type=int, default=5, help="Max frames per segment"
-    )
+    parser.add_argument("--question", default=DEFAULT_PROMPT, help="Question to ask about the video")
+    parser.add_argument("--backend", default="gemini", help="LLM backend (default: gemini)")
+    parser.add_argument("--model", default="gemini-3.1-pro-preview", help="Model name")
+    parser.add_argument("--fps", type=float, default=0.5, help="Frames per second (default: 0.5)")
+    parser.add_argument("--num-segments", type=int, default=5, help="Number of segments (default: 5)")
+    parser.add_argument("--max-frames-per-segment", type=int, default=3, help="Max frames per segment (default: 3)")
+    parser.add_argument("--max-iterations", type=int, default=15, help="Max REPL iterations (default: 15)")
+    parser.add_argument("--no-search", action="store_true", help="Disable semantic search tools")
+    parser.add_argument("--no-scene-model", action="store_true", help="Disable V-JEPA 2 scene detection")
+    parser.add_argument("--no-text-embedding", action="store_true", help="Disable separate text embedding model")
+    parser.add_argument("--embedding-model", default="google/siglip2-base-patch16-256", help="Vision-text embedding model (default: google/siglip2-base-patch16-256)")
+    parser.add_argument("--cache-dir", default=None, help="Directory to cache video indexes")
+    parser.add_argument("--auto-fps", action="store_true", help="Auto-compute FPS based on video duration")
+    parser.add_argument("--thinking-level", default="LOW", choices=["NONE", "LOW", "MEDIUM", "HIGH"], help="Gemini thinking level (default: LOW)")
     args = parser.parse_args()
 
-    # 1. Load and segment the video
-    print(f"Loading video: {args.video}")
-    loader = VideoLoader(fps=args.fps, resize=(320, 240))
-    loaded_video = loader.load_and_segment(args.video, num_segments=args.num_segments)
-
-    print(f"  Duration: {loaded_video.metadata.duration:.1f}s")
-    print(f"  Extracted frames: {loaded_video.metadata.extracted_frame_count}")
-    print(f"  Segments: {len(loaded_video.segments)}")
-
-    # 2. Build context payload from the video
-    video_ctx = VideoContext(
-        format=".jpg",
-        quality=80,
-        max_frames_per_segment=args.max_frames_per_segment,
-    )
-    context_payload = video_ctx.build_context(loaded_video)
-
-    print(f"  Context segments: {context_payload.get('num_segments', 'N/A')}")
-
-    # 3. Set up RLM with the video context
     logger = RLMLogger(log_dir="./logs")
 
-    rlm = RLM(
-        backend="portkey",
-        backend_kwargs={
-            "model_name": "@openai/gpt-5-nano",
-            "api_key": os.getenv("PORTKEY_API_KEY"),
-        },
-        environment="local",
-        environment_kwargs={"context_payload": context_payload},
-        max_depth=1,
+    video_rlm = VideoRLM(
+        backend=args.backend,
+        backend_kwargs={"model_name": args.model, "timeout": 300.0, "thinking_level": args.thinking_level},
+        fps=args.fps,
+        num_segments=args.num_segments,
+        max_frames_per_segment=args.max_frames_per_segment,
+        resize=(640, 480),
+        max_iterations=args.max_iterations,
         logger=logger,
         verbose=True,
+        enable_search=not args.no_search,
+        embedding_model=args.embedding_model,
+        cache_dir=args.cache_dir,
+        auto_fps=args.auto_fps,
+        scene_model=None if args.no_scene_model else "facebook/vjepa2-vitl-fpc64-256",
+        text_embedding_model=None if args.no_text_embedding else "google/embeddinggemma-300m",
     )
 
-    # 4. Ask a question about the video
-    print(f"\nQuestion: {args.question}\n")
-    result = rlm.completion(args.question)
-    print(f"\nAnswer: {result}")
+    print(f"Analyzing video: {args.video}")
+    print(f"Question: {args.question}\n")
+
+    result = video_rlm.completion(args.video, prompt=args.question)
+
+    print("\n" + "=" * 60)
+    print("FINAL ANSWER:")
+    print("=" * 60)
+    print(result.response)
 
 
 if __name__ == "__main__":

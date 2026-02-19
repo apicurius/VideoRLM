@@ -7,6 +7,18 @@
 # Logs
 logs/
 
+# Research papers and docs
+*.pdf
+*.docx
+
+# Generated diagrams and temp files
+diagram_*.png
+temp_diagram_*.mmd
+render_diagrams.py
+
+# Ad-hoc test/experiment scripts
+test_gemini*.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

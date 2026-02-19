@@ -32,9 +32,9 @@ export function LogViewer({ logFile, onBack }: LogViewerProps) {
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft' || e.key === 'j') {
+      if (e.key === 'ArrowLeft' || e.key === 'k') {
         goToPrevious();
-      } else if (e.key === 'ArrowRight' || e.key === 'k') {
+      } else if (e.key === 'ArrowRight' || e.key === 'j') {
         goToNext();
       } else if (e.key === 'Escape') {
         onBack();

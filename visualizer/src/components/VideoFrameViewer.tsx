@@ -93,6 +93,7 @@ function FrameThumb({ frame, size, index }: { frame: ImageFrame; size: number; i
         onClick={() => setIsExpanded(true)}
         className="group relative rounded-md overflow-hidden border border-border hover:border-cyan-500/50 transition-all hover:shadow-md hover:shadow-cyan-500/10 focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
       >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={`data:${frame.mime_type};base64,${frame.data}`}
           alt={`Frame ${index + 1}`}
@@ -112,6 +113,7 @@ function FrameThumb({ frame, size, index }: { frame: ImageFrame; size: number; i
           className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-8 cursor-pointer"
           onClick={() => setIsExpanded(false)}
         >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={`data:${frame.mime_type};base64,${frame.data}`}
             alt={`Frame ${index + 1} (expanded)`}
@@ -140,7 +142,7 @@ export function VideoFrameViewer({ frames, segments, thumbSize = 120, className 
   return (
     <div className={cn('space-y-3', className)}>
       {resolvedSegments.map((segment, segIdx) => (
-        <div key={segIdx}>
+        <div key={`seg-${segment.label ?? segIdx}-${segment.frames.length}`}>
           {/* Segment header (only when there are multiple segments or a label) */}
           {(resolvedSegments.length > 1 || segment.label) && (
             <div className="flex items-center gap-2 mb-2">
@@ -165,7 +167,7 @@ export function VideoFrameViewer({ frames, segments, thumbSize = 120, className 
 
               return (
                 <FrameThumb
-                  key={globalIdx}
+                  key={`frame-${segIdx}-${frameIdx}`}
                   frame={frame}
                   size={thumbSize}
                   index={globalIdx}
