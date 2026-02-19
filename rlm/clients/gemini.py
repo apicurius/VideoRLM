@@ -30,9 +30,11 @@ class GeminiClient(BaseLM):
         self,
         api_key: str | None = None,
         model_name: str | None = "gemini-2.5-flash",
+        thinking_level: str | None = None,
         **kwargs,
     ):
         super().__init__(model_name=model_name, **kwargs)
+        self.thinking_level = thinking_level or "LOW"
 
         if api_key is None:
             api_key = DEFAULT_GEMINI_API_KEY
@@ -100,7 +102,7 @@ class GeminiClient(BaseLM):
         if system_instruction:
             kwargs["system_instruction"] = system_instruction
         if self._is_gemini3(model):
-            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=self.thinking_level)
         return types.GenerateContentConfig(**kwargs) if kwargs else None
 
     @staticmethod

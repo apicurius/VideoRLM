@@ -51,13 +51,14 @@ def main():
     parser.add_argument("--embedding-model", default="google/siglip2-base-patch16-256", help="Vision-text embedding model (default: google/siglip2-base-patch16-256)")
     parser.add_argument("--cache-dir", default=None, help="Directory to cache video indexes")
     parser.add_argument("--auto-fps", action="store_true", help="Auto-compute FPS based on video duration")
+    parser.add_argument("--thinking-level", default="LOW", choices=["NONE", "LOW", "MEDIUM", "HIGH"], help="Gemini thinking level (default: LOW)")
     args = parser.parse_args()
 
     logger = RLMLogger(log_dir="./logs")
 
     video_rlm = VideoRLM(
         backend=args.backend,
-        backend_kwargs={"model_name": args.model, "timeout": 300.0},
+        backend_kwargs={"model_name": args.model, "timeout": 300.0, "thinking_level": args.thinking_level},
         fps=args.fps,
         num_segments=args.num_segments,
         max_frames_per_segment=args.max_frames_per_segment,
