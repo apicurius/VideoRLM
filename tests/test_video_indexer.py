@@ -77,14 +77,12 @@ class TestVideoIndexerIndexVideo:
         indexer = VideoIndexer()
         loaded = self._make_loaded_video(num_frames=10, fps=2.0)
 
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    result = indexer.index_video(loaded, caption_fn=None)
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=None)
 
         assert isinstance(result, VideoIndex)
         assert len(result.segments) == 2
@@ -106,6 +104,7 @@ class TestVideoIndexerIndexVideo:
         caption_fn = MagicMock(side_effect=["a cat sitting", "a dog running"])
         fake_embeddings = np.array([[1.0, 0.0], [0.0, 1.0]])
         fake_action_embeddings = np.array([[0.5, 0.5], [0.3, 0.7]])
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
@@ -114,7 +113,8 @@ class TestVideoIndexerIndexVideo:
                 return_value=(fake_embeddings, fake_action_embeddings),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         assert result.segments[0]["caption"] == "a cat sitting"
         assert result.segments[1]["caption"] == "a dog running"
@@ -142,14 +142,12 @@ class TestVideoIndexerIndexVideo:
 
         loaded.segments = [seg1, seg2]
 
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    result = indexer.index_video(loaded, caption_fn=None)
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=None)
 
         assert len(result.segments) == 2
         assert result.segments[0]["start_time"] == 0.0
@@ -162,14 +160,12 @@ class TestVideoIndexerIndexVideo:
         indexer = VideoIndexer()
         loaded = self._make_loaded_video(num_frames=10, fps=2.0)
 
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    result = indexer.index_video(loaded, caption_fn=None)
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=None)
 
         assert result.scene_boundaries == [0.0, 3.0]
 
@@ -188,6 +184,7 @@ class TestVideoIndexerIndexVideo:
         caption_fn = MagicMock(return_value=annotation)
         fake_embeddings = np.array([[1.0, 0.0]])
         fake_action_emb = np.array([[0.0, 1.0]])
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
@@ -196,7 +193,8 @@ class TestVideoIndexerIndexVideo:
                 return_value=(fake_embeddings, fake_action_emb),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         assert result.segments[0]["annotation"] == annotation
         assert result.segments[0]["caption"] == "cat sits"
@@ -215,19 +213,17 @@ class TestVideoIndexerIndexVideo:
             return_value='{"summary":{"brief":"refined","detailed":"refined"},'
             '"action":{"brief":"walk","detailed":"walking","actor":"person"}}',
         )
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    indexer.index_video(
-                        loaded,
-                        caption_fn=caption_fn,
-                        refine_fn=refine_fn,
-                    )
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        indexer.index_video(
+                            loaded,
+                            caption_fn=caption_fn,
+                            refine_fn=refine_fn,
+                        )
 
         # 3 rounds × 1 segment = 3 calls
         assert refine_fn.call_count == 3
@@ -249,14 +245,12 @@ class TestVideoIndexerIndexVideo:
             received_frames.extend(frames)
             return "caption"
 
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=transcript):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(None, None),
-                ):
-                    indexer.index_video(loaded, caption_fn=capture_caption_fn)
+                with patch.object(indexer, "_embed_captions", return_value=(None, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        indexer.index_video(loaded, caption_fn=capture_caption_fn)
 
         # First element should be the transcript context string
         assert any(isinstance(f, str) and "[transcript]" in f for f in received_frames)
@@ -352,6 +346,7 @@ class TestVideoIndexerStructuredAnnotations:
             "action": {"brief": "sitting", "detailed": "The cat is sitting still.", "actor": "cat"},
         }
         caption_fn = MagicMock(return_value=annotation)
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
@@ -360,7 +355,8 @@ class TestVideoIndexerStructuredAnnotations:
                 return_value=(np.array([[1.0]]), None),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         seg = result.segments[0]
         assert seg["annotation"] == annotation
@@ -375,6 +371,7 @@ class TestVideoIndexerStructuredAnnotations:
         loaded = self._make_loaded_video()
 
         caption_fn = MagicMock(return_value="A dog running")
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
@@ -383,7 +380,8 @@ class TestVideoIndexerStructuredAnnotations:
                 return_value=(np.array([[1.0]]), None),
             ):
                 with patch.object(indexer, "_get_transcript", return_value=[]):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         seg = result.segments[0]
         assert seg["caption"] == "A dog running"
@@ -565,15 +563,13 @@ class TestVideoIndexerCache:
         loaded = self._make_loaded_video(video_path=str(video_file))
 
         fake_emb = np.random.randn(2, 4).astype(np.float32)
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
-                with patch.object(
-                    indexer,
-                    "_embed_captions",
-                    return_value=(fake_emb, None),
-                ):
-                    result1 = indexer.index_video(loaded, caption_fn=None)
+                with patch.object(indexer, "_embed_captions", return_value=(fake_emb, None)):
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result1 = indexer.index_video(loaded, caption_fn=None)
 
         # Cache directory should now exist
         assert cache_dir.exists()
@@ -688,6 +684,7 @@ class TestHierarchicalIndexingRoundTrip:
         caption_fn = MagicMock(side_effect=lambda _: "segment caption")
         fake_emb = np.random.randn(4, 8).astype(np.float32)
         fake_action_emb = np.random.randn(4, 8).astype(np.float32)
+        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 8).astype(np.float32)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
@@ -696,7 +693,8 @@ class TestHierarchicalIndexingRoundTrip:
                     "_embed_captions",
                     return_value=(fake_emb, fake_action_emb),
                 ):
-                    result = indexer.index_video(loaded, caption_fn=caption_fn)
+                    with patch.object(indexer, "_encode_frames", side_effect=_fake_encode):
+                        result = indexer.index_video(loaded, caption_fn=caption_fn)
 
         # Primary segments from finest level
         assert len(result.segments) == 4
