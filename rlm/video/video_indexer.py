@@ -1509,31 +1509,43 @@ class VideoIndexer:
         Each clip is a list of BGR frames. Returns an ``(N_clips, 1024)``
         embedding matrix where each row is the mean-pooled patch token
         representation for one clip.
+
+        Clips are grouped by frame count before batching because the video
+        processor requires all clips in a batch to have the same temporal
+        length (e.g. the remainder clip may be shorter than the rest).
         """
         import torch
+        from itertools import groupby
 
-        all_embs = []
+        # Group clips by frame count, preserving original order via index
+        indexed_clips = list(enumerate(clips))
+        indexed_clips.sort(key=lambda x: len(x[1]))
+
+        result_embs = [None] * len(clips)
         batch_size = 4
-        for i in range(0, len(clips), batch_size):
-            batch_clips = clips[i : i + batch_size]
-            # Convert each clip: BGR→RGB, stack to (T, H, W, 3) list-of-arrays
-            rgb_clips = []
-            for clip in batch_clips:
-                rgb_frames = [f[:, :, ::-1] for f in clip]  # BGR → RGB
-                rgb_clips.append(rgb_frames)
 
-            inputs = self._scene_processor(rgb_clips, return_tensors="pt").to(
-                self._scene_torch_device
-            )
-            with torch.no_grad():
-                outputs = self._scene_model(**inputs)
-                # outputs.last_hidden_state: (batch, seq_len, 1024)
-                patch_tokens = outputs.last_hidden_state
-                clip_embs = patch_tokens.mean(dim=1)  # (batch, 1024)
-                clip_embs = clip_embs / clip_embs.norm(p=2, dim=-1, keepdim=True)
-            all_embs.append(clip_embs.cpu().float().numpy())
+        for _frame_count, group in groupby(indexed_clips, key=lambda x: len(x[1])):
+            group_items = list(group)
+            for i in range(0, len(group_items), batch_size):
+                batch_items = group_items[i : i + batch_size]
+                rgb_clips = []
+                for _idx, clip in batch_items:
+                    rgb_frames = [f[:, :, ::-1] for f in clip]  # BGR → RGB
+                    rgb_clips.append(rgb_frames)
 
-        return np.concatenate(all_embs, axis=0)
+                inputs = self._scene_processor(rgb_clips, return_tensors="pt").to(
+                    self._scene_torch_device
+                )
+                with torch.no_grad():
+                    outputs = self._scene_model(**inputs)
+                    patch_tokens = outputs.last_hidden_state
+                    clip_embs = patch_tokens.mean(dim=1)  # (batch, 1024)
+                    clip_embs = clip_embs / clip_embs.norm(p=2, dim=-1, keepdim=True)
+                embs_np = clip_embs.cpu().float().numpy()
+                for j, (orig_idx, _clip) in enumerate(batch_items):
+                    result_embs[orig_idx] = embs_np[j]
+
+        return np.stack(result_embs)
 
     def _group_frames_into_clips(
         self,
