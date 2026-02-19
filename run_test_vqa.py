@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--video", required=True, help="Path to the video file")
     parser.add_argument("--question", default=DEFAULT_PROMPT, help="Question to ask about the video")
     parser.add_argument("--backend", default="gemini", help="LLM backend (default: gemini)")
-    parser.add_argument("--model", default="gemini-3-flash-preview", help="Model name")
+    parser.add_argument("--model", default="gemini-3.1-pro-preview", help="Model name")
     parser.add_argument("--fps", type=float, default=0.5, help="Frames per second (default: 0.5)")
     parser.add_argument("--num-segments", type=int, default=5, help="Number of segments (default: 5)")
     parser.add_argument("--max-frames-per-segment", type=int, default=3, help="Max frames per segment (default: 3)")
