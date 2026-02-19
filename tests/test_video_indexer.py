@@ -8,6 +8,23 @@ import numpy as np
 from rlm.video.video_indexer import VideoIndex, VideoIndexer, _cache_key
 
 
+def _fake_encode(frames, *, dim=4, **kw):
+    """Return L2-normalized embeddings unique to each frame's content.
+
+    Uses mean pixel value as a seed so different frames produce different
+    embedding directions.  This prevents ``_pre_caption_dedup`` from
+    merging segments that should remain distinct, while keeping within-
+    segment diversity high enough to avoid ``_selective_decode`` skipping.
+    """
+    rows = []
+    for f in frames:
+        seed = int(np.mean(f)) + 1  # +1 to avoid seed=0
+        rows.append(np.random.default_rng(seed).standard_normal(dim))
+    embs = np.stack(rows).astype(np.float32)
+    norms = np.linalg.norm(embs, axis=1, keepdims=True)
+    return embs / np.maximum(norms, 1e-10)
+
+
 class TestVideoIndex:
     """Tests for the VideoIndex dataclass."""
 
@@ -77,7 +94,7 @@ class TestVideoIndexerIndexVideo:
         indexer = VideoIndexer()
         loaded = self._make_loaded_video(num_frames=10, fps=2.0)
 
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(indexer, "_embed_captions", return_value=(None, None)):
@@ -104,7 +121,7 @@ class TestVideoIndexerIndexVideo:
         caption_fn = MagicMock(side_effect=["a cat sitting", "a dog running"])
         fake_embeddings = np.array([[1.0, 0.0], [0.0, 1.0]])
         fake_action_embeddings = np.array([[0.5, 0.5], [0.3, 0.7]])
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
@@ -142,7 +159,7 @@ class TestVideoIndexerIndexVideo:
 
         loaded.segments = [seg1, seg2]
 
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(indexer, "_embed_captions", return_value=(None, None)):
@@ -160,7 +177,7 @@ class TestVideoIndexerIndexVideo:
         indexer = VideoIndexer()
         loaded = self._make_loaded_video(num_frames=10, fps=2.0)
 
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(indexer, "_embed_captions", return_value=(None, None)):
@@ -184,7 +201,7 @@ class TestVideoIndexerIndexVideo:
         caption_fn = MagicMock(return_value=annotation)
         fake_embeddings = np.array([[1.0, 0.0]])
         fake_action_emb = np.array([[0.0, 1.0]])
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
@@ -213,7 +230,7 @@ class TestVideoIndexerIndexVideo:
             return_value='{"summary":{"brief":"refined","detailed":"refined"},'
             '"action":{"brief":"walk","detailed":"walking","actor":"person"}}',
         )
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
@@ -245,7 +262,7 @@ class TestVideoIndexerIndexVideo:
             received_frames.extend(frames)
             return "caption"
 
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=transcript):
                 with patch.object(indexer, "_embed_captions", return_value=(None, None)):
@@ -346,7 +363,7 @@ class TestVideoIndexerStructuredAnnotations:
             "action": {"brief": "sitting", "detailed": "The cat is sitting still.", "actor": "cat"},
         }
         caption_fn = MagicMock(return_value=annotation)
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
@@ -371,7 +388,7 @@ class TestVideoIndexerStructuredAnnotations:
         loaded = self._make_loaded_video()
 
         caption_fn = MagicMock(return_value="A dog running")
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(
@@ -563,7 +580,7 @@ class TestVideoIndexerCache:
         loaded = self._make_loaded_video(video_path=str(video_file))
 
         fake_emb = np.random.randn(2, 4).astype(np.float32)
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
@@ -684,7 +701,6 @@ class TestHierarchicalIndexingRoundTrip:
         caption_fn = MagicMock(side_effect=lambda _: "segment caption")
         fake_emb = np.random.randn(4, 8).astype(np.float32)
         fake_action_emb = np.random.randn(4, 8).astype(np.float32)
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 8).astype(np.float32)
 
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):

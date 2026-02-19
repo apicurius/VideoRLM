@@ -8,6 +8,17 @@ import pytest
 from rlm.video.video_indexer import VideoIndex, VideoIndexer
 
 
+def _fake_encode(frames, *, dim=4, **kw):
+    """Return L2-normalized embeddings unique to each frame's content."""
+    rows = []
+    for f in frames:
+        seed = int(np.mean(f)) + 1
+        rows.append(np.random.default_rng(seed).standard_normal(dim))
+    embs = np.stack(rows).astype(np.float32)
+    norms = np.linalg.norm(embs, axis=1, keepdims=True)
+    return embs / np.maximum(norms, 1e-10)
+
+
 class TestGroupFramesIntoClips:
     """Test _group_frames_into_clips helper."""
 
@@ -172,7 +183,8 @@ class TestIndexVideoWithSceneModel:
         indexer = VideoIndexer(scene_model="facebook/vjepa2-vitl-fpc64-256")
         loaded = self._make_loaded_video()
 
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
+
         with patch.object(indexer, "_ensure_scene_model"):
             with patch.object(
                 indexer,
@@ -201,7 +213,8 @@ class TestIndexVideoWithSceneModel:
         indexer = VideoIndexer()  # no scene_model
         loaded = self._make_loaded_video()
 
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
+
         with patch.object(indexer, "_ensure_model"):
             with patch.object(indexer, "_get_transcript", return_value=[]):
                 with patch.object(indexer, "_embed_captions", return_value=(None, None)):
@@ -225,7 +238,8 @@ class TestIndexVideoWithSceneModel:
         )
         loaded = self._make_loaded_video(num_frames=8, fps=1.0)
 
-        _fake_encode = lambda frames, **kw: np.random.randn(len(frames), 4).astype(np.float32)
+
+
         with patch.object(indexer, "_ensure_scene_model"):
             with patch.object(
                 indexer,
