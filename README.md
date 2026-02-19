@@ -117,6 +117,96 @@ export PRIME_API_KEY=...
 ### Model Providers
 We currently support most major clients (OpenAI, Anthropic), as well as the router platforms (OpenRouter, Portkey, LiteLLM). For local models, we recommend using vLLM (which interfaces with the [OpenAI client](https://github.com/alexzhang13/rlm/blob/main/rlm/clients/openai.py)). To view or add support for more clients, start by looking at [`rlm/clients/`](https://github.com/alexzhang13/rlm/tree/main/rlm/clients).
 
+## Video Understanding (VideoRLM)
+
+VideoRLM extends RLMs to agentic video analysis, combining neural video indexing with recursive search and reasoning. Given a video, it builds a searchable index — segmenting scenes, embedding frames and captions, and exposing the result as tools the agent can call from the REPL to answer complex questions about video content.
+
+### Three-Model Architecture
+
+VideoRLM uses three specialized models with distinct roles:
+
+| Model | Role | Details |
+|-------|------|---------|
+| **V-JEPA 2** (`facebook/vjepa2-vitl-fpc64-256`) | Scene boundary detection | Encodes 16-frame clips into 1024-d embeddings, then clusters via Ward linkage to find scene boundaries |
+| **SigLIP2** (`google/siglip2-base-patch16-256`) | Vision-language embeddings | Encodes frames for `field="visual"` search; also serves as default text encoder for caption embeddings |
+| **EmbeddingGemma** (`google/embeddinggemma-300m`) | Text embeddings (optional) | Dedicated text encoder for richer `field="summary"` and `field="action"` search |
+
+Each model can be independently enabled or disabled via CLI flags (see [Usage](#video-usage) below).
+
+### Indexing Pipeline
+
+The indexing pipeline converts a raw video into a `VideoIndex` for search:
+
+1. **Frame extraction** — Decode frames at a fixed or auto-computed FPS
+2. **Scene detection** — V-JEPA 2 clip embeddings + agglomerative clustering (Ward linkage with adjacency constraint). Falls back to SigLIP2 frame embeddings or color histogram if V-JEPA 2 is disabled
+3. **Transcript extraction** — Whisper ASR via `faster-whisper`
+4. **Deduplication & selective decoding** — Pre-caption dedup (cosine similarity > 0.90 between segment embeddings) and static segment detection (intra-segment similarity > 0.98)
+5. **Captioning** — Two-level Tree-of-Captions: frame-level keyframe captions + segment-level structured annotations (summary, action, actor), with parallel ThreadPoolExecutor workers
+6. **Self-refine** — Iterative annotation refinement with anti-hallucination rules, neighbor context, and transcript cross-referencing
+7. **Embedding** — Encode captions and actions into dense vectors, smooth with moving average, quality-check for degenerate embeddings
+8. **Hierarchy** — Optional coarse segment levels (~30s chunks) for multi-resolution search
+
+Indexes are cached to disk (embeddings as `.npz`, metadata as JSON) so repeated queries on the same video skip re-indexing.
+
+### Agent Tools
+
+The agent operates in a REPL environment with these tools:
+
+**Search tools:**
+- `search_video(query, top_k, field, level)` — Semantic search over indexed segments. Supports `field="summary"`, `"action"`, `"visual"`, `"all"` and multi-level hierarchy. Uses MMR for diverse results.
+- `search_transcript(query)` — Keyword search over ASR transcript
+- `get_transcript(start_time, end_time)` — Retrieve transcript text for a time range
+- `get_scene_list()` — List all detected scenes with annotations
+- `discriminative_vqa(question, candidates)` — Embedding-based multiple-choice VQA without LLM generation
+
+**Frame extraction and pixel tools:**
+- `extract_frames(start_time, end_time, fps, max_frames)` — Extract high-resolution frames from a time range
+- `crop_frame(image, x1_pct, y1_pct, x2_pct, y2_pct)` — Crop a region of interest using percentage coordinates
+- `blend_frames(images)` — Average multiple frames into a composite (motion summary)
+- `diff_frames(image_a, image_b)` — Absolute pixel difference between two frames (change detection)
+- `threshold_frame(image, value)` — Binary mask for object counting
+- `frame_info(image)` — Image metadata (dimensions, brightness statistics)
+
+The agent follows a search-first strategy: orient with `get_scene_list()`, search with field-specific queries, inspect hits with `extract_frames()`, and verify by cross-referencing visual evidence with the transcript.
+
+### Video Usage
+
+```bash
+# Basic usage with Gemini
+uv run python run_video.py --video path/to/video.mp4 \
+    --model gemini-3.1-pro-preview
+
+# Ask a specific question
+uv run python run_video.py --video path/to/video.mp4 \
+    --question "What happens in this video?"
+
+# Auto-FPS (adapts frame rate to video duration)
+uv run python run_video.py --video path/to/video.mp4 --auto-fps
+
+# Disable V-JEPA 2 scene model (use SigLIP2 for scene detection)
+uv run python run_video.py --video path/to/video.mp4 --no-scene-model
+
+# Cache index to disk for repeated queries
+uv run python run_video.py --video path/to/video.mp4 --cache-dir ./cache
+
+# Configure thinking level for Gemini
+uv run python run_video.py --video path/to/video.mp4 --thinking-level HIGH
+
+# Disable separate text embedding model (use SigLIP2 for everything)
+uv run python run_video.py --video path/to/video.mp4 --no-text-embedding
+```
+
+Key flags:
+- `--video` — Path to the video file
+- `--model` — LLM model name (default: `gemini-3.1-pro-preview`)
+- `--backend` — LLM backend (default: `gemini`)
+- `--fps` — Manual frames per second (default: 0.5)
+- `--auto-fps` — Automatically compute FPS from video duration
+- `--no-scene-model` — Disable V-JEPA 2, fall back to SigLIP2 for scene detection
+- `--no-text-embedding` — Disable EmbeddingGemma, use SigLIP2 for text encoding
+- `--cache-dir` — Directory to cache video indexes
+- `--thinking-level` — Gemini thinking budget: `NONE`, `LOW`, `MEDIUM`, `HIGH`
+
 ## Relevant Reading
 * **[Dec '25]** [Recursive Language Models arXiv](https://arxiv.org/abs/2512.24601)
 * **[Oct '25]** [Recursive Language Models Blogpost](https://alexzhang13.github.io/blog/2025/rlm/)
