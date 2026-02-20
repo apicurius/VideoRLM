@@ -221,7 +221,7 @@ class VideoIndexer:
 
         self._scene_processor = AutoVideoProcessor.from_pretrained(self._scene_model_name)
         self._scene_model = (
-            AutoModel.from_pretrained(self._scene_model_name, torch_dtype=torch.float16)
+            AutoModel.from_pretrained(self._scene_model_name, dtype=torch.float16)
             .eval()
             .to(device)
         )
@@ -341,6 +341,7 @@ class VideoIndexer:
 
         # 2. Detect scene boundaries
         hierarchy_result: dict | None = None
+        logger.info("[pipeline] V-JEPA 2: detecting scenes in %d frames", len(frames))
         if self._scene_model_name:
             # V-JEPA 2 clip-level scene detection
             self._ensure_scene_model()
@@ -382,6 +383,7 @@ class VideoIndexer:
                 scenes = hierarchy_result["levels"][0]
             else:
                 scenes = detect_scenes(frames, timestamps, embed_fn=_scene_embed_fn)
+        logger.info("[pipeline] V-JEPA 2: %d scenes detected", len(scenes))
         scene_boundaries = [start for start, _end in scenes]
 
         # 3. Build segment dicts — prefer existing segments, fall back to scenes
@@ -397,6 +399,7 @@ class VideoIndexer:
             whisper_model=whisper_model,
             transcript_path=transcript_path,
         )
+        logger.info("[pipeline] FastWhisper: %d transcript segments", len(transcript))
 
         # 4b. Pre-captioning dedup: identify visually similar segments
         #     and only caption representatives, propagating results afterward.
@@ -541,7 +544,9 @@ class VideoIndexer:
         )
 
         # 7. Embed captions
+        logger.info("[pipeline] Gemma: embedding captions for %d segments", len(segment_infos))
         embeddings, action_embeddings = self._embed_captions(segment_infos)
+        logger.info("[pipeline] Gemma: caption embeddings complete")
 
         # 7b. Smooth embeddings to reduce noise across adjacent segments
         if embeddings is not None:
@@ -563,10 +568,12 @@ class VideoIndexer:
             else:
                 rep_frames.append(frames[0])  # fallback
 
+        logger.info("[pipeline] SigLIP2: building frame embeddings for %d segments", len(rep_frames))
         self._ensure_model()
         frame_embeddings = self._encode_frames(rep_frames)
         frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
         self._check_embedding_quality(frame_embeddings, label="frame")
+        logger.info("[pipeline] SigLIP2: %d frame embeddings built", len(rep_frames))
 
         # 8. Build hierarchy levels (when hierarchical mode is enabled)
         segment_hierarchy: list[list[dict]] = []
@@ -623,6 +630,10 @@ class VideoIndexer:
             visual_embed_fn=self._encode_query_siglip,
             segment_hierarchy=segment_hierarchy,
             hierarchy_embeddings=hierarchy_embeddings,
+        )
+        logger.info(
+            "[pipeline] search index: %d segments, %d transcript entries",
+            len(segment_infos), len(transcript),
         )
 
         # --- Cache save ---
@@ -1640,6 +1651,7 @@ class VideoIndexer:
 
             try:
                 model = WhisperModel(model_size, device="auto", compute_type="int8")
+                logger.info("[pipeline] FastWhisper: starting ASR transcription")
                 segments_iter, _info = model.transcribe(wav_path)
 
                 transcript: list[dict] = []
