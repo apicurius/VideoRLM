@@ -45,6 +45,7 @@ video = [
     "sentence-transformers>=3.0.0",
     "faster-whisper>=1.1.0",
     "scikit-learn>=1.4.0",
+    "torchvision>=0.20.0",
 ]
 
 [build-system]

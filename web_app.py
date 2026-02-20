@@ -1,19 +1,20 @@
 from __future__ import annotations
 
-import base64
+import asyncio
+import json
 import logging
 import os
+import queue
 import re
 import shutil
+import threading
 import uuid
 from pathlib import Path
 
-import cv2
-import requests
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
@@ -98,6 +99,21 @@ SCENE_MODEL = "facebook/vjepa2-vitl-fpc64-256"
 VISUAL_EMBED_MODEL = "google/siglip2-base-patch16-256"
 TEXT_EMBED_MODEL = "google/embedding-gemma-300m"
 
+PIPELINE_STEPS = [
+    {"id": "vjepa",   "label": "V-JEPA 2 Scene Detection"},
+    {"id": "siglip",  "label": "SigLIP2 Visual Embeddings"},
+    {"id": "gemma",   "label": "Gemma Text Encoder"},
+    {"id": "whisper", "label": "FastWhisper ASR"},
+    {"id": "index",   "label": "Search Index"},
+    {"id": "agent",   "label": "Recursive Agent Loop"},
+]
+
+_AGENT_TOOLS = [
+    "search_video", "search_transcript", "extract_frames",
+    "crop_frame", "diff_frames", "blend_frames",
+    "get_scene_list", "get_transcript", "discriminative_vqa",
+]
+
 
 @app.get("/api/arch")
 async def arch_info():
@@ -108,128 +124,165 @@ async def arch_info():
     })
 
 
-# Lazily loaded V-JEPA indexer — persists across requests so the model loads only once.
-_vjepa_indexer = None
 _log = logging.getLogger(__name__)
 
 
-def _get_vjepa_indexer():
-    global _vjepa_indexer
-    if _vjepa_indexer is None:
-        from rlm.video.video_indexer import VideoIndexer
-        _vjepa_indexer = VideoIndexer(
-            embedding_model=VISUAL_EMBED_MODEL,
-            scene_model=SCENE_MODEL,
-        )
-    return _vjepa_indexer
+class _QueueLogHandler(logging.Handler):
+    def __init__(self, emit):
+        super().__init__()
+        self._emit = emit
+
+    def emit(self, record):
+        msg = record.getMessage()
+        if "[pipeline] V-JEPA 2: detecting scenes" in msg:
+            self._emit({"type": "step", "id": "vjepa", "status": "running", "detail": msg.split("[pipeline] ")[-1]})
+        elif "[pipeline] V-JEPA 2:" in msg:
+            self._emit({"type": "step", "id": "vjepa", "status": "done", "detail": msg.split("[pipeline] ")[-1]})
+        elif "[pipeline] SigLIP2: building" in msg:
+            self._emit({"type": "step", "id": "siglip", "status": "running", "detail": msg.split("[pipeline] ")[-1]})
+        elif "[pipeline] SigLIP2:" in msg:
+            self._emit({"type": "step", "id": "siglip", "status": "done", "detail": msg.split("[pipeline] ")[-1]})
+        elif "[pipeline] Gemma: embedding" in msg:
+            self._emit({"type": "step", "id": "gemma", "status": "running", "detail": msg.split("[pipeline] ")[-1]})
+        elif "[pipeline] Gemma:" in msg:
+            self._emit({"type": "step", "id": "gemma", "status": "done", "detail": msg.split("[pipeline] ")[-1]})
+        elif "[pipeline] FastWhisper: starting" in msg:
+            self._emit({"type": "step", "id": "whisper", "status": "running", "detail": msg.split("[pipeline] ")[-1]})
+        elif "[pipeline] FastWhisper:" in msg or "faster_whisper not installed" in msg:
+            status = "skip" if "not installed" in msg else "done"
+            self._emit({"type": "step", "id": "whisper", "status": status, "detail": msg.split("[pipeline] ")[-1]})
+        elif "[pipeline] search index:" in msg:
+            self._emit({"type": "step", "id": "index", "status": "done", "detail": msg.split("[pipeline] ")[-1]})
+        elif "Returning in-memory cached index" in msg or "Loading cached index" in msg:
+            for sid in ["vjepa", "siglip", "gemma", "whisper"]:
+                self._emit({"type": "step", "id": sid, "status": "cached", "detail": "loaded from cache"})
+            self._emit({"type": "step", "id": "index", "status": "done", "detail": "search index loaded from cache"})
 
 
-def _vjepa_keyframes(
+class _EventRLMLogger:
+    def __init__(self, emit):
+        self._emit = emit
+        self._iter = 0
+        self._iterations: list[dict] = []
+        self._run_metadata: dict | None = None
+        self._iteration_count = 0
+        self._metadata_logged = False
+
+    def log_metadata(self, metadata) -> None:
+        if self._metadata_logged:
+            return
+        self._run_metadata = metadata.to_dict()
+        self._metadata_logged = True
+
+    def log(self, iteration) -> None:
+        if self._iter == 0:
+            self._emit({"type": "step", "id": "agent", "status": "running"})
+        self._iter += 1
+        self._iteration_count = self._iter
+        tools_used = []
+        repl_errors = []
+        for block in iteration.code_blocks:
+            for tool in _AGENT_TOOLS:
+                if tool in block.code and tool not in tools_used:
+                    tools_used.append(tool)
+            err = (block.result.stderr or "").strip()
+            if err:
+                repl_errors.append(err[:400])
+        self._emit({"type": "iteration", "n": self._iter, "tools": tools_used, "errors": repl_errors})
+        self._iterations.append({"type": "iteration", "iteration": self._iter, **iteration.to_dict()})
+
+    def clear_iterations(self) -> None:
+        self._iterations = []
+        self._iter = 0
+        self._iteration_count = 0
+
+    def get_trajectory(self) -> dict | None:
+        if self._run_metadata is None:
+            return None
+        return {"metadata": self._run_metadata, "iterations": self._iterations}
+
+
+def _full_pipeline(
     video_path: str,
-    max_frames: int = 12,
-    resize: tuple[int, int] = (640, 480),
-    quality: int = 75,
-) -> list[tuple[float, bytes]]:
-    """V-JEPA 2 scene detection → representative keyframes.
+    question: str,
+    model: str,
+    api_key: str,
+    backend: str,
+    emit,
+) -> None:
+    from rlm.clients.openai import OpenAIClient
+    from rlm.video.video_rlm import VideoRLM
 
-    Extracts frames at ~1 fps, groups them into 16-frame clips, encodes
-    with V-JEPA 2 (Ward-linkage clustering), and returns one keyframe per
-    detected scene.  Falls back to uniform sampling on any error.
-    """
-    cap = cv2.VideoCapture(video_path)
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    native_fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-    duration = total / native_fps if total > 0 else 0.0
-    step = max(1, int(native_fps))  # ~1 fps pass for scene detection
+    client_backend = "openai" if backend == "openrouter" else backend
+    bkw: dict = {"model_name": model, "api_key": api_key}
+    if backend == "openrouter":
+        bkw["base_url"] = "https://openrouter.ai/api/v1"
 
-    frames_1fps: list = []
-    ts_1fps: list[float] = []
-    idx = 0
-    while idx < total:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, f = cap.read()
-        if ret:
-            frames_1fps.append(f)
-            ts_1fps.append(idx / native_fps)
-        idx += step
-    cap.release()
-
-    scene_ts: list[float] = []
-    try:
-        from rlm.video.scene_detection import detect_scenes
-
-        indexer = _get_vjepa_indexer()
-        indexer._ensure_scene_model()
-        clips, clip_ts = indexer._group_frames_into_clips(frames_1fps, ts_1fps, 16)
-        clip_embs = indexer._encode_clips_vjepa(clips)
-        clip_reps = [c[len(c) // 2] for c in clips]
-
-        def _embed_fn(_frames):
-            return clip_embs  # pre-computed — ignore passed frame list
-
-        scenes = detect_scenes(clip_reps, clip_ts, embed_fn=_embed_fn, threshold=0.3, min_duration=2.0)
-        scene_ts = [(s + e) / 2 for s, e in scenes]
-        _log.info("V-JEPA 2: %d scenes detected in %s", len(scenes), video_path)
-    except Exception as exc:
-        _log.warning("V-JEPA scene detection failed (%s) — uniform fallback", exc)
-
-    if not scene_ts:
-        n = min(max_frames, 8)
-        scene_ts = [(i + 0.5) * duration / n for i in range(n)]
-
-    if len(scene_ts) > max_frames:
-        step_f = len(scene_ts) / max_frames
-        scene_ts = [scene_ts[int(i * step_f)] for i in range(max_frames)]
-
-    result: list[tuple[float, bytes]] = []
-    cap = cv2.VideoCapture(video_path)
-    for t in scene_ts:
-        fidx = int(t * native_fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        if resize:
-            frame = cv2.resize(frame, resize)
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        result.append((t, buf.tobytes()))
-    cap.release()
-    return result
-
-
-def _direct_analyze(video_path: str, question: str, model: str, api_key: str) -> str:
-    """Single VLM call using V-JEPA 2 scene-aware keyframe selection."""
-    keyframes = _vjepa_keyframes(video_path)
-
-    content: list[dict] = [
-        {
-            "type": "text",
-            "text": (
-                f"{question}\n\n"
-                "Below are keyframes selected by V-JEPA 2 scene detection — "
-                "each represents a distinct scene in the video. "
-                "Examine every frame carefully before answering. "
-                "Cite specific moments as [TS: X.X] (seconds) "
-                "placed right after the relevant statement."
-            ),
-        }
-    ]
-    for t, jpeg_bytes in keyframes:
-        content.append({"type": "text", "text": f"[Frame at {t:.1f}s]"})
-        b64 = base64.b64encode(jpeg_bytes).decode()
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "auto"},
-        })
-
-    resp = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": model, "messages": [{"role": "user", "content": content}]},
-        timeout=180,
+    caption_model = "openai/gpt-4o-mini" if backend == "openrouter" else model
+    caption_lm = OpenAIClient(
+        model_name=caption_model,
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1" if backend == "openrouter" else None,
     )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+
+    def caption_fn(frames):
+        parts: list = [
+            "Describe this video segment in 1-2 sentences. "
+            "Focus on what is shown visually, who/what is present, and any actions. "
+            "Be specific and concise."
+        ]
+        parts.extend(frames[:3])
+        try:
+            return caption_lm.completion(parts)
+        except Exception:
+            return ""
+
+    log_handler = _QueueLogHandler(emit)
+    log_handler.setLevel(logging.DEBUG)
+    indexer_logger = logging.getLogger("rlm.video.video_indexer")
+    indexer_logger.addHandler(log_handler)
+    try:
+        rlm_logger = _EventRLMLogger(emit)
+        video_rlm = VideoRLM(
+            backend=client_backend,
+            backend_kwargs=bkw,
+            enable_search=True,
+            scene_model=SCENE_MODEL,
+            embedding_model=VISUAL_EMBED_MODEL,
+            text_embedding_model=TEXT_EMBED_MODEL,
+            whisper_model="base",
+            caption_fn=caption_fn,
+            auto_fps=True,
+            num_segments=8,
+            max_frames_per_segment=4,
+            max_iterations=15,
+            token_budget=100_000,
+            logger=rlm_logger,
+        )
+        augmented = (
+            f"{question}\n\n"
+            "ANALYSIS STRATEGY (follow this order):\n"
+            "1. Call get_scene_list() to see all scenes and their timestamps.\n"
+            "2. Use search_video(query, field='visual') to find visually relevant scenes.\n"
+            "3. Call extract_frames(start, end, fps=2.0, max_frames=6) to zoom into promising scenes.\n"
+            "4. For fine-grained detail, use crop_frame(frame, x1, y1, x2, y2) then llm_query().\n"
+            "5. Use search_transcript(keyword) for any spoken/audio clues.\n"
+            "6. Cite moments with [TS: X.X] (seconds) right after each claim."
+        )
+        result = video_rlm.completion(video_path, prompt=augmented)
+        emit({"type": "step", "id": "agent", "status": "done"})
+        timestamps = _parse_timestamps(result.response)
+        answer_html = _render_answer_html(result.response)
+        emit({
+            "type": "result",
+            "answer": result.response,
+            "answer_html": answer_html,
+            "timestamps": timestamps,
+        })
+    except Exception as exc:
+        emit({"type": "error", "message": str(exc)})
+    finally:
+        indexer_logger.removeHandler(log_handler)
 
 
 @app.post("/api/analyze")
@@ -238,7 +291,6 @@ async def analyze(
     question: str = Form(...),
     backend: str = Form(default="openrouter"),
     model: str = Form(default="openai/gpt-4o"),
-    mode: str = Form(default="direct"),
 ):
     suffix = Path(video.filename or "upload.mp4").suffix or ".mp4"
     video_id = str(uuid.uuid4())
@@ -247,75 +299,37 @@ async def analyze(
     with open(video_path, "wb") as f:
         shutil.copyfileobj(video.file, f)
 
-    try:
-        api_key = {
-            "openai": os.getenv("OPENAI_API_KEY"),
-            "openrouter": os.getenv("OPENROUTER_API_KEY"),
-            "anthropic": os.getenv("ANTHROPIC_API_KEY"),
-            "gemini": os.getenv("GEMINI_API_KEY"),
-        }.get(backend)
+    api_key = {
+        "openai": os.getenv("OPENAI_API_KEY"),
+        "openrouter": os.getenv("OPENROUTER_API_KEY"),
+        "anthropic": os.getenv("ANTHROPIC_API_KEY"),
+        "gemini": os.getenv("GEMINI_API_KEY"),
+    }.get(backend) or os.getenv("OPENROUTER_API_KEY", "")
 
-        if mode == "direct":
-            response_text = _direct_analyze(
-                str(video_path), question, model,
-                api_key or os.getenv("OPENROUTER_API_KEY", ""),
-            )
-        else:
-            from rlm.video.video_rlm import VideoRLM
+    event_q: queue.Queue = queue.Queue()
 
-            openrouter_key = os.getenv("OPENROUTER_API_KEY")
-            caption_fn = None
-            if openrouter_key:
-                from rlm.clients.openai import OpenAIClient
+    def emit(event: dict) -> None:
+        event_q.put(event)
 
-                _caption_lm = OpenAIClient(
-                    model_name="openai/gpt-4o-mini",
-                    api_key=openrouter_key,
-                    base_url="https://openrouter.ai/api/v1",
-                )
+    def run() -> None:
+        _full_pipeline(str(video_path), question, model, api_key, backend, emit)
+        event_q.put(None)
 
-                def caption_fn(frames, context=""):
-                    parts = ["Describe this video segment in 1-2 sentences. Focus on: what is happening, who/what is present, and any key actions. Be concise."]
-                    parts.extend(frames[:3])
-                    return _caption_lm.completion(parts)
+    threading.Thread(target=run, daemon=True).start()
+    loop = asyncio.get_event_loop()
 
-            video_rlm = VideoRLM(
-                backend=backend,
-                backend_kwargs={"model_name": model, "api_key": api_key},
-                num_segments=4,
-                max_frames_per_segment=3,
-                resize=(480, 360),
-                image_quality=65,
-                auto_fps=True,
-                max_iterations=15,
-                token_budget=90_000,
-                enable_search=False,
-                caption_fn=caption_fn,
-            )
+    async def generator():
+        yield f"data: {json.dumps({'type': 'init', 'steps': PIPELINE_STEPS})}\n\n"
+        try:
+            while True:
+                event = await loop.run_in_executor(None, event_q.get)
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            video_path.unlink(missing_ok=True)
 
-            augmented = (
-                f"{question}\n\n"
-                "When answering, cite the exact moments in the video using this format: "
-                "[TS: X.X] where X.X is the time in seconds (e.g. [TS: 12.5] or [TS: 90.0]). "
-                "Place each timestamp right after the statement it supports. "
-                "Include at least one timestamp per key claim."
-            )
-            result = video_rlm.completion(str(video_path), prompt=augmented)
-            response_text = result.response
-
-        timestamps = _parse_timestamps(response_text)
-        answer_html = _render_answer_html(response_text)
-
-        return JSONResponse({
-            "answer": response_text,
-            "answer_html": answer_html,
-            "timestamps": timestamps,
-        })
-
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:
-        video_path.unlink(missing_ok=True)
+    return StreamingResponse(generator(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":

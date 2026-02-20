@@ -52,11 +52,38 @@ class OpenAIClient(BaseLM):
         self.model_output_tokens: dict[str, int] = defaultdict(int)
         self.model_total_tokens: dict[str, int] = defaultdict(int)
 
+    @staticmethod
+    def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Convert internal __image__ dicts to the OpenAI image_url content part format."""
+        normalized = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                new_parts: list[dict[str, Any]] = []
+                for part in content:
+                    if isinstance(part, str):
+                        new_parts.append({"type": "text", "text": part})
+                    elif isinstance(part, dict) and part.get("__image__"):
+                        mime = part.get("mime_type", "image/jpeg")
+                        new_parts.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime};base64,{part['data']}",
+                                "detail": "auto",
+                            },
+                        })
+                    else:
+                        new_parts.append(part)
+                normalized.append({**msg, "content": new_parts})
+            else:
+                normalized.append(msg)
+        return normalized
+
     def completion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
         if isinstance(prompt, str):
-            messages = [{"role": "user", "content": prompt}]
+            messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
         elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
-            messages = prompt
+            messages = self._normalize_messages(prompt)
         else:
             raise ValueError(f"Invalid prompt type: {type(prompt)}")
 
@@ -80,7 +107,7 @@ class OpenAIClient(BaseLM):
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
         elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
-            messages = prompt
+            messages = self._normalize_messages(prompt)
         else:
             raise ValueError(f"Invalid prompt type: {type(prompt)}")
 

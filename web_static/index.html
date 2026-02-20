@@ -204,25 +204,6 @@
     .detail-btn:hover { border-color: #6366f1; color: #a5b4fc; }
     .detail-btn.active { background: rgba(99,102,241,0.15); border-color: #6366f1; color: #a5b4fc; }
 
-    .mode-btn {
-      flex: 1;
-      padding: 7px 0;
-      border-radius: 8px;
-      font-size: 0.82rem;
-      font-weight: 600;
-      cursor: pointer;
-      border: 1px solid #1e293b;
-      background: #0f172a;
-      color: #64748b;
-      transition: all 0.15s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 5px;
-    }
-    .mode-btn:hover { border-color: #6366f1; color: #a5b4fc; }
-    .mode-btn.active { background: rgba(99,102,241,0.15); border-color: #6366f1; color: #a5b4fc; }
-
     .arch-model-card {
       background: #111827;
       border: 1px solid #1e293b;
@@ -259,6 +240,73 @@
       transition: transform 0.2s, background 0.2s;
     }
     .toggle-track.on .toggle-thumb { transform: translateX(16px); background: #6366f1; }
+
+    .pipeline-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 9px 0;
+      border-bottom: 1px solid #1e293b;
+    }
+    .pipeline-step:last-child { border-bottom: none; }
+
+    .step-icon {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.25s;
+      background: #1e293b;
+    }
+    .step-icon.running { background: rgba(99,102,241,0.15); border: 1px solid #6366f1; }
+    .step-icon.done    { background: rgba(34,197,94,0.15);  border: 1px solid #22c55e; }
+    .step-icon.cached  { background: rgba(59,130,246,0.15); border: 1px solid #3b82f6; }
+    .step-icon.skip    { background: rgba(100,116,139,0.15);border: 1px solid #475569; }
+    .step-icon.error   { background: rgba(239,68,68,0.15);  border: 1px solid #ef4444; }
+
+    .step-name { font-size: 0.85rem; font-weight: 600; color: #64748b; transition: color 0.2s; }
+    .step-name.running { color: #a5b4fc; }
+    .step-name.done    { color: #86efac; }
+    .step-name.cached  { color: #93c5fd; }
+    .step-name.skip    { color: #475569; }
+    .step-name.error   { color: #fca5a5; }
+
+    .step-detail { font-size: 0.72rem; color: #475569; margin-top: 2px; font-family: monospace; }
+
+    .tool-badge {
+      display: inline-flex;
+      align-items: center;
+      background: rgba(99,102,241,0.1);
+      color: #a5b4fc;
+      border: 1px solid rgba(99,102,241,0.2);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      font-family: monospace;
+    }
+    .iter-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(139,92,246,0.1);
+      color: #c4b5fd;
+      border: 1px solid rgba(139,92,246,0.2);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .mini-spinner {
+      width: 13px; height: 13px;
+      border: 2px solid rgba(99,102,241,0.2);
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
   </style>
 </head>
 
@@ -339,19 +387,6 @@
           </div>
         </div>
 
-        <div class="mt-3">
-          <label class="block text-xs font-medium text-slate-500 mb-1.5">Analysis mode</label>
-          <div class="flex gap-2">
-            <button type="button" id="mode-direct" class="mode-btn active" onclick="setMode('direct')">
-              <span class="mode-icon">⚡</span> Direct
-            </button>
-            <button type="button" id="mode-agent" class="mode-btn" onclick="setMode('agent')">
-              <span class="mode-icon">🤖</span> Agent
-            </button>
-          </div>
-          <p id="mode-hint" class="text-xs text-slate-600 mt-1.5">V-JEPA 2 detects scene boundaries → keyframes sent to model in one API call.</p>
-        </div>
-
         <button id="submit-btn" class="btn-primary w-full mt-4 flex items-center justify-center gap-2" onclick="submitQuery()">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8"/>
@@ -361,18 +396,24 @@
         </button>        <p id="validation-msg" class="validation-msg"></p>      </div>
 
       <div id="result-card" class="card rounded-xl hidden">
-        <div id="loading-state" class="p-6 flex flex-col items-center gap-4">
-          <div class="progress-bar w-full rounded-full"></div>
-          <div class="flex items-center gap-3">
-            <div class="spinner"></div>
-            <div>
-              <p class="text-sm font-semibold text-slate-200">Analyzing video…</p>
-              <p id="loading-detail" class="text-xs text-slate-500 mt-0.5">V-JEPA 2 detecting scenes — first run loads models (~1 min)</p>
+        <div id="loading-state" class="p-5">
+          <div class="flex items-center justify-between mb-3">
+            <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Pipeline</p>
+            <span id="pipeline-status-badge" class="hidden text-xs text-slate-500"></span>
+          </div>
+          <div id="pipeline-steps-list"></div>
+          <div id="agent-iter-row" class="hidden mt-3 pt-3" style="border-top:1px solid #1e293b">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="iter-badge">
+                <div class="mini-spinner"></div>
+                <span id="iter-count">Iteration 0</span>
+              </span>
+              <div id="tools-row" class="flex flex-wrap gap-1.5"></div>
             </div>
           </div>
         </div>
 
-        <div id="answer-state" class="hidden p-5">
+        <div id="answer-state" class="hidden p-5" style="border-top:1px solid #1e293b">
           <div class="flex items-center gap-2 mb-4">
             <div class="w-6 h-6 rounded-lg flex items-center justify-center" style="background: linear-gradient(135deg, #6366f1, #8b5cf6);">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -425,20 +466,6 @@
     let currentFile = null;
     let seekTimeout = null;
 
-    let currentMode = 'direct';
-
-    const modeHints = {
-      direct: 'V-JEPA 2 detects scene boundaries → keyframes sent to model in one API call.',
-      agent:  'RLM reasoning loop — model writes and executes code iteratively. More powerful but uses multiple API calls.',
-    };
-
-    function setMode(val) {
-      currentMode = val;
-      document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-      document.getElementById('mode-' + val).classList.add('active');
-      document.getElementById('mode-hint').textContent = modeHints[val];
-    }
-
     const modelDefaults = {
       openrouter: 'openai/gpt-4o',
       openai: 'gpt-4o',
@@ -464,11 +491,7 @@
     fileInput.addEventListener('change', () => {
       if (fileInput.files[0]) setFile(fileInput.files[0]);
     });
-
-    dropZone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropZone.classList.add('drag-over');
-    });
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
     dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
     dropZone.addEventListener('drop', (e) => {
       e.preventDefault();
@@ -480,18 +503,14 @@
     function seekTo(seconds) {
       if (!videoPlayer.src) return;
       videoPlayer.currentTime = seconds;
-
       const mins = Math.floor(seconds / 60);
       const secs = Math.floor(seconds % 60);
       const frac = seconds - Math.floor(seconds);
       const fracStr = frac >= 0.05 ? `.${Math.round(frac * 10)}` : '';
-      const label = `${mins}:${String(secs).padStart(2, '0')}${fracStr}`;
-
-      seekIndicator.textContent = `⏱ ${label}`;
+      seekIndicator.textContent = `⏱ ${mins}:${String(secs).padStart(2, '0')}${fracStr}`;
       seekIndicator.classList.add('show');
       clearTimeout(seekTimeout);
       seekTimeout = setTimeout(() => seekIndicator.classList.remove('show'), 1400);
-
       document.querySelectorAll('.ts-chip').forEach(c => {
         c.classList.toggle('active', parseFloat(c.dataset.t) === seconds);
       });
@@ -499,10 +518,7 @@
 
     function buildChips(timestamps) {
       chipsRow.innerHTML = '';
-      if (!timestamps.length) {
-        timestampsBar.classList.add('hidden');
-        return;
-      }
+      if (!timestamps.length) { timestampsBar.classList.add('hidden'); return; }
       timestamps.forEach(ts => {
         const btn = document.createElement('button');
         btn.className = 'ts-chip';
@@ -514,32 +530,88 @@
       timestampsBar.classList.remove('hidden');
     }
 
-    function showLoading() {
-      resultCard.classList.remove('hidden');
-      loadingState.classList.remove('hidden');
-      answerState.classList.add('hidden');
-      errorState.classList.add('hidden');
-      const detailEl = document.getElementById('loading-detail');
-      if (detailEl) {
-        detailEl.textContent = currentMode === 'direct'
-          ? 'V-JEPA 2 detecting scenes — first run loads models (~1 min)'
-          : 'Building RLM agent loop — may take several minutes';
+    const STEP_ICONS = {
+      pending: `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#334155" stroke-width="2.5"><circle cx="12" cy="12" r="6"/></svg>`,
+      running: `<div class="mini-spinner"></div>`,
+      done:    `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>`,
+      cached:  `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>`,
+      skip:    `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+      error:   `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+    };
+
+    function initPipelineSteps(steps) {
+      const list = document.getElementById('pipeline-steps-list');
+      list.innerHTML = '';
+      steps.forEach(s => {
+        const row = document.createElement('div');
+        row.className = 'pipeline-step';
+        row.id = `step-row-${s.id}`;
+        row.innerHTML = `
+          <div class="step-icon pending" id="step-icon-${s.id}">${STEP_ICONS.pending}</div>
+          <div style="min-width:0">
+            <div class="step-name" id="step-name-${s.id}">${s.label}</div>
+            <div class="step-detail hidden" id="step-detail-${s.id}"></div>
+          </div>`;
+        list.appendChild(row);
+      });
+    }
+
+    function updateStep(id, status, detail) {
+      const icon = document.getElementById(`step-icon-${id}`);
+      const name = document.getElementById(`step-name-${id}`);
+      const det  = document.getElementById(`step-detail-${id}`);
+      if (!icon) return;
+      icon.className = `step-icon ${status}`;
+      icon.innerHTML = STEP_ICONS[status] || STEP_ICONS.pending;
+      name.className = `step-name ${status}`;
+      if (detail) { det.textContent = detail; det.classList.remove('hidden'); }
+    }
+
+    function updateAgentIteration(n, tools, errors) {
+      const row = document.getElementById('agent-iter-row');
+      row.classList.remove('hidden');
+      document.getElementById('iter-count').textContent = `Iteration ${n}`;
+      const toolsRow = document.getElementById('tools-row');
+      tools.forEach(t => {
+        const b = document.createElement('span');
+        b.className = 'tool-badge';
+        b.textContent = t;
+        toolsRow.appendChild(b);
+      });
+      (errors || []).forEach(e => {
+        const b = document.createElement('span');
+        b.className = 'tool-badge';
+        b.style.cssText = 'background:rgba(239,68,68,0.1);color:#fca5a5;border-color:rgba(239,68,68,0.25);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+        b.title = e;
+        b.textContent = e.split('\n')[0].slice(0, 60);
+        toolsRow.appendChild(b);
+      });
+    }
+
+    function handleEvent(event) {
+      if (event.type === 'init') {
+        initPipelineSteps(event.steps);
+      } else if (event.type === 'step') {
+        updateStep(event.id, event.status, event.detail || null);
+        if (event.id === 'agent' && event.status === 'done') {
+          document.getElementById('agent-iter-row').classList.add('hidden');
+        }
+      } else if (event.type === 'iteration') {
+        updateAgentIteration(event.n, event.tools || [], event.errors || []);
+      } else if (event.type === 'result') {
+        answerHtml.innerHTML = event.answer_html;
+        answerState.classList.remove('hidden');
+        buildChips(event.timestamps);
+        document.getElementById('pipeline-status-badge').textContent = '✓ done';
+        document.getElementById('pipeline-status-badge').classList.remove('hidden');
+      } else if (event.type === 'error') {
+        errorMessage.textContent = event.message;
+        errorState.classList.remove('hidden');
+        for (const sid of ['vjepa','siglip','gemma','whisper','index','agent']) {
+          const icon = document.getElementById(`step-icon-${sid}`);
+          if (icon && icon.classList.contains('running')) updateStep(sid, 'error', null);
+        }
       }
-    }
-
-    function showAnswer(data) {
-      loadingState.classList.add('hidden');
-      errorState.classList.add('hidden');
-      answerHtml.innerHTML = data.answer_html;
-      answerState.classList.remove('hidden');
-      buildChips(data.timestamps);
-    }
-
-    function showError(msg) {
-      loadingState.classList.add('hidden');
-      answerState.classList.add('hidden');
-      errorMessage.textContent = msg;
-      errorState.classList.remove('hidden');
     }
 
     function shakeBtn() {
@@ -555,45 +627,63 @@
 
       if (!currentFile && !question) {
         validationMsg.textContent = 'Please upload a video and enter a question.';
-        validationMsg.classList.add('show');
-        shakeBtn();
-        return;
+        validationMsg.classList.add('show'); shakeBtn(); return;
       }
       if (!currentFile) {
         validationMsg.textContent = 'Please upload a video first.';
-        validationMsg.classList.add('show');
-        shakeBtn();
-        return;
+        validationMsg.classList.add('show'); shakeBtn(); return;
       }
       if (!question) {
         validationMsg.textContent = 'Please enter a question.';
-        validationMsg.classList.add('show');
-        shakeBtn();
-        return;
+        validationMsg.classList.add('show'); shakeBtn(); return;
       }
 
       validationMsg.classList.remove('show');
       submitBtn.disabled = true;
-      showLoading();
+
+      resultCard.classList.remove('hidden');
+      loadingState.classList.remove('hidden');
+      answerState.classList.add('hidden');
+      errorState.classList.add('hidden');
       timestampsBar.classList.add('hidden');
+      document.getElementById('agent-iter-row').classList.add('hidden');
+      document.getElementById('tools-row').innerHTML = '';
+      document.getElementById('pipeline-steps-list').innerHTML = '';
+      document.getElementById('pipeline-status-badge').classList.add('hidden');
 
       const form = new FormData();
       form.append('video', currentFile);
       form.append('question', question);
       form.append('backend', document.getElementById('backend').value);
       form.append('model', document.getElementById('model').value);
-      form.append('mode', currentMode);
 
       try {
-        const res = await fetch('/api/analyze', { method: 'POST', body: form });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: res.statusText }));
-          throw new Error(err.detail || 'Unknown error');
+        const response = await fetch('/api/analyze', { method: 'POST', body: form });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({ message: response.statusText }));
+          errorMessage.textContent = err.detail || err.message || 'Unknown error';
+          errorState.classList.remove('hidden');
+          return;
         }
-        const data = await res.json();
-        showAnswer(data);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const parts = buf.split('\n\n');
+          buf = parts.pop() || '';
+          for (const part of parts) {
+            const line = part.trim();
+            if (line.startsWith('data: ')) {
+              try { handleEvent(JSON.parse(line.slice(6))); } catch (_) {}
+            }
+          }
+        }
       } catch (e) {
-        showError(e.message);
+        errorMessage.textContent = e.message;
+        errorState.classList.remove('hidden');
       } finally {
         submitBtn.disabled = false;
       }

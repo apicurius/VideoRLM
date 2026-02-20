@@ -63,6 +63,27 @@ class AnthropicClient(BaseLM):
         self._track_cost(response, model)
         return response.content[0].text
 
+    @staticmethod
+    def _normalize_content_parts(content: Any) -> Any:
+        if not isinstance(content, list):
+            return content
+        parts: list[dict[str, Any]] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append({"type": "text", "text": item})
+            elif isinstance(item, dict) and item.get("__image__"):
+                parts.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": item.get("mime_type", "image/jpeg"),
+                        "data": item["data"],
+                    },
+                })
+            else:
+                parts.append(item)
+        return parts
+
     def _prepare_messages(
         self, prompt: str | list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], str | None]:
@@ -72,13 +93,15 @@ class AnthropicClient(BaseLM):
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
         elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
-            # Extract system message if present (Anthropic handles system separately)
             messages = []
             for msg in prompt:
                 if msg.get("role") == "system":
                     system = msg.get("content")
                 else:
-                    messages.append(msg)
+                    messages.append({
+                        **msg,
+                        "content": self._normalize_content_parts(msg.get("content")),
+                    })
         else:
             raise ValueError(f"Invalid prompt type: {type(prompt)}")
 
