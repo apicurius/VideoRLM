@@ -677,6 +677,8 @@ def kuavi_search_video(
     top_k: int = 5,
     field: str = "summary",
     diverse: bool = True,
+    cluster_diverse: bool = False,
+    exclude_non_action: bool = True,
     level: int = 0,
     video_id: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -698,7 +700,15 @@ def kuavi_search_video(
     from kuavi.search import make_search_video
 
     tool = make_search_video(index)
-    results = tool["tool"](query=query, top_k=top_k, field=field, diverse=diverse, level=level)
+    results = tool["tool"](
+        query=query,
+        top_k=top_k,
+        field=field,
+        diverse=diverse,
+        cluster_diverse=cluster_diverse,
+        exclude_non_action=exclude_non_action,
+        level=level,
+    )
     _track_response_tokens(results)
     if warning and results:
         results[-1]["_budget_warning"] = warning
