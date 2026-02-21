@@ -140,7 +140,7 @@ The indexing pipeline converts a raw video into a `VideoIndex` for search:
 1. **Frame extraction** — Decode frames at a fixed or auto-computed FPS
 2. **Scene detection** — V-JEPA 2 clip embeddings + agglomerative clustering (Ward linkage with adjacency constraint). Falls back to SigLIP2 frame embeddings or color histogram if V-JEPA 2 is disabled
 3. **Transcript extraction** — Whisper ASR via `faster-whisper`
-4. **Deduplication & selective decoding** — Pre-caption dedup (cosine similarity > 0.90 between segment embeddings) and static segment detection (intra-segment similarity > 0.98)
+4. **Deduplication & visual variance** — Pre-caption dedup (cosine similarity > 0.90 between segment embeddings) and visual variance computation per segment as metadata (all segments are still captioned to preserve content from static slides, tables, and charts)
 5. **Captioning** — Two-level Tree-of-Captions: frame-level keyframe captions + segment-level structured annotations (summary, action, actor), with parallel ThreadPoolExecutor workers
 6. **Self-refine** — Iterative annotation refinement with anti-hallucination rules, neighbor context, and transcript cross-referencing
 7. **Embedding** — Encode captions and actions into dense vectors, smooth with moving average, quality-check for degenerate embeddings

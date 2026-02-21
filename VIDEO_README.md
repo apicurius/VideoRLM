@@ -59,7 +59,7 @@ flowchart TD
     B --> C["V-JEPA 2<br/>Scene Detection"]
     C --> D["Build Segments"]
     D --> E["Pre-Caption Dedup<br/>(cosine sim > 0.90)"]
-    E --> F["Selective Decode<br/>(skip variance < 0.02)"]
+    E --> F["Visual Variance<br/>(compute per segment)"]
     F --> G["ASR Transcript<br/>(Whisper)"]
     G --> H["LLM Captioning<br/>(Gemini)"]
     H --> I["Self-Refine<br/>(3 rounds, neighbor ctx)"]
@@ -78,9 +78,9 @@ flowchart TD
 1. **Frame extraction** — Decode frames at configurable FPS (or auto-compute to hit `target_frames`).
 2. **V-JEPA 2 scene detection** — Encode 16-frame clips, cluster with Ward linkage to find temporally coherent boundaries.
 3. **Pre-caption dedup** — Segments with cosine similarity > 0.90 share captions instead of redundant VLM calls.
-4. **Selective decode** — Skip segments with visual variance < 0.02 (~70% of static content).
+4. **Visual variance** — Compute intra-segment frame similarity as metadata; all segments proceed to captioning (static content like slides still contains important text/tables).
 5. **ASR transcription** — Run Whisper (or load pre-existing transcript) to capture spoken words.
-6. **LLM captioning** — Gemini generates structured captions (summary + actions) for non-trivial segments.
+6. **LLM captioning** — Gemini generates structured captions (summary + actions) for all segments.
 7. **Self-Refine** — 3 rounds of neighbor-aware caption refinement for cross-segment coherence.
 8. **ASR injection** — Prepend transcript text to captions, making spoken words searchable.
 9. **Dual embedding** — Frames via SigLIP2 (visual space), captions via EmbeddingGemma (semantic space), kept separate.
@@ -338,7 +338,7 @@ The agent starts broad (coarse level=1, ~30s chunks) to localize relevant region
 ## Key Optimizations
 
 - **V-JEPA 2 temporal scene detection** — Ward linkage clustering on video clip embeddings for motion-aware boundaries.
-- **Selective decoding** — Skip ~70% of uniform segments (visual variance < 0.02) during captioning.
+- **Visual variance tracking** — Compute intra-segment frame similarity as metadata; all segments are captioned to avoid losing content from static slides, tables, and charts.
 - **Pre-caption dedup** — Segments with cosine similarity > 0.90 share captions, avoiding redundant VLM calls.
 - **Self-Refine** — 3 rounds of neighbor-aware caption refinement for coherence and reduced hallucination.
 - **ASR transcript injection** — Whisper transcripts prepended to captions, making spoken words searchable.
