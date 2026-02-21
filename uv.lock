@@ -1519,6 +1519,8 @@ name = "kuavi"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "faster-whisper" },
+    { name = "google-genai" },
     { name = "mcp" },
     { name = "numpy" },
     { name = "opencv-python" },
@@ -1526,6 +1528,10 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "scikit-learn" },
+    { name = "sentence-transformers" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "transformers" },
 ]
 
 [package.optional-dependencies]
@@ -1604,11 +1610,13 @@ requires-dist = [
     { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.1.0" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = ">=1.0.0" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.100.0" },
+    { name = "faster-whisper", specifier = ">=1.1.0" },
     { name = "faster-whisper", marker = "extra == 'asr'", specifier = ">=1.1.0" },
     { name = "flask", marker = "extra == 'daytona'", specifier = ">=2.0.0" },
     { name = "flask", marker = "extra == 'e2b'", specifier = ">=2.0.0" },
     { name = "flask", marker = "extra == 'modal'", specifier = ">=2.0.0" },
     { name = "flask", marker = "extra == 'prime'", specifier = ">=2.0.0" },
+    { name = "google-genai", specifier = ">=1.0.0" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0.0" },
     { name = "kuavi", extras = ["embeddings", "asr", "gemini", "openai", "anthropic", "web"], marker = "extra == 'all'" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.0.0" },
@@ -1623,9 +1631,13 @@ requires-dist = [
     { name = "requests", specifier = ">=2.28.0" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "scikit-learn", specifier = ">=1.4.0" },
+    { name = "sentence-transformers", specifier = ">=3.0.0" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=3.0.0" },
+    { name = "torch", specifier = ">=2.0.0" },
     { name = "torch", marker = "extra == 'embeddings'", specifier = ">=2.0.0" },
+    { name = "torchvision", specifier = ">=0.20.0" },
     { name = "torchvision", marker = "extra == 'embeddings'", specifier = ">=0.20.0" },
+    { name = "transformers", specifier = ">=4.40.0" },
     { name = "transformers", marker = "extra == 'embeddings'", specifier = ">=4.40.0" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.20.0" },
 ]
