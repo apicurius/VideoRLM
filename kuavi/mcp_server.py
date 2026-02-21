@@ -14,11 +14,18 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+# Load .env from the project root (or CLAUDE_PROJECT_DIR) so API keys are available
+_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+_dotenv_path = os.path.join(_project_dir, ".env") if _project_dir else ".env"
+load_dotenv(_dotenv_path, override=False)
 
 logger = logging.getLogger(__name__)
 
@@ -40,19 +47,81 @@ class _TraceLogger:
     A new trace file is created on each ``kuavi_index_video`` call.
     """
 
+    # Tool names whose responses contain frame data eligible for sidecar saving
+    _FRAME_TOOLS = frozenset({
+        "extract_frames", "zoom_frames", "crop_frame", "blend_frames", "diff_frames",
+    })
+
     def __init__(self) -> None:
-        self._log_dir = Path(os.environ.get("KUAVI_LOG_DIR", "./logs"))
+        # Use absolute path so subagent MCP servers write to the same logs dir.
+        # Resolve relative to CLAUDE_PROJECT_DIR (set by Claude Code) if available.
+        default_log_dir = os.environ.get("KUAVI_LOG_DIR", "")
+        if not default_log_dir:
+            project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+            if project_dir:
+                default_log_dir = os.path.join(project_dir, "logs")
+            else:
+                default_log_dir = "./logs"
+        self._log_dir = Path(default_log_dir).resolve()
         self._log_file: Path | None = None
         self._session_started = False
         self._run_counter = 0
         self._last_tool_call_time: float = 0.0
         self._turn_counter: int = 0
+        self._frames_dir: Path | None = None
+        self._frame_counter: int = 0
+        self._current_eval_id: str | None = None
 
     def _ensure_log_dir(self) -> None:
         self._log_dir.mkdir(parents=True, exist_ok=True)
 
+    def _ensure_frames_dir(self) -> Path:
+        """Create and return the frames sidecar directory for the current log file."""
+        if self._frames_dir is None:
+            log_path = self._current_file()
+            self._frames_dir = log_path.with_suffix("").with_name(log_path.stem + ".frames")
+        self._frames_dir.mkdir(parents=True, exist_ok=True)
+        return self._frames_dir
+
+    def _save_frames(self, obj: Any) -> Any:
+        """Save base64 frame data to sidecar files, returning references.
+
+        Walks the response structure looking for dicts with 'data' + 'mime_type'
+        keys (frame dicts). Each frame's base64 data is decoded and written to
+        ``{log_stem}.frames/frame_NNNN.jpg``. The dict is replaced with a
+        ``_frame_file`` reference that the visualizer's ``VideoFrameViewer``
+        already knows how to resolve via the ``/api/frames/`` route.
+        """
+        if isinstance(obj, list):
+            return [self._save_frames(item) for item in obj]
+        if isinstance(obj, dict):
+            # Check if this dict is a frame (has base64 'data' and 'mime_type')
+            if "data" in obj and "mime_type" in obj and isinstance(obj["data"], str) and len(obj["data"]) > 200:
+                try:
+                    frames_dir = self._ensure_frames_dir()
+                    self._frame_counter += 1
+                    ext = ".jpg" if "jpeg" in obj["mime_type"] else ".png"
+                    fname = f"frame_{self._frame_counter:04d}{ext}"
+                    fpath = frames_dir / fname
+                    fpath.write_bytes(base64.b64decode(obj["data"]))
+                    # Return a reference dict instead of inline base64
+                    result = {k: v for k, v in obj.items() if k != "data"}
+                    result["_frame_file"] = fname
+                    return result
+                except Exception:
+                    # Fall back to stripping base64 if save fails
+                    return self._strip_base64(obj)
+            # Recurse into nested dicts (e.g. crop_frame returns {"image": {...}, "crop": {...}})
+            return {k: self._save_frames(v) for k, v in obj.items()}
+        return obj
+
     def _new_trace_file(self) -> Path:
-        """Create a new trace file with a timestamp-based name."""
+        """Create a new trace file with a timestamp-based name.
+
+        Also publishes the path to ``logs/.kuavi_mcp_trace`` so the Claude Code
+        hook logger can append conversation events (question, final_answer,
+        agent lifecycle) to the **same** file instead of creating a separate one.
+        """
         self._ensure_log_dir()
         self._run_counter += 1
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -62,7 +131,24 @@ class _TraceLogger:
         self._session_started = False
         self._last_tool_call_time = 0.0
         self._turn_counter = 0
+        self._frames_dir = None
+        self._frame_counter = 0
+        # Publish trace path for hook coordination
+        self._publish_trace_path(path)
         return path
+
+    def _publish_trace_path(self, path: Path) -> None:
+        """Write the current trace file path to a well-known state file.
+
+        The hook logger (``kuavi_trace_logger.sh``) reads this to append
+        conversation-level events (question, agent lifecycle, final_answer)
+        to the same trace file, achieving a single unified trace.
+        """
+        try:
+            state_file = self._log_dir / ".kuavi_mcp_trace"
+            state_file.write_text(str(path))
+        except OSError:
+            logger.warning("Failed to publish trace path to .kuavi_mcp_trace")
 
     def _current_file(self) -> Path:
         """Get the current trace file, creating one if needed."""
@@ -219,12 +305,24 @@ class _TraceLogger:
         # Compute a human-readable response summary
         response_summary = self._summarize_response(tool_name, tool_response, has_error)
 
+        # For frame-producing tools, save frames to sidecar files instead of stripping base64
+        short_name = (
+            tool_name
+            .replace("mcp__kuavi__kuavi_", "")
+            .replace("mcp__kuavi__", "")
+            .replace("kuavi_", "")
+        )
+        if short_name in self._FRAME_TOOLS and not has_error:
+            logged_response = self._save_frames(tool_response)
+        else:
+            logged_response = self._strip_base64(tool_response)
+
         self._write_event({
             "type": "tool_call",
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             "tool_name": tool_name,
             "tool_input": self._strip_base64(tool_input),
-            "tool_response": self._strip_base64(tool_response),
+            "tool_response": logged_response,
             "response_summary": response_summary,
             "duration_ms": duration_ms,
             "has_error": has_error,
@@ -233,6 +331,30 @@ class _TraceLogger:
                 "output_tokens_approx": response_tokens,
             },
         })
+
+        # After index_video tool_call: extract and emit metadata from the response.
+        # This must happen here (not in kuavi_index_video) because _new_trace_file()
+        # is called at the top of this method, so the new trace file is ready.
+        if "index_video" in tool_name and not has_error:
+            resp = tool_response
+            # MCP responses can be [text_content, dict] or {result: dict} or plain dict
+            if isinstance(resp, list):
+                for item in resp:
+                    if isinstance(item, dict) and "status" in item:
+                        resp = item
+                        break
+            if isinstance(resp, dict) and "result" in resp:
+                resp = resp["result"]
+            if isinstance(resp, dict):
+                self.log_video_metadata(
+                    video_path=str(resp.get("video_path", "")),
+                    fps=float(resp.get("fps", 0)),
+                    duration=float(resp.get("duration", 0)),
+                    num_segments=int(resp.get("segments", 0)),
+                    num_scenes=int(resp.get("scenes", resp.get("scene_boundaries", 0))),
+                    has_embeddings=bool(resp.get("has_embeddings", False)),
+                    has_transcript=bool(resp.get("transcript_entries", 0) > 0),
+                )
 
     def log_video_metadata(
         self,
@@ -266,15 +388,17 @@ class _TraceLogger:
         duration_ms: int,
         has_error: bool = False,
         context: str | None = None,
+        num_frames: int = 0,
     ) -> None:
         """Log an llm_call event (emitted when kuavi_eval or kuavi_analyze_shards calls an LLM)."""
         self._emit_session_start()
 
-        # Summarise long prompts/responses to keep log files small
+        # Summarise long prompts to keep log files small (prompts can be huge with multimodal)
         prompt_summary = prompt[:300] + "..." if len(prompt) > 300 else prompt
+        # Keep both a truncated summary for quick display and the full response for expand
         response_summary = response[:300] + "..." if len(response) > 300 else response
 
-        self._write_event({
+        event: dict[str, Any] = {
             "type": "llm_call",
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             "model": model,
@@ -286,7 +410,17 @@ class _TraceLogger:
             "duration_ms": duration_ms,
             "has_error": has_error,
             "context": context,
-        })
+        }
+        # Include full response when it was truncated
+        if len(response) > 300:
+            event["response_full"] = response
+        # Include frame count for multimodal prompts
+        if num_frames > 0:
+            event["num_frames"] = num_frames
+        # Link to parent eval execution if one is active
+        if self._current_eval_id:
+            event["eval_id"] = self._current_eval_id
+        self._write_event(event)
 
     def log_eval_execution(
         self,
@@ -295,23 +429,23 @@ class _TraceLogger:
         execution_time_ms: int,
         has_error: bool,
         result_type: str | None = None,
+        eval_id: str | None = None,
     ) -> None:
         """Log an eval_execution event for kuavi_eval calls."""
         self._emit_session_start()
 
-        # Truncate long code/stdout
-        code_summary = code[:500] + "..." if len(code) > 500 else code
-        stdout_summary = stdout[:300] + "..." if len(stdout) > 300 else stdout
-
-        self._write_event({
+        event: dict[str, Any] = {
             "type": "eval_execution",
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            "code": code_summary,
-            "stdout": stdout_summary,
+            "code": code,
+            "stdout": stdout,
             "execution_time_ms": execution_time_ms,
             "has_error": has_error,
             "result_type": result_type,
-        })
+        }
+        if eval_id:
+            event["eval_id"] = eval_id
+        self._write_event(event)
 
     def log_session_end(self, reason: str = "shutdown") -> None:
         """Write a session_end event."""
@@ -710,16 +844,8 @@ def kuavi_index_video(
             f"Consider calling kuavi_analyze_shards() for efficient long-video analysis."
         )
 
-    # Emit a metadata event so the visualizer can display rich video info
-    _trace_logger.log_video_metadata(
-        video_path=video_path,
-        fps=round(actual_fps, 3),
-        duration=round(loaded_video.metadata.duration, 2),
-        num_segments=len(index.segments),
-        num_scenes=len(index.scene_boundaries),
-        has_embeddings=index.embeddings is not None,
-        has_transcript=len(index.transcript) > 0,
-    )
+    # Note: metadata event is now emitted by log_tool_call() after the tool_call event,
+    # ensuring it goes into the correct (new) trace file.
 
     return result
 
@@ -1365,6 +1491,10 @@ def kuavi_eval(code: str) -> dict[str, Any]:
     has_eval_error = False
     result = None
 
+    # Generate a unique eval_id so LLM calls within this eval can be linked
+    eval_id = uuid.uuid4().hex[:12]
+    _trace_logger._current_eval_id = eval_id
+
     try:
         with contextlib.redirect_stdout(stdout_buf):
             try:
@@ -1385,6 +1515,7 @@ def kuavi_eval(code: str) -> dict[str, Any]:
         has_eval_error = True
         return {"error": f"{type(e).__name__}: {e}", "stdout": stdout_buf.getvalue()}
     finally:
+        _trace_logger._current_eval_id = None
         exec_ms = int((time.time() - t0_eval) * 1000)
         _trace_logger.log_eval_execution(
             code=code,
@@ -1392,6 +1523,7 @@ def kuavi_eval(code: str) -> dict[str, Any]:
             execution_time_ms=exec_ms,
             has_error=has_eval_error,
             result_type=type(result).__name__ if result is not None else None,
+            eval_id=eval_id,
         )
 
 
@@ -1650,6 +1782,12 @@ def _call_llm(
     response_text = ""
     has_error = False
     prompt_log = prompt if isinstance(prompt, str) else f"[multimodal: {len(prompt)} parts]"
+    # Count frames in multimodal prompts for logging
+    _num_frames = 0
+    if isinstance(prompt, list):
+        _num_frames = sum(
+            1 for item in prompt if isinstance(item, dict) and "data" in item
+        )
     try:
         if backend == "gemini":
             from google import genai
@@ -1730,6 +1868,7 @@ def _call_llm(
             duration_ms=duration_ms,
             has_error=has_error,
             context=_log_context,
+            num_frames=_num_frames,
         )
 
 

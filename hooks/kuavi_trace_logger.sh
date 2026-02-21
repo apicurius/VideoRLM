@@ -1,155 +1,161 @@
 #!/usr/bin/env bash
-# Async hook — logs KUAVi MCP tool calls and lifecycle events to JSONL
-# Each index_video call starts a NEW trace file for per-run isolation.
+# Unified KUAVi trace hook — appends conversation events to the MCP server's trace file.
+#
+# The MCP server (_TraceLogger in mcp_server.py) writes rich tool_call, llm_call,
+# eval_execution, metadata, turn_start, and session events. This hook supplements
+# with conversation-level events the MCP server cannot see:
+#   - question        (from UserPromptSubmit)
+#   - agent_start/stop (from SubagentStart/SubagentStop)
+#   - final_answer     (from Stop)
+#
+# Coordination: MCP server publishes its trace path to logs/.kuavi_mcp_trace.
+# This hook reads that path and appends to the SAME file.
+#
 # NOTE: Do NOT use set -e — jq operations on missing fields must not abort the script.
 
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
-SESSION_SUFFIX="${SESSION_ID:0:8}"
 EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // "unknown"' 2>/dev/null || echo "unknown")
 LOG_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}/logs"
 mkdir -p "$LOG_DIR"
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-EPOCH_MS=$(python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null || date +%s000)
-STATE_FILE="$LOG_DIR/.kuavi_run_$SESSION_ID"
-TIMING_FILE="$LOG_DIR/.kuavi_timing_$SESSION_ID"
 
-# Create a new run file with a fresh timestamp and update the state file
-new_run_file() {
-  local file_ts
-  file_ts=$(date +"%Y-%m-%d_%H-%M-%S")
-  local run_file="$LOG_DIR/kuavi_${file_ts}_${SESSION_SUFFIX}.jsonl"
-  echo "$run_file" > "$STATE_FILE"
-  echo "$run_file"
-}
+# State files
+MCP_TRACE_FILE="$LOG_DIR/.kuavi_mcp_trace"   # Published by MCP server _TraceLogger
+FINAL_GUARD="$LOG_DIR/.kuavi_final_$SESSION_ID"
+QUESTION_STASH="$LOG_DIR/.kuavi_question_$SESSION_ID"
 
-# Get the current run file from state, or create one if missing
-current_run_file() {
-  if [ -f "$STATE_FILE" ]; then
-    cat "$STATE_FILE"
-  else
-    new_run_file
-  fi
-}
-
-# Compute duration_ms from the last recorded timestamp
-compute_duration() {
-  if [ -f "$TIMING_FILE" ]; then
-    local last_ms
-    last_ms=$(cat "$TIMING_FILE" 2>/dev/null || echo "0")
-    if [ "$last_ms" -gt 0 ] 2>/dev/null; then
-      echo $(( EPOCH_MS - last_ms ))
-    else
-      echo "null"
-    fi
-  else
-    echo "null"
+# Get the MCP server's current trace file. Returns empty string if not available.
+mcp_trace() {
+  if [ -f "$MCP_TRACE_FILE" ]; then
+    cat "$MCP_TRACE_FILE" 2>/dev/null
   fi
 }
 
 case "$EVENT" in
   PostToolUse)
     TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null || echo "")
-    TURN_COUNT_FILE="$LOG_DIR/.kuavi_turn_$SESSION_ID"
 
     if [[ "$TOOL_NAME" == *index_video* ]]; then
-      LOG_FILE=$(new_run_file)
-      # Emit session_start event for the new run
-      printf '{"type":"session_start","timestamp":"%s","source":"claude-code"}\n' \
-        "$TIMESTAMP" >> "$LOG_FILE" 2>/dev/null
-      # Reset timing and turn counter for new run
-      rm -f "$TIMING_FILE"
-      echo "1" > "$TURN_COUNT_FILE"
-    else
-      LOG_FILE=$(current_run_file)
-    fi
+      # MCP server creates a new trace file on index_video. Wait briefly for it.
+      sleep 0.3
+      LOG_FILE=$(mcp_trace)
 
-    # Detect agent turn boundary: gap > 3000ms since last tool call
-    if [ -f "$TIMING_FILE" ]; then
-      LAST_MS=$(cat "$TIMING_FILE" 2>/dev/null || echo "0")
-      if [ "$LAST_MS" -gt 0 ] 2>/dev/null && [[ "$TOOL_NAME" != *index_video* ]]; then
-        GAP=$(( EPOCH_MS - LAST_MS ))
-        if [ "$GAP" -gt 3000 ]; then
-          PREV_TURN=$(cat "$TURN_COUNT_FILE" 2>/dev/null || echo "0")
-          NEW_TURN=$(( PREV_TURN + 1 ))
-          echo "$NEW_TURN" > "$TURN_COUNT_FILE"
-          GAP_SEC=$(python3 -c "print(round($GAP/1000, 1))" 2>/dev/null || echo "0")
-          printf '{"type":"turn_start","timestamp":"%s","turn":%d,"gap_seconds":%s}\n' \
-            "$TIMESTAMP" "$NEW_TURN" "$GAP_SEC" >> "$LOG_FILE" 2>/dev/null
+      if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+        # Carry forward any stashed question into the new trace
+        if [ -f "$QUESTION_STASH" ]; then
+          cat "$QUESTION_STASH" >> "$LOG_FILE" 2>/dev/null
         fi
       fi
-    fi
 
-    # Compute duration since last PostToolUse
-    DURATION=$(compute_duration)
-    # Update timing state for next call
-    echo "$EPOCH_MS" > "$TIMING_FILE"
-
-    # Detect errors in tool response (exclude Claude Code truncation warnings)
-    HAS_ERROR=$(echo "$INPUT" | jq -r '
-      (.tool_response // "") |
-      if test("exceeds maximum allowed tokens") then false
-      elif test("(?i)(error:|exception:|traceback|failed to|cannot |could not )") then true
-      else false end
-    ' 2>/dev/null || echo "false")
-
-    # Build the tool_call event with duration and error status
-    echo "$INPUT" | jq -c \
-      --argjson duration "$DURATION" \
-      --argjson has_error "$HAS_ERROR" \
-      '{type:"tool_call",timestamp:"'"$TIMESTAMP"'",tool_name:.tool_name,tool_input:.tool_input,tool_response:.tool_response,duration_ms:$duration,has_error:$has_error}' \
-      >> "$LOG_FILE" 2>/dev/null
-
-    # After index_video: emit a metadata event with structured video info
-    if [[ "$TOOL_NAME" == *index_video* ]]; then
-      RESP_STR=$(echo "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
-      if [ -n "$RESP_STR" ]; then
-        echo "$RESP_STR" | python3 -c "
-import sys, json
-try:
-    raw = sys.stdin.read().strip()
-    resp = json.loads(raw) if raw.startswith('{') else json.loads(json.loads(raw))
-    meta = {
-        'type': 'metadata',
-        'timestamp': '$TIMESTAMP',
-        'video_path': resp.get('video_path'),
-        'fps': resp.get('fps'),
-        'duration': resp.get('duration'),
-        'num_segments': resp.get('segments'),
-        'num_scenes': resp.get('scenes'),
-        'has_embeddings': resp.get('has_embeddings', False),
-        'has_transcript': resp.get('transcript_entries', 0) > 0,
-    }
-    print(json.dumps(meta))
-except Exception:
-    pass
-" >> "$LOG_FILE" 2>/dev/null
-      fi
+      # Reset final_answer guard for new run
+      rm -f "$FINAL_GUARD"
     fi
     ;;
 
   SubagentStart)
-    LOG_FILE=$(current_run_file)
-    echo "$INPUT" | jq -c '{type:"agent_start",timestamp:"'"$TIMESTAMP"'",agent_id:.agent_id,agent_type:.agent_type}' >> "$LOG_FILE" 2>/dev/null
-    # Reset timing when subagent starts
-    echo "$EPOCH_MS" > "$TIMING_FILE"
+    LOG_FILE=$(mcp_trace)
+    if [ -n "$LOG_FILE" ]; then
+      echo "$INPUT" | jq -c '{type:"agent_start",timestamp:"'"$TIMESTAMP"'",agent_id:.agent_id,agent_type:.agent_type}' >> "$LOG_FILE" 2>/dev/null
+    fi
     ;;
 
   SubagentStop)
-    LOG_FILE=$(current_run_file)
-    echo "$INPUT" | jq -c '{type:"agent_stop",timestamp:"'"$TIMESTAMP"'",agent_id:.agent_id,agent_type:.agent_type}' >> "$LOG_FILE" 2>/dev/null
+    LOG_FILE=$(mcp_trace)
+    if [ -n "$LOG_FILE" ]; then
+      echo "$INPUT" | jq -c '{type:"agent_stop",timestamp:"'"$TIMESTAMP"'",agent_id:.agent_id,agent_type:.agent_type}' >> "$LOG_FILE" 2>/dev/null
+    fi
+    ;;
+
+  UserPromptSubmit)
+    PROMPT=$(echo "$INPUT" | jq -r '.prompt // ""' 2>/dev/null || echo "")
+    if [ -n "$PROMPT" ] && [ "$PROMPT" != "null" ]; then
+      # Build the question event JSON
+      QUESTION_EVENT=$(printf '{"type":"question","timestamp":"%s","text":%s}' \
+        "$TIMESTAMP" \
+        "$(echo "$PROMPT" | jq -Rs '.')")
+
+      # Stash for carry-forward (in case index_video creates a new trace later)
+      echo "$QUESTION_EVENT" > "$QUESTION_STASH"
+
+      # Append to current MCP trace if one exists
+      LOG_FILE=$(mcp_trace)
+      if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+        echo "$QUESTION_EVENT" >> "$LOG_FILE" 2>/dev/null
+      fi
+    fi
     ;;
 
   Stop)
-    LOG_FILE=$(current_run_file)
-    # Capture the final assistant message as a final_answer event
-    LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null || echo "")
-    if [ -n "$LAST_MSG" ] && [ "$LAST_MSG" != "null" ]; then
-      echo "$INPUT" | jq -c '{type:"final_answer",timestamp:"'"$TIMESTAMP"'",text:.last_assistant_message}' >> "$LOG_FILE" 2>/dev/null
+    # Emit final_answer ONCE per trace on the first Stop after tool calls.
+    # Extract only the actual analysis answer, stripping meta-commentary.
+    LOG_FILE=$(mcp_trace)
+    if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ] && [ ! -f "$FINAL_GUARD" ]; then
+      RAW_ANSWER=$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null || echo "")
+      if [ -n "$RAW_ANSWER" ] && [ "$RAW_ANSWER" != "null" ]; then
+        touch "$FINAL_GUARD"
+        # Extract just the analysis answer, drop meta-sections
+        ANSWER=$(echo "$RAW_ANSWER" | python3 -c "
+import sys, re
+
+text = sys.stdin.read().strip()
+if not text:
+    sys.exit(0)
+
+# Split by markdown headings (## or ###)
+sections = re.split(r'^(#{2,3}\s+.+)$', text, flags=re.MULTILINE)
+
+# If no headings, check if the text is meta-commentary or actual analysis
+if len(sections) <= 1:
+    # Reject pure meta-text about tooling/infrastructure (not video analysis)
+    meta_re = re.compile(
+        r'\b(trace file|jsonl|tool.?calls?|turn_start|session_start|'
+        r'hook|mcp|visualizer|localhost|dev server|npm run|'
+        r'what the visualizer shows|three fixes|hot.?reload)\b', re.I)
+    sentences = [s.strip() for s in re.split(r'[.!?\n]', text) if s.strip()]
+    meta_sentences = sum(1 for s in sentences if meta_re.search(s))
+    if sentences and meta_sentences / len(sentences) > 0.3:
+        sys.exit(0)
+    print(text)
+    sys.exit(0)
+
+# Skip meta-sections: verification, logs, visualizer, logging, trace, session
+skip_re = re.compile(
+    r'\b(verification|verif|visualizer|logging|how the logs|trace|session|new logging|'
+    r'what the visualizer|current session|tool call timeline|frame sidecar|'
+    r'full eval|eval.*linkage|frame count)\b', re.I)
+
+# Collect answer sections (heading + body pairs)
+answer_parts = []
+i = 0
+while i < len(sections):
+    part = sections[i]
+    if re.match(r'^#{2,3}\s+', part):
+        heading = part
+        body = sections[i + 1] if i + 1 < len(sections) else ''
+        if not skip_re.search(heading) and not skip_re.search(body[:200]):
+            answer_parts.append((heading + '\n' + body).strip())
+        i += 2
+    else:
+        stripped = part.strip()
+        if stripped and not skip_re.search(stripped) and len(stripped) > 30:
+            if not re.match(r'^(the visualizer|let me|here|i\'ve|now let)', stripped, re.I):
+                answer_parts.append(stripped)
+        i += 1
+
+if answer_parts:
+    print('\n\n'.join(answer_parts))
+" 2>/dev/null || echo "$RAW_ANSWER")
+        if [ -n "$ANSWER" ]; then
+          printf '{"type":"final_answer","timestamp":"%s","text":%s}\n' \
+            "$TIMESTAMP" \
+            "$(echo "$ANSWER" | jq -Rs '.')" >> "$LOG_FILE" 2>/dev/null
+        fi
+      fi
     fi
-    # Clean up timing state
-    rm -f "$TIMING_FILE"
+    # Clean up stash
+    rm -f "$QUESTION_STASH"
     ;;
 esac
 exit 0

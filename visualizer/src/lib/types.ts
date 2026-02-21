@@ -146,6 +146,9 @@ export interface KUAViLLMCallEvent {
   duration_ms: number;
   has_error: boolean;
   context?: string | null;
+  eval_id?: string;
+  num_frames?: number;
+  response_full?: string;
 }
 
 export interface KUAViEvalExecutionEvent {
@@ -156,6 +159,7 @@ export interface KUAViEvalExecutionEvent {
   execution_time_ms: number;
   has_error: boolean;
   result_type?: string | null;
+  eval_id?: string;
 }
 
 /** Emitted by _TraceLogger after kuavi_index_video succeeds. */
@@ -236,6 +240,7 @@ export interface KUAViLogMetadata {
   isComplete: boolean;
   hasErrors: boolean;
   finalAnswer: string | null;
+  finalAnswerBrief: string | null;
 }
 
 export interface KUAViLogFile {

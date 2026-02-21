@@ -122,6 +122,18 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/hooks/kuavi_trace_logger.sh",
+            "async": true
+          }
+        ]
+      }
+    ],
     "SessionEnd": []
   },
   "enabledPlugins": {

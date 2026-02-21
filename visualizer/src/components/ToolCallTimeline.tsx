@@ -334,6 +334,7 @@ interface TurnTimelineProps {
   turns: KUAViTurn[];
   selectedTurnIndex: number;
   onSelectTurnIndex: (index: number) => void;
+  finalAnswer?: string | null;
 }
 
 function getTurnDuration(turn: KUAViTurn): number | null {
@@ -356,7 +357,7 @@ function formatTurnDuration(seconds: number): string {
   return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
 }
 
-export function TurnTimeline({ turns, selectedTurnIndex, onSelectTurnIndex }: TurnTimelineProps) {
+export function TurnTimeline({ turns, selectedTurnIndex, onSelectTurnIndex, finalAnswer }: TurnTimelineProps) {
   const selectedRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -447,6 +448,16 @@ export function TurnTimeline({ turns, selectedTurnIndex, onSelectTurnIndex }: Tu
                       {toolCount > 0 && (
                         <span className="text-xs text-cyan-600 dark:text-cyan-400">
                           {toolCount} tool{toolCount !== 1 ? 's' : ''}
+                        </span>
+                      )}
+                      {turn.llmCalls.length > 0 && (
+                        <span className="text-xs text-fuchsia-600 dark:text-fuchsia-400">
+                          {turn.llmCalls.length} llm
+                        </span>
+                      )}
+                      {turn.evalExecutions.length > 0 && (
+                        <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                          {turn.evalExecutions.length} eval
                         </span>
                       )}
                       {/* Category dots */}

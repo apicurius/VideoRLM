@@ -18,6 +18,8 @@ interface DemoLogInfo {
   contextPreview: string | null;
   traceType: 'rlm' | 'kuavi';
   toolCount: number;
+  llmCallCount: number;
+  evalCount: number;
   size: number;
   mtime: string;
 }
@@ -38,19 +40,21 @@ export function Dashboard() {
   useEffect(() => {
     async function loadDemoPreviews() {
       try {
-        const listResponse = await fetch('/api/logs');
+        const listResponse = await fetch('/api/logs', { cache: 'no-store' });
         if (!listResponse.ok) {
           throw new Error('Failed to fetch log list');
         }
         const { files } = await listResponse.json();
 
-        const previews: DemoLogInfo[] = files.map((f: { name: string; size: number; mtime: string; traceType: string; lineCount: number; toolCallCount?: number; model: string | null; videoPath: string | null }) => ({
+        const previews: DemoLogInfo[] = files.map((f: { name: string; size: number; mtime: string; traceType: string; lineCount: number; toolCallCount?: number; llmCallCount?: number; evalCount?: number; model: string | null; videoPath: string | null }) => ({
           fileName: f.name,
           contextPreview: f.videoPath
             ? f.videoPath.split('/').pop() ?? f.videoPath
             : f.model ?? null,
           traceType: f.traceType as 'rlm' | 'kuavi',
           toolCount: f.traceType === 'kuavi' ? (f.toolCallCount ?? f.lineCount) : f.lineCount,
+          llmCallCount: f.llmCallCount ?? 0,
+          evalCount: f.evalCount ?? 0,
           size: f.size,
           mtime: f.mtime,
         }));
@@ -196,7 +200,7 @@ export function Dashboard() {
                     </CardContent>
                   </Card>
                 ) : (
-                  <ScrollArea className="h-[320px]">
+                  <ScrollArea className="h-[480px]">
                     <div className="space-y-2 pr-4">
                       {demoLogs.map((demo) => (
                         <Card
@@ -221,7 +225,7 @@ export function Dashboard() {
 
                               {/* Content */}
                               <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 mb-1">
+                                <div className="flex items-center gap-2 mb-1 flex-wrap">
                                   <span className="font-mono text-xs text-foreground/80 truncate">
                                     {demo.fileName}
                                   </span>
@@ -239,6 +243,16 @@ export function Dashboard() {
                                   )}>
                                     {demo.traceType === 'kuavi' ? 'KUAVi' : 'RLM'}
                                   </Badge>
+                                  {demo.llmCallCount > 0 && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 bg-fuchsia-500/10 text-fuchsia-600 dark:text-fuchsia-400 border-fuchsia-500/30">
+                                      {demo.llmCallCount} llm
+                                    </Badge>
+                                  )}
+                                  {demo.evalCount > 0 && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30">
+                                      {demo.evalCount} eval
+                                    </Badge>
+                                  )}
                                 </div>
                                 {demo.contextPreview && (
                                   <p className="text-[11px] font-mono text-muted-foreground truncate">

@@ -159,7 +159,7 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
               {metadata.hasErrors && (
                 <Badge variant="destructive" className="text-xs">Has Errors</Badge>
               )}
-              {metadata.finalAnswer && (
+              {(metadata.finalAnswer || metadata.isComplete) && (
                 <Badge className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs">
                   Completed
                 </Badge>
@@ -190,7 +190,7 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
                     Final Answer
                   </p>
                   <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400 line-clamp-2">
-                    {metadata.finalAnswer || 'Not yet completed'}
+                    {metadata.finalAnswerBrief || metadata.finalAnswer || 'Not yet completed'}
                   </p>
                 </div>
               </div>
@@ -241,6 +241,7 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
           turns={turns}
           selectedTurnIndex={selectedTurnIndex}
           onSelectTurnIndex={setSelectedTurnIndex}
+          finalAnswer={metadata.finalAnswer ?? null}
         />
       ) : null}
 
@@ -255,6 +256,7 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
                 selectedTurn={selectedTurnIndex}
                 systemPrompt={systemPrompt}
                 finalAnswer={metadata.finalAnswer ?? null}
+                question={metadata.question}
                 onToolCallClick={handleToolCallClick}
                 logStem={logStem}
               />

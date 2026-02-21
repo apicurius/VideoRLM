@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
@@ -31,6 +32,35 @@ function JsonDisplay({ value }: { value: unknown }) {
   );
 }
 
+function formatTimeMMSS(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function SearchResultDetailExpander({ annotation }: { annotation: Record<string, unknown> }) {
+  const [expanded, setExpanded] = useState(false);
+  const summary = annotation.summary as Record<string, unknown> | undefined;
+  const detailed = typeof summary === 'object' && summary !== null
+    ? String(summary.detailed ?? '')
+    : '';
+  if (!detailed || detailed === 'N/A') return null;
+
+  return (
+    <div>
+      <button
+        onClick={() => setExpanded(v => !v)}
+        className="text-[10px] text-sky-600 dark:text-sky-400 hover:underline"
+      >
+        {expanded ? 'hide details' : 'show details'}
+      </button>
+      {expanded && (
+        <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{detailed}</p>
+      )}
+    </div>
+  );
+}
+
 function SearchResultDisplay({ response }: { response: unknown }) {
   if (!Array.isArray(response)) return <JsonDisplay value={response} />;
 
@@ -45,7 +75,6 @@ function SearchResultDisplay({ response }: { response: unknown }) {
           );
         }
         const obj = item as Record<string, unknown>;
-        // Extract caption text from annotation if available
         const annotation = obj.annotation as Record<string, unknown> | undefined;
         const summaryText = obj.caption
           ? String(obj.caption)
@@ -79,7 +108,7 @@ function SearchResultDisplay({ response }: { response: unknown }) {
               )}
               {obj.start_time !== undefined && obj.end_time !== undefined && (
                 <Badge variant="outline" className="text-xs font-mono">
-                  {String(obj.start_time)}s – {String(obj.end_time)}s
+                  {formatTimeMMSS(Number(obj.start_time))} &ndash; {formatTimeMMSS(Number(obj.end_time))}
                 </Badge>
               )}
               {!!obj.field && (
@@ -101,6 +130,7 @@ function SearchResultDisplay({ response }: { response: unknown }) {
             {!!obj.context && (
               <p className="text-xs text-muted-foreground italic">{String(obj.context)}</p>
             )}
+            {annotation && <SearchResultDetailExpander annotation={annotation} />}
           </div>
         );
       })}
@@ -223,6 +253,117 @@ function IndexStatusDisplay({ data }: { data: Record<string, unknown> }) {
   );
 }
 
+interface ShardResult {
+  shard_index: number;
+  start_time: number;
+  end_time: number;
+  answer: string;
+  has_frames?: boolean;
+  error?: string | null;
+}
+
+interface AnalyzeShardsData {
+  question: string;
+  shard_count: number;
+  multimodal: boolean;
+  results: ShardResult[];
+}
+
+function parseAnalyzeShardsResponse(response: unknown): AnalyzeShardsData | null {
+  try {
+    if (Array.isArray(response) && response.length >= 2) {
+      const parsed = response[response.length - 1];
+      if (typeof parsed === 'object' && parsed !== null && 'results' in parsed) {
+        return parsed as AnalyzeShardsData;
+      }
+    }
+    if (typeof response === 'object' && response !== null && 'results' in response) {
+      return response as AnalyzeShardsData;
+    }
+    if (typeof response === 'object' && response !== null && 'result' in response) {
+      const inner = (response as Record<string, unknown>).result;
+      if (typeof inner === 'object' && inner !== null && 'results' in inner) {
+        return inner as AnalyzeShardsData;
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function AnalyzeShardsResponseDisplay({ data }: { data: AnalyzeShardsData }) {
+  return (
+    <div className="space-y-3">
+      {/* Header info */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <Badge className="bg-fuchsia-500/15 text-fuchsia-600 dark:text-fuchsia-400 border-fuchsia-500/30 text-xs">
+          {data.shard_count} shards
+        </Badge>
+        {data.multimodal && (
+          <Badge className="bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 border-cyan-500/30 text-xs">
+            Multimodal
+          </Badge>
+        )}
+      </div>
+      <div className="rounded-lg border border-border bg-muted/30 p-2">
+        <p className="text-xs font-medium text-foreground/80">{data.question}</p>
+      </div>
+      {/* Per-shard results */}
+      {data.results.map((shard) => {
+        const hasError = !!shard.error;
+        const lower = shard.answer.toLowerCase();
+        const informative = !(
+          lower.includes('no tables') ||
+          lower.includes('not shown') ||
+          lower.includes('no mention') ||
+          lower.includes('not visible') ||
+          lower.includes('no relevant') ||
+          (lower.includes('not') && lower.includes('found'))
+        );
+        return (
+          <div
+            key={shard.shard_index}
+            className={cn(
+              'rounded-lg border p-3 space-y-1.5',
+              hasError
+                ? 'border-red-500/30 bg-red-500/5'
+                : informative
+                  ? 'border-emerald-500/30 bg-emerald-500/5'
+                  : 'border-border bg-card'
+            )}
+          >
+            <div className="flex items-center gap-2 flex-wrap">
+              <Badge variant="outline" className="text-xs font-mono">
+                {formatTimeMMSS(shard.start_time)} &ndash; {formatTimeMMSS(shard.end_time)}
+              </Badge>
+              <span className="text-xs text-muted-foreground">Shard {shard.shard_index + 1}</span>
+              {shard.has_frames && (
+                <Badge className="bg-violet-500/15 text-violet-600 dark:text-violet-400 border-violet-500/30 text-[10px]">
+                  frames
+                </Badge>
+              )}
+              {hasError && (
+                <Badge className="bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/30 text-[10px]">
+                  error
+                </Badge>
+              )}
+            </div>
+            <p className={cn(
+              'text-xs leading-relaxed',
+              hasError
+                ? 'text-red-600 dark:text-red-400'
+                : informative
+                  ? 'text-foreground/90'
+                  : 'text-muted-foreground/70'
+            )}>
+              {hasError ? shard.error : shard.answer}
+            </p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Unwrap {result: ...} wrapper that MCP tools return */
 function unwrapResult(response: unknown): unknown {
   if (typeof response === 'object' && response !== null && 'result' in response) {
@@ -238,6 +379,14 @@ function ResponseDisplay({ toolCall, logStem }: { toolCall: KUAViToolCall; logSt
   const isSearchLike = ['search_video', 'search_transcript', 'discriminative_vqa', 'get_scene_list'].some(
     (s) => short.includes(s)
   );
+
+  // Rich analyze_shards display
+  if (short.includes('analyze_shards')) {
+    const shardsData = parseAnalyzeShardsResponse(toolCall.tool_response);
+    if (shardsData) {
+      return <AnalyzeShardsResponseDisplay data={shardsData} />;
+    }
+  }
 
   if (frames.length > 0) {
     return (

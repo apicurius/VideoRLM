@@ -1,4 +1,4 @@
-import { RLMIteration, RLMLogFile, LogMetadata, RLMConfigMetadata, extractFinalAnswer, KUAViEvent, KUAViLogFile, KUAViLogMetadata, KUAViToolCall, KUAViFinalAnswerEvent, KUAViMetadataEvent, KUAViTurnStartEvent, KUAViReasoningEvent, KUAViSystemPromptEvent, KUAViQuestionEvent, LogFile } from './types';
+import { RLMIteration, RLMLogFile, LogMetadata, RLMConfigMetadata, extractFinalAnswer, KUAViEvent, KUAViLogFile, KUAViLogMetadata, KUAViToolCall, KUAViFinalAnswerEvent, KUAViMetadataEvent, KUAViTurnStartEvent, KUAViReasoningEvent, KUAViSystemPromptEvent, KUAViQuestionEvent, KUAViLLMCallEvent, KUAViEvalExecutionEvent, LogFile } from './types';
 
 // Extract the context variable from code block locals
 export function extractContextVariable(iterations: RLMIteration[]): string | null {
@@ -264,6 +264,8 @@ export interface KUAViTurn {
   index: number;
   reasoning: KUAViReasoningEvent | null;
   toolCalls: KUAViToolCall[];
+  llmCalls: KUAViLLMCallEvent[];
+  evalExecutions: KUAViEvalExecutionEvent[];
   tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
 }
 
@@ -278,15 +280,19 @@ export interface KUAViTurn {
  * Turn 0 collects any tool calls that appear before the first reasoning
  * or turn_start event (null reasoning).
  */
+function hasTurnContent(turn: KUAViTurn): boolean {
+  return turn.toolCalls.length > 0 || turn.llmCalls.length > 0 || turn.evalExecutions.length > 0 || turn.reasoning !== null;
+}
+
 export function groupEventsIntoTurns(events: KUAViEvent[]): KUAViTurn[] {
   const turns: KUAViTurn[] = [];
   let turnIndex = 0;
-  let currentTurn: KUAViTurn = { index: 0, reasoning: null, toolCalls: [] };
+  let currentTurn: KUAViTurn = { index: 0, reasoning: null, toolCalls: [], llmCalls: [], evalExecutions: [] };
 
   for (const event of events) {
     if (event.type === 'reasoning') {
       // Push current turn if it has content
-      if (currentTurn.toolCalls.length > 0 || currentTurn.reasoning !== null) {
+      if (hasTurnContent(currentTurn)) {
         turns.push(currentTurn);
         turnIndex++;
       }
@@ -295,6 +301,8 @@ export function groupEventsIntoTurns(events: KUAViEvent[]): KUAViTurn[] {
         index: turnIndex,
         reasoning: event as KUAViReasoningEvent,
         toolCalls: [],
+        llmCalls: [],
+        evalExecutions: [],
         tokenUsage: usage
           ? {
               prompt_tokens: usage.prompt_tokens ?? 0,
@@ -305,18 +313,22 @@ export function groupEventsIntoTurns(events: KUAViEvent[]): KUAViTurn[] {
       };
     } else if (event.type === 'turn_start') {
       // turn_start marks a boundary if current turn has content
-      if (currentTurn.toolCalls.length > 0 || currentTurn.reasoning !== null) {
+      if (hasTurnContent(currentTurn)) {
         turns.push(currentTurn);
         turnIndex++;
-        currentTurn = { index: turnIndex, reasoning: null, toolCalls: [] };
+        currentTurn = { index: turnIndex, reasoning: null, toolCalls: [], llmCalls: [], evalExecutions: [] };
       }
     } else if (event.type === 'tool_call') {
       currentTurn.toolCalls.push(event as KUAViToolCall);
+    } else if (event.type === 'llm_call') {
+      currentTurn.llmCalls.push(event as KUAViLLMCallEvent);
+    } else if (event.type === 'eval_execution') {
+      currentTurn.evalExecutions.push(event as KUAViEvalExecutionEvent);
     }
   }
 
   // Flush the last turn if it has content
-  if (currentTurn.toolCalls.length > 0 || currentTurn.reasoning !== null) {
+  if (hasTurnContent(currentTurn)) {
     turns.push(currentTurn);
   }
 
@@ -357,11 +369,98 @@ export function parseKUAViJSONL(content: string): KUAViEvent[] {
     .filter((e): e is KUAViEvent => e !== null);
 }
 
-/** Strip the mcp__kuavi__kuavi_ or mcp__kuavi__ prefix to get a short tool name */
+/**
+ * Extract a concise brief from a verbose final answer.
+ *
+ * Strategy:
+ * 1. Strip preamble before first heading
+ * 2. Take only the first substantive answer section (skip verification/meta sections)
+ * 3. Strip markdown formatting for clean text
+ * 4. Cap at ~300 chars at a sentence boundary
+ */
+export function extractFinalAnswerBrief(text: string): string | null {
+  if (!text || text.trim().length === 0) return null;
+
+  // Split into sections by ## or ### headings
+  const sectionPattern = /^#{2,3}\s+.+$/gm;
+  const headings: { index: number; text: string }[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = sectionPattern.exec(text)) !== null) {
+    headings.push({ index: match.index, text: match[0] });
+  }
+
+  let body: string;
+
+  if (headings.length > 0) {
+    // Find first substantive section (skip verification, logs, visualizer, meta sections)
+    const skipPatterns = /\b(verification|verif|logs?|visualizer|logging|how the|trace|meta)\b/i;
+    let substantiveIdx = -1;
+    for (let i = 0; i < headings.length; i++) {
+      if (!skipPatterns.test(headings[i].text)) {
+        substantiveIdx = i;
+        break;
+      }
+    }
+    // If all sections are skip-worthy, use the first one
+    if (substantiveIdx === -1) substantiveIdx = 0;
+
+    const startIdx = headings[substantiveIdx].index + headings[substantiveIdx].text.length;
+    const endIdx = substantiveIdx + 1 < headings.length
+      ? headings[substantiveIdx + 1].index
+      : text.length;
+
+    body = text.slice(startIdx, endIdx).trim();
+  } else {
+    // No headings — use entire text
+    body = text.trim();
+  }
+
+  // Strip markdown formatting
+  body = body
+    // Remove markdown table rows
+    .replace(/^\|.*\|$/gm, '')
+    // Remove table separator lines
+    .replace(/^\s*\|?[-:| ]+\|?\s*$/gm, '')
+    // Remove bold/italic markers
+    .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
+    // Remove inline code
+    .replace(/`([^`]+)`/g, '$1')
+    // Remove links, keep text
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    // Remove heading markers
+    .replace(/^#{1,4}\s+/gm, '')
+    // Remove bullet markers
+    .replace(/^\s*[-*+]\s+/gm, '')
+    // Collapse whitespace
+    .replace(/\n{2,}/g, ' ')
+    .replace(/\n/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  if (!body) return null;
+
+  // Cap at ~300 chars at a sentence boundary
+  if (body.length <= 300) return body;
+
+  // Find last sentence boundary before 300 chars
+  const truncated = body.slice(0, 320);
+  const sentenceEnd = truncated.search(/[.!?]\s(?=[A-Z])/);
+  if (sentenceEnd > 80) {
+    return body.slice(0, sentenceEnd + 1).trim();
+  }
+
+  // Fall back: cut at 300 at a word boundary
+  const wordBoundary = body.lastIndexOf(' ', 300);
+  return body.slice(0, wordBoundary > 200 ? wordBoundary : 300).trim() + '...';
+}
+
+/** Strip tool name prefixes to get a short name (e.g. "index_video").
+ *  Handles both hook-style (mcp__kuavi__kuavi_) and MCP-server-style (kuavi_) names. */
 export function shortToolName(fullName: string): string {
   return (fullName ?? '')
     .replace(/^mcp__kuavi__kuavi_/, '')
-    .replace(/^mcp__kuavi__/, '');
+    .replace(/^mcp__kuavi__/, '')
+    .replace(/^kuavi_/, '');
 }
 
 export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
@@ -465,8 +564,10 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
     const respStr = typeof resp === 'string' ? resp : JSON.stringify(resp ?? '');
     // Truncation warnings from Claude Code are not real errors
     if (respStr.includes('exceeds maximum allowed tokens')) return false;
+    // Budget exceeded is a normal budget management signal, not a tool error
+    if (respStr.includes('BUDGET EXCEEDED')) return false;
     if (tc.has_error) return true;
-    return respStr.includes('Error:') || respStr.includes('BUDGET EXCEEDED');
+    return respStr.includes('Error:');
   });
 
   // Extract final answer: prefer the first final_answer that appears after the last tool call.
@@ -509,6 +610,7 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
     isComplete,
     hasErrors,
     finalAnswer,
+    finalAnswerBrief: extractFinalAnswerBrief(finalAnswer ?? ''),
   };
 }
 
