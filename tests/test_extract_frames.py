@@ -1,4 +1,4 @@
-"""Tests for VideoRLM._make_extract_frames and the extract_frames closure."""
+"""Tests for make_extract_frames and the extract_frames closure."""
 
 import base64
 
@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
-from rlm.video.video_rlm import VideoRLM
+from kuavi.context import make_extract_frames
 
 
 def _make_synthetic_video(
@@ -31,7 +31,7 @@ class TestExtractFramesReturnsTaggedDicts:
 
     def test_returns_list_of_tagged_image_dicts(self, tmp_path):
         video_path = _make_synthetic_video(str(tmp_path / "test.mp4"), num_frames=30, fps=30.0)
-        extract_frames = VideoRLM._make_extract_frames(video_path)
+        extract_frames = make_extract_frames(video_path)
 
         result = extract_frames(start_time=0.0, end_time=0.5, fps=2.0, max_frames=10)
 
@@ -48,7 +48,7 @@ class TestExtractFramesReturnsTaggedDicts:
 
     def test_default_mime_type_is_jpeg(self, tmp_path):
         video_path = _make_synthetic_video(str(tmp_path / "test.mp4"), num_frames=30, fps=30.0)
-        extract_frames = VideoRLM._make_extract_frames(video_path, image_format=".jpg")
+        extract_frames = make_extract_frames(video_path, image_format=".jpg")
 
         result = extract_frames(start_time=0.0, end_time=0.5)
         for frame_dict in result:
@@ -56,7 +56,7 @@ class TestExtractFramesReturnsTaggedDicts:
 
     def test_png_format(self, tmp_path):
         video_path = _make_synthetic_video(str(tmp_path / "test.mp4"), num_frames=30, fps=30.0)
-        extract_frames = VideoRLM._make_extract_frames(video_path, image_format=".png")
+        extract_frames = make_extract_frames(video_path, image_format=".png")
 
         result = extract_frames(start_time=0.0, end_time=0.5)
         for frame_dict in result:
@@ -68,7 +68,7 @@ class TestExtractFramesMaxFrames:
 
     def test_max_frames_limits_output(self, tmp_path):
         video_path = _make_synthetic_video(str(tmp_path / "test.mp4"), num_frames=90, fps=30.0)
-        extract_frames = VideoRLM._make_extract_frames(video_path)
+        extract_frames = make_extract_frames(video_path)
 
         # Request high fps over a large range — should be capped by max_frames
         result = extract_frames(start_time=0.0, end_time=3.0, fps=30.0, max_frames=5)
@@ -76,7 +76,7 @@ class TestExtractFramesMaxFrames:
 
     def test_returns_fewer_when_range_has_fewer_frames(self, tmp_path):
         video_path = _make_synthetic_video(str(tmp_path / "test.mp4"), num_frames=30, fps=30.0)
-        extract_frames = VideoRLM._make_extract_frames(video_path)
+        extract_frames = make_extract_frames(video_path)
 
         # Very short range at low fps — should return fewer than max_frames
         result = extract_frames(start_time=0.0, end_time=0.5, fps=2.0, max_frames=100)
@@ -89,14 +89,14 @@ class TestExtractFramesEdgeCases:
 
     def test_start_greater_than_end_raises(self, tmp_path):
         video_path = _make_synthetic_video(str(tmp_path / "test.mp4"), num_frames=30, fps=30.0)
-        extract_frames = VideoRLM._make_extract_frames(video_path)
+        extract_frames = make_extract_frames(video_path)
 
         with pytest.raises(ValueError, match="end_time.*must be greater than start_time"):
             extract_frames(start_time=2.0, end_time=1.0)
 
     def test_start_equals_end_raises(self, tmp_path):
         video_path = _make_synthetic_video(str(tmp_path / "test.mp4"), num_frames=30, fps=30.0)
-        extract_frames = VideoRLM._make_extract_frames(video_path)
+        extract_frames = make_extract_frames(video_path)
 
         with pytest.raises(ValueError, match="end_time.*must be greater than start_time"):
             extract_frames(start_time=1.0, end_time=1.0)
@@ -104,7 +104,7 @@ class TestExtractFramesEdgeCases:
     def test_time_range_beyond_video_returns_empty_or_partial(self, tmp_path):
         # 30 frames at 30fps = 1 second video
         video_path = _make_synthetic_video(str(tmp_path / "test.mp4"), num_frames=30, fps=30.0)
-        extract_frames = VideoRLM._make_extract_frames(video_path)
+        extract_frames = make_extract_frames(video_path)
 
         # Entirely beyond video duration — should be clamped and return empty
         result = extract_frames(start_time=5.0, end_time=10.0)
@@ -114,7 +114,7 @@ class TestExtractFramesEdgeCases:
     def test_partial_overlap_returns_frames(self, tmp_path):
         # 30 frames at 30fps = 1 second video
         video_path = _make_synthetic_video(str(tmp_path / "test.mp4"), num_frames=30, fps=30.0)
-        extract_frames = VideoRLM._make_extract_frames(video_path)
+        extract_frames = make_extract_frames(video_path)
 
         # Range partially overlaps with video
         result = extract_frames(start_time=0.5, end_time=5.0, fps=2.0)
@@ -125,7 +125,7 @@ class TestExtractFramesEdgeCases:
         video_path = _make_synthetic_video(
             str(tmp_path / "test.mp4"), num_frames=30, fps=30.0, width=64, height=48
         )
-        extract_frames = VideoRLM._make_extract_frames(video_path)
+        extract_frames = make_extract_frames(video_path)
 
         result = extract_frames(start_time=0.0, end_time=0.5, fps=2.0, resize=(32, 24))
         assert len(result) > 0
@@ -138,7 +138,7 @@ class TestExtractFramesEdgeCases:
         assert img.shape[0] == 24  # height
 
     def test_invalid_video_path_raises(self):
-        extract_frames = VideoRLM._make_extract_frames("/nonexistent/video.mp4")
+        extract_frames = make_extract_frames("/nonexistent/video.mp4")
 
         with pytest.raises(ValueError, match="Cannot open video file"):
             extract_frames(start_time=0.0, end_time=1.0)

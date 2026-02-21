@@ -1,4 +1,4 @@
-import { RLMIteration, RLMLogFile, LogMetadata, RLMConfigMetadata, extractFinalAnswer } from './types';
+import { RLMIteration, RLMLogFile, LogMetadata, RLMConfigMetadata, extractFinalAnswer, KUAViEvent, KUAViLogFile, KUAViLogMetadata, KUAViToolCall, KUAViFinalAnswerEvent, LogFile } from './types';
 
 // Extract the context variable from code block locals
 export function extractContextVariable(iterations: RLMIteration[]): string | null {
@@ -250,10 +250,190 @@ export function computeMetadata(iterations: RLMIteration[], config: RLMConfigMet
   };
 }
 
-export function parseLogFile(fileName: string, content: string): RLMLogFile {
+// ─── KUAVi JSONL Parsing ─────────────────────────────────────────────
+
+export function parseKUAViJSONL(content: string): KUAViEvent[] {
+  return content
+    .trim()
+    .split('\n')
+    .filter((line) => line.trim())
+    .map((line) => {
+      try {
+        const event = JSON.parse(line) as KUAViEvent;
+        // Hook script double-serializes tool_response via jq — parse it if it's a string
+        if (event.type === 'tool_call' && typeof (event as KUAViToolCall).tool_response === 'string') {
+          try {
+            (event as KUAViToolCall).tool_response = JSON.parse((event as KUAViToolCall).tool_response as string);
+          } catch {
+            // Keep as string if not valid JSON
+          }
+        }
+        // Same for tool_input if double-serialized
+        if (event.type === 'tool_call' && typeof (event as KUAViToolCall).tool_input === 'string') {
+          try {
+            (event as KUAViToolCall).tool_input = JSON.parse((event as KUAViToolCall).tool_input as unknown as string);
+          } catch {
+            // Keep as string
+          }
+        }
+        return event;
+      } catch {
+        return null;
+      }
+    })
+    .filter((e): e is KUAViEvent => e !== null);
+}
+
+/** Strip the mcp__kuavi__kuavi_ or mcp__kuavi__ prefix to get a short tool name */
+export function shortToolName(fullName: string): string {
+  return (fullName ?? '')
+    .replace(/^mcp__kuavi__kuavi_/, '')
+    .replace(/^mcp__kuavi__/, '');
+}
+
+export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
+  const toolCalls = events.filter((e): e is KUAViToolCall => e.type === 'tool_call');
+  const agentStarts = events.filter((e) => e.type === 'agent_start');
+  const sessionStart = events.find((e) => e.type === 'session_start');
+
+  // Tool breakdown
+  const toolBreakdown: Record<string, number> = {};
+  for (const tc of toolCalls) {
+    const name = shortToolName(tc.tool_name);
+    toolBreakdown[name] = (toolBreakdown[name] || 0) + 1;
+  }
+
+  // Count searches and frames
+  const totalSearches = toolCalls.filter(
+    (tc) => tc.tool_name.includes('search') || tc.tool_name.includes('discriminative_vqa')
+  ).length;
+
+  const frameCalls = toolCalls.filter((tc) => tc.tool_name.includes('extract_frames') || tc.tool_name.includes('zoom_frames'));
+  let totalFramesExtracted = 0;
+  for (const fc of frameCalls) {
+    const resp = fc.tool_response;
+    // MCP tools wrap results in {result: [...]}
+    const unwrapped = typeof resp === 'object' && resp !== null && 'result' in resp
+      ? (resp as Record<string, unknown>).result
+      : resp;
+    if (Array.isArray(unwrapped)) {
+      totalFramesExtracted += unwrapped.length;
+    } else if (typeof resp !== 'string' || !resp.startsWith('Error')) {
+      totalFramesExtracted += 1;
+    }
+  }
+
+  // Detect video path from index_video input
+  let videoPath: string | null = null;
+  const indexCall = toolCalls.find((tc) => tc.tool_name.includes('index_video'));
+  if (indexCall?.tool_input?.video_path) {
+    videoPath = String(indexCall.tool_input.video_path);
+  }
+
+  // Detect question from search or analyze calls
+  let question: string | null = null;
+  const searchCall = toolCalls.find((tc) => tc.tool_name.includes('search_video'));
+  if (searchCall?.tool_input?.query) {
+    question = String(searchCall.tool_input.query);
+  }
+
+  // Session duration — use tool call span, not total event span
+  // (agent_stop / final_answer events from teammates can trail hours later)
+  let sessionDuration = 0;
+  if (toolCalls.length >= 2) {
+    const first = new Date(toolCalls[0].timestamp).getTime();
+    const last = new Date(toolCalls[toolCalls.length - 1].timestamp).getTime();
+    sessionDuration = Math.max(0, (last - first) / 1000);
+  }
+
+  // Model from session_start
+  const model = sessionStart && 'model' in sessionStart ? (sessionStart.model ?? null) : null;
+
+  // isComplete: has index_video AND at least one search/VQA/scene_list call
+  const hasIndex = toolCalls.some((tc) => tc.tool_name.includes('index_video'));
+  const hasFollowUp = toolCalls.some(
+    (tc) =>
+      tc.tool_name.includes('search') ||
+      tc.tool_name.includes('discriminative_vqa') ||
+      tc.tool_name.includes('scene_list')
+  );
+  const isComplete = hasIndex && hasFollowUp;
+
+  // hasErrors: check has_error field first, then fall back to response string matching
+  const hasErrors = toolCalls.some((tc) => {
+    if (tc.has_error) return true;
+    const resp = tc.tool_response;
+    const respStr = typeof resp === 'string' ? resp : JSON.stringify(resp ?? '');
+    if (respStr.includes('exceeds maximum allowed tokens')) return false;
+    return respStr.includes('Error:') || respStr.includes('BUDGET EXCEEDED');
+  });
+
+  // Extract final answer from the last final_answer event
+  const finalAnswerEvents = events.filter(
+    (e): e is KUAViFinalAnswerEvent => e.type === 'final_answer'
+  );
+  const finalAnswer = finalAnswerEvents.length > 0
+    ? finalAnswerEvents[finalAnswerEvents.length - 1].text
+    : null;
+
+  return {
+    totalToolCalls: toolCalls.length,
+    totalAgentSpawns: agentStarts.length,
+    totalFramesExtracted,
+    totalSearches,
+    sessionDuration,
+    model,
+    videoPath,
+    question,
+    toolBreakdown,
+    hasFrames: totalFramesExtracted > 0,
+    isComplete,
+    hasErrors,
+    finalAnswer,
+  };
+}
+
+export function parseLogFile(fileName: string, content: string): LogFile {
+  const firstLine = content.trim().split('\n')[0];
+  if (!firstLine) {
+    // Empty file, return empty RLM log
+    return {
+      fileName,
+      filePath: fileName,
+      iterations: [],
+      metadata: computeMetadata([], getDefaultConfig()),
+      config: getDefaultConfig(),
+    };
+  }
+
+  try {
+    const first = JSON.parse(firstLine);
+
+    // KUAVi format detection
+    if (
+      first.type === 'tool_call' ||
+      first.type === 'session_start' ||
+      first.type === 'agent_start' ||
+      first.type === 'session_end' ||
+      first.type === 'agent_stop' ||
+      first.type === 'final_answer'
+    ) {
+      const events = parseKUAViJSONL(content);
+      return {
+        fileName,
+        filePath: fileName,
+        events,
+        metadata: computeKUAViMetadata(events),
+      };
+    }
+  } catch {
+    // Fall through to RLM parsing
+  }
+
+  // RLM format (default)
   const { iterations, config } = parseJSONL(content);
   const metadata = computeMetadata(iterations, config);
-  
+
   return {
     fileName,
     filePath: fileName,

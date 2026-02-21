@@ -6,55 +6,54 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { FileUploader } from './FileUploader';
 import { LogViewer } from './LogViewer';
+import { KUAViLogViewer } from './KUAViLogViewer';
 import { AsciiRLM } from './AsciiGlobe';
 import { ThemeToggle } from './ThemeToggle';
-import { parseLogFile, extractContextVariable } from '@/lib/parse-logs';
-import { RLMLogFile } from '@/lib/types';
+import { parseLogFile } from '@/lib/parse-logs';
+import { LogFile, isKUAViLog, isRLMLog } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface DemoLogInfo {
   fileName: string;
   contextPreview: string | null;
-  hasFinalAnswer: boolean;
-  iterations: number;
+  traceType: 'rlm' | 'kuavi';
+  toolCount: number;
+  size: number;
+  mtime: string;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function Dashboard() {
-  const [logFiles, setLogFiles] = useState<RLMLogFile[]>([]);
-  const [selectedLog, setSelectedLog] = useState<RLMLogFile | null>(null);
+  const [logFiles, setLogFiles] = useState<LogFile[]>([]);
+  const [selectedLog, setSelectedLog] = useState<LogFile | null>(null);
   const [demoLogs, setDemoLogs] = useState<DemoLogInfo[]>([]);
   const [loadingDemos, setLoadingDemos] = useState(true);
 
-  // Load demo log previews on mount - fetches latest 10 from API
+  // Load demo log previews on mount - single API call, no file content fetching
   useEffect(() => {
     async function loadDemoPreviews() {
       try {
-        // Fetch list of log files from API
         const listResponse = await fetch('/api/logs');
         if (!listResponse.ok) {
           throw new Error('Failed to fetch log list');
         }
         const { files } = await listResponse.json();
-        
-        const results = await Promise.allSettled(
-          files.map(async (fileName: string) => {
-            const response = await fetch(`/api/logs/${fileName}`);
-            if (!response.ok) throw new Error(`Failed to fetch ${fileName}`);
-            const content = await response.text();
-            const parsed = parseLogFile(fileName, content);
-            const contextVar = extractContextVariable(parsed.iterations);
-            return {
-              fileName,
-              contextPreview: contextVar,
-              hasFinalAnswer: !!parsed.metadata.finalAnswer,
-              iterations: parsed.metadata.totalIterations,
-            } as DemoLogInfo;
-          })
-        );
 
-        const previews = results
-          .filter((r): r is PromiseFulfilledResult<DemoLogInfo> => r.status === 'fulfilled')
-          .map(r => r.value);
+        const previews: DemoLogInfo[] = files.map((f: { name: string; size: number; mtime: string; traceType: string; lineCount: number; toolCallCount?: number; model: string | null; videoPath: string | null }) => ({
+          fileName: f.name,
+          contextPreview: f.videoPath
+            ? f.videoPath.split('/').pop() ?? f.videoPath
+            : f.model ?? null,
+          traceType: f.traceType as 'rlm' | 'kuavi',
+          toolCount: f.traceType === 'kuavi' ? (f.toolCallCount ?? f.lineCount) : f.lineCount,
+          size: f.size,
+          mtime: f.mtime,
+        }));
 
         setDemoLogs(previews);
       } catch (e) {
@@ -62,7 +61,7 @@ export function Dashboard() {
         setLoadingDemos(false);
       }
     }
-    
+
     loadDemoPreviews();
   }, []);
 
@@ -89,10 +88,18 @@ export function Dashboard() {
   }, [handleFileLoaded]);
 
   if (selectedLog) {
+    if (isKUAViLog(selectedLog)) {
+      return (
+        <KUAViLogViewer
+          logFile={selectedLog}
+          onBack={() => setSelectedLog(null)}
+        />
+      );
+    }
     return (
-      <LogViewer 
-        logFile={selectedLog} 
-        onBack={() => setSelectedLog(null)} 
+      <LogViewer
+        logFile={selectedLog}
+        onBack={() => setSelectedLog(null)}
       />
     );
   }
@@ -103,7 +110,7 @@ export function Dashboard() {
       <div className="absolute inset-0 grid-pattern opacity-30 dark:opacity-15" />
       <div className="absolute top-0 left-1/3 w-[500px] h-[500px] bg-primary/5 rounded-full blur-3xl" />
       <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-primary/3 rounded-full blur-3xl" />
-      
+
       <div className="relative z-10">
         {/* Header */}
         <header className="border-b border-border">
@@ -111,11 +118,11 @@ export function Dashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-3xl font-bold tracking-tight">
-                  <span className="text-primary">RLM</span>
-                  <span className="text-muted-foreground ml-2 font-normal">Visualizer</span>
+                  <span className="text-primary">KUAVi</span>
+                  <span className="text-muted-foreground ml-2 font-normal">Trace Visualizer</span>
                 </h1>
                 <p className="text-sm text-muted-foreground mt-1">
-                  Debug recursive language model execution traces
+                  RLM &amp; Agent Orchestration Traces
                 </p>
               </div>
               <div className="flex items-center gap-4">
@@ -144,12 +151,12 @@ export function Dashboard() {
                 </h2>
                 <FileUploader onFileLoaded={handleFileLoaded} />
               </div>
-              
+
               {/* ASCII Architecture Diagram */}
               <div className="hidden lg:block">
                 <h2 className="text-sm font-medium mb-3 flex items-center gap-2 text-muted-foreground">
                   <span className="text-primary font-mono">◈</span>
-                  RLM Architecture
+                  Architecture
                 </h2>
                 <div className="bg-muted/50 border border-border rounded-lg p-4 overflow-x-auto">
                   <AsciiRLM />
@@ -164,9 +171,9 @@ export function Dashboard() {
                 <h2 className="text-sm font-medium mb-3 flex items-center gap-2 text-muted-foreground">
                   <span className="text-primary font-mono">02</span>
                   Recent Traces
-                  <span className="text-[10px] text-muted-foreground/60 ml-1">(latest 10)</span>
+                  <span className="text-[10px] text-muted-foreground/60 ml-1">(latest 20)</span>
                 </h2>
-                
+
                 {loadingDemos ? (
                   <Card>
                     <CardContent className="p-6 text-center">
@@ -195,32 +202,40 @@ export function Dashboard() {
                         >
                           <CardContent className="p-3">
                             <div className="flex items-center gap-3">
-                              {/* Status indicator */}
+                              {/* Trace type indicator */}
                               <div className="relative flex-shrink-0">
                                 <div className={cn(
                                   'w-2.5 h-2.5 rounded-full',
-                                  demo.hasFinalAnswer 
-                                    ? 'bg-primary' 
-                                    : 'bg-muted-foreground/30'
+                                  demo.traceType === 'kuavi'
+                                    ? 'bg-violet-500'
+                                    : 'bg-sky-500'
                                 )} />
-                                {demo.hasFinalAnswer && (
-                                  <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-primary animate-ping opacity-50" />
-                                )}
                               </div>
-                              
+
                               {/* Content */}
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-1">
-                                  <span className="font-mono text-xs text-foreground/80">
+                                  <span className="font-mono text-xs text-foreground/80 truncate">
                                     {demo.fileName}
                                   </span>
                                   <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4">
-                                    {demo.iterations} iter
+                                    ~{demo.toolCount} {demo.traceType === 'kuavi' ? 'tools' : 'iter'}
+                                  </Badge>
+                                  <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 text-muted-foreground">
+                                    {formatFileSize(demo.size)}
+                                  </Badge>
+                                  <Badge variant="outline" className={cn(
+                                    "text-[9px] px-1.5 py-0 h-4",
+                                    demo.traceType === 'kuavi'
+                                      ? "bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/30"
+                                      : "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/30"
+                                  )}>
+                                    {demo.traceType === 'kuavi' ? 'KUAVi' : 'RLM'}
                                   </Badge>
                                 </div>
                                 {demo.contextPreview && (
                                   <p className="text-[11px] font-mono text-muted-foreground truncate">
-                                    {demo.contextPreview.length > 80 
+                                    {demo.contextPreview.length > 80
                                       ? demo.contextPreview.slice(0, 80) + '...'
                                       : demo.contextPreview}
                                   </p>
@@ -258,11 +273,17 @@ export function Dashboard() {
                               <div className="relative flex-shrink-0">
                                 <div className={cn(
                                   'w-2.5 h-2.5 rounded-full',
-                                  log.metadata.finalAnswer 
-                                    ? 'bg-primary' 
-                                    : 'bg-muted-foreground/30'
+                                  isKUAViLog(log)
+                                    ? log.metadata.hasErrors
+                                      ? 'bg-red-500'
+                                      : log.metadata.isComplete
+                                        ? 'bg-primary'
+                                        : 'bg-muted-foreground/30'
+                                    : log.metadata.finalAnswer
+                                      ? 'bg-primary'
+                                      : 'bg-muted-foreground/30'
                                 )} />
-                                {log.metadata.finalAnswer && (
+                                {(isKUAViLog(log) ? (log.metadata.isComplete && !log.metadata.hasErrors) : (isRLMLog(log) && log.metadata.finalAnswer)) && (
                                   <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-primary animate-ping opacity-50" />
                                 )}
                               </div>
@@ -272,11 +293,21 @@ export function Dashboard() {
                                     {log.fileName}
                                   </span>
                                   <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4">
-                                    {log.metadata.totalIterations} iter
+                                    {isKUAViLog(log) ? `${log.metadata.totalToolCalls} tools` : `${log.metadata.totalIterations} iter`}
+                                  </Badge>
+                                  <Badge variant="outline" className={cn(
+                                    "text-[9px] px-1.5 py-0 h-4",
+                                    isKUAViLog(log)
+                                      ? "bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/30"
+                                      : "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/30"
+                                  )}>
+                                    {isKUAViLog(log) ? 'KUAVi' : 'RLM'}
                                   </Badge>
                                 </div>
                                 <p className="text-[11px] text-muted-foreground truncate">
-                                  {log.metadata.contextQuestion}
+                                  {isKUAViLog(log)
+                                    ? (log.metadata.question || log.metadata.videoPath || 'KUAVi trace')
+                                    : log.metadata.contextQuestion}
                                 </p>
                               </div>
                             </div>
@@ -295,10 +326,10 @@ export function Dashboard() {
         <footer className="border-t border-border mt-8">
           <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
             <p className="text-[10px] text-muted-foreground font-mono">
-              RLM Visualizer • Recursive Language Models
+              KUAVi Trace Visualizer • RLM &amp; Agent Orchestration
             </p>
             <p className="text-[10px] text-muted-foreground font-mono">
-              Prompt → [LM ↔ REPL] → Answer
+              Prompt → [LM ↔ Tools] → Answer
             </p>
           </div>
         </footer>

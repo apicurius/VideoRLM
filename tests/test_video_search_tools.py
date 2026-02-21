@@ -40,7 +40,7 @@ except ImportError:
     sys.modules.setdefault("sklearn.metrics.pairwise", _pairwise_mod)
     sys.modules.setdefault("sklearn.cluster", _cluster_mod)
 
-from rlm.video.video_search_tools import (
+from kuavi.search import (
     make_discriminative_vqa,
     make_get_scene_list,
     make_get_transcript,
@@ -689,7 +689,7 @@ class TestMultiScaleSearchEfficiency:
 
     def test_coarse_level_fewer_segments(self):
         """_build_coarse_level merges 30 fine 5s segments into 5 coarse 30s segments."""
-        from rlm.video.video_indexer import VideoIndexer
+        from kuavi.indexer import VideoIndexer
 
         n_fine = 30
         seg_dur = 5.0
@@ -774,7 +774,7 @@ class TestMultiScaleSearchEfficiency:
 
     def test_search_space_reduction_ratio(self):
         """Coarse level has at least 3x fewer segments than fine level for 150s/5s video."""
-        from rlm.video.video_indexer import VideoIndexer
+        from kuavi.indexer import VideoIndexer
 
         n_fine = 30  # 30 segments * 5s = 150s
         seg_dur = 5.0

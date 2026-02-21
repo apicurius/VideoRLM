@@ -9,6 +9,7 @@ interface StatsCardProps {
   icon: React.ReactNode;
   variant?: 'cyan' | 'magenta' | 'yellow' | 'green' | 'red';
   subtext?: string;
+  compact?: boolean;
 }
 
 const variantStyles = {
@@ -27,22 +28,29 @@ const textStyles = {
   red: 'text-red-600 dark:text-red-400',
 };
 
-export function StatsCard({ label, value, icon, variant = 'cyan', subtext }: StatsCardProps) {
+export function StatsCard({ label, value, icon, variant = 'cyan', subtext, compact }: StatsCardProps) {
   return (
     <Card className={cn(
       'border transition-all duration-300 hover:scale-[1.02]',
       variantStyles[variant]
     )}>
-      <CardContent className="p-4">
-        <div className="flex items-center gap-3">
-          <div className={cn('text-2xl', textStyles[variant])}>
+      <CardContent className={compact ? 'p-2' : 'p-4'}>
+        <div className={cn('flex items-center', compact ? 'gap-1.5' : 'gap-3')}>
+          <div className={cn(compact ? 'text-xl' : 'text-2xl', textStyles[variant])}>
             {icon}
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-xs uppercase tracking-wider text-muted-foreground font-medium">
+            <p className={cn(
+              'uppercase tracking-wider text-muted-foreground font-medium',
+              compact ? 'text-[10px]' : 'text-xs'
+            )}>
               {label}
             </p>
-            <p className={cn('text-2xl font-bold tracking-tight', textStyles[variant])}>
+            <p className={cn(
+              'font-bold tracking-tight',
+              compact ? 'text-lg' : 'text-2xl',
+              textStyles[variant]
+            )}>
               {value}
             </p>
             {subtext && (

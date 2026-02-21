@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from rlm.video.video_indexer import VideoIndex, VideoIndexer, _cache_key
+from kuavi.indexer import VideoIndex, VideoIndexer, _cache_key
 
 
 def _fake_encode(frames, *, dim=4, **kw):
@@ -14,7 +14,7 @@ def _fake_encode(frames, *, dim=4, **kw):
     Uses mean pixel value as a seed so different frames produce different
     embedding directions.  This prevents ``_pre_caption_dedup`` from
     merging segments that should remain distinct, while keeping within-
-    segment diversity high enough to avoid ``_selective_decode`` skipping.
+    segment diversity high enough for meaningful ``_selective_decode`` variance.
     """
     rows = []
     for f in frames:
@@ -86,7 +86,7 @@ class TestVideoIndexerIndexVideo:
         mock_video.segments = []
         return mock_video
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_index_video_no_caption_no_whisper(self, mock_detect_scenes):
         """Index a video without captions or ASR — scene detection still runs."""
         mock_detect_scenes.return_value = [(0.0, 2.5), (2.5, 4.5)]
@@ -110,7 +110,7 @@ class TestVideoIndexerIndexVideo:
         assert result.embed_fn is not None
         mock_detect_scenes.assert_called_once()
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_index_video_with_caption(self, mock_detect_scenes):
         """When a caption_fn is provided, segments get captions and embeddings."""
         mock_detect_scenes.return_value = [(0.0, 2.5), (2.5, 4.5)]
@@ -139,7 +139,7 @@ class TestVideoIndexerIndexVideo:
         assert np.array_equal(result.action_embeddings, fake_action_embeddings)
         assert caption_fn.call_count == 2
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_index_video_uses_loaded_segments(self, mock_detect_scenes):
         """If LoadedVideo has pre-existing segments, those are used."""
         mock_detect_scenes.return_value = [(0.0, 4.5)]
@@ -170,7 +170,7 @@ class TestVideoIndexerIndexVideo:
         assert result.segments[0]["start_time"] == 0.0
         assert result.segments[1]["start_time"] == 2.0
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_scene_boundaries_populated(self, mock_detect_scenes):
         mock_detect_scenes.return_value = [(0.0, 3.0), (3.0, 5.0)]
 
@@ -186,7 +186,7 @@ class TestVideoIndexerIndexVideo:
 
         assert result.scene_boundaries == [0.0, 3.0]
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_index_video_with_dict_caption(self, mock_detect_scenes):
         """caption_fn returning a dict populates annotation directly."""
         mock_detect_scenes.return_value = [(0.0, 4.5)]
@@ -217,7 +217,7 @@ class TestVideoIndexerIndexVideo:
         assert result.segments[0]["caption"] == "cat sits"
         assert np.array_equal(result.action_embeddings, fake_action_emb)
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_refine_fn_called_in_index_video(self, mock_detect_scenes):
         """When refine_fn is provided, it is called 3 rounds per segment."""
         mock_detect_scenes.return_value = [(0.0, 4.5)]
@@ -245,7 +245,7 @@ class TestVideoIndexerIndexVideo:
         # 3 rounds × 1 segment = 3 calls
         assert refine_fn.call_count == 3
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_asr_context_injected_into_caption_fn(self, mock_detect_scenes):
         """When transcript overlaps a segment, ASR text is prepended to frames."""
         mock_detect_scenes.return_value = [(0.0, 4.5)]
@@ -350,7 +350,7 @@ class TestVideoIndexerStructuredAnnotations:
         mock_video.segments = []
         return mock_video
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_structured_caption_fn(self, mock_detect_scenes):
         """caption_fn returning a structured dict should populate annotation."""
         mock_detect_scenes.return_value = [(0.0, 4.5)]
@@ -379,7 +379,7 @@ class TestVideoIndexerStructuredAnnotations:
         assert seg["annotation"] == annotation
         assert seg["caption"] == "A cat sitting"
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_string_caption_fn_backward_compat(self, mock_detect_scenes):
         """caption_fn returning a plain string should be wrapped into annotation."""
         mock_detect_scenes.return_value = [(0.0, 4.5)]
@@ -566,7 +566,7 @@ class TestVideoIndexerCache:
         mock_video.segments = []
         return mock_video
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_cache_dir_saves_and_loads(self, mock_detect_scenes, tmp_path):
         """First call saves to cache; second call loads from cache."""
         mock_detect_scenes.return_value = [(0.0, 2.5), (2.5, 4.5)]
@@ -613,7 +613,7 @@ class TestDetectScenesHierarchical:
 
     def test_returns_multiple_levels(self):
         """detect_scenes_hierarchical returns one level per threshold."""
-        from rlm.video.scene_detection import detect_scenes_hierarchical
+        from kuavi.scene_detection import detect_scenes_hierarchical
 
         rng = np.random.default_rng(42)
         n = 30
@@ -636,7 +636,7 @@ class TestDetectScenesHierarchical:
 
     def test_coarser_levels_have_fewer_scenes(self):
         """Higher thresholds should produce fewer or equal scenes."""
-        from rlm.video.scene_detection import detect_scenes_hierarchical
+        from kuavi.scene_detection import detect_scenes_hierarchical
 
         rng = np.random.default_rng(123)
         n = 50
@@ -664,7 +664,7 @@ class TestDetectScenesHierarchical:
 
     def test_empty_frames(self):
         """Empty input returns empty levels."""
-        from rlm.video.scene_detection import detect_scenes_hierarchical
+        from kuavi.scene_detection import detect_scenes_hierarchical
 
         result = detect_scenes_hierarchical([], [], lambda f: np.empty((0, 8)))
         assert all(lvl == [] for lvl in result["levels"])
@@ -683,7 +683,7 @@ class TestHierarchicalIndexingRoundTrip:
         mock_video.segments = []
         return mock_video
 
-    @patch("rlm.video.video_indexer.detect_scenes_hierarchical")
+    @patch("kuavi.indexer.detect_scenes_hierarchical")
     def test_hierarchical_index_round_trip(self, mock_hier, tmp_path):
         """Hierarchical index should save and load correctly."""
         # Mock hierarchical detection to return 3 levels
@@ -853,7 +853,7 @@ class TestMultiScaleSearch:
         assert coarse_segs == []
         assert coarse_embs is None
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_coarse_level_added_in_index_video(self, mock_detect_scenes):
         """index_video should always add a coarse level when embeddings exist."""
         mock_detect_scenes.return_value = [(0.0, 2.5), (2.5, 4.5)]
@@ -887,10 +887,9 @@ class TestMultiScaleSearch:
 class TestSelectiveDecode:
     """Tests for Feature 4: Selective decoding."""
 
-    def test_selective_decode_marks_uniform(self):
-        """Segments with high pairwise similarity should be marked _skip_caption."""
+    def test_selective_decode_computes_variance(self):
+        """Segments with high pairwise similarity should have low _visual_variance but not be skipped."""
         indexer = VideoIndexer()
-        # Need at least 2 segments: one uniform (skip), one varied (keep)
         segments = [
             {"start_time": 0.0, "end_time": 5.0, "caption": ""},
             {"start_time": 5.0, "end_time": 10.0, "caption": ""},
@@ -898,10 +897,10 @@ class TestSelectiveDecode:
         frames = [np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(20)]
         timestamps = [float(i) * 0.5 for i in range(20)]
 
-        # First segment: identical unit vectors → pairwise sim = 1.0 → SKIP
+        # First segment: identical unit vectors → pairwise sim = 1.0
         uniform_embs = np.ones((10, 8), dtype=np.float32)
         uniform_embs = uniform_embs / np.linalg.norm(uniform_embs[0])
-        # Second segment: orthogonal unit vectors → pairwise sim ≈ 0 → KEEP
+        # Second segment: orthogonal unit vectors → pairwise sim ≈ 0
         varied_embs = np.eye(8, dtype=np.float32)
         varied_embs = np.vstack([varied_embs, varied_embs[:2]])  # 10 rows
 
@@ -916,11 +915,12 @@ class TestSelectiveDecode:
             with patch.object(indexer, "_encode_frames", side_effect=mock_encode):
                 indexer._selective_decode(segments, frames, timestamps)
 
-        assert segments[0].get("_skip_caption") is True
-        assert segments[0]["caption"] == "Static or visually uniform content"
-        assert segments[0].get("is_non_action") is True
-        # Second segment should NOT be skipped
-        assert segments[1].get("_skip_caption") is None
+        # Static segments should have low variance but NOT be skipped
+        assert segments[0]["_visual_variance"] < 0.01
+        assert segments[0].get("_skip_caption") is None
+        assert segments[0]["caption"] == ""  # not overwritten
+        # Varied segment should have higher variance
+        assert segments[1]["_visual_variance"] > 0.5
 
     def test_selective_decode_keeps_varied(self):
         """Segments with low pairwise similarity should not be skipped."""
@@ -1085,7 +1085,7 @@ class TestEmbeddingGemmaIntegration:
             indexer._encode_query_siglip.__func__ is not indexer._encode_query.__func__
         )
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_index_stores_visual_embed_fn(self, mock_detect_scenes):
         """index_video should set visual_embed_fn bound to _encode_query_siglip."""
         mock_detect_scenes.return_value = [(0.0, 2.5)]
@@ -1118,11 +1118,10 @@ class TestEmbeddingGemmaIntegration:
 class TestSelectiveDecodeEfficiency:
     """Tests proving selective decoding saves caption calls."""
 
-    def test_uniform_segments_skipped_ratio(self):
-        """Create 20 segments where ~70% are uniform; assert >=60% get _skip_caption."""
+    def test_uniform_segments_variance_computed(self):
+        """Create 20 segments where ~70% are uniform; verify variance is computed for all."""
         indexer = VideoIndexer()
 
-        # 20 segments of 5s each (0-100s), 5 frames per segment at 1fps
         num_segments = 20
         fps = 1.0
         seg_duration = 5.0
@@ -1142,7 +1141,6 @@ class TestSelectiveDecodeEfficiency:
         ]
         timestamps = [i / fps for i in range(total_frames)]
 
-        # 14 uniform segments (indices 0-13), 6 varied segments (indices 14-19)
         num_uniform = 14
         call_counter = {"n": 0}
         rng = np.random.default_rng(42)
@@ -1152,7 +1150,6 @@ class TestSelectiveDecodeEfficiency:
             call_counter["n"] += 1
             n = len(seg_frames)
             if idx < num_uniform:
-                # Near-identical unit vectors → pairwise sim ≈ 1.0
                 base = np.ones((1, 8), dtype=np.float32)
                 base = base / np.linalg.norm(base)
                 embs = np.tile(base, (n, 1))
@@ -1160,7 +1157,6 @@ class TestSelectiveDecodeEfficiency:
                 norms = np.linalg.norm(embs, axis=1, keepdims=True)
                 embs = embs / np.maximum(norms, 1e-10)
             else:
-                # Orthogonal unit vectors → pairwise sim ≈ 0
                 embs = np.eye(8, dtype=np.float32)
                 embs = np.tile(embs, (max(1, n // 8 + 1), 1))[:n]
             return embs
@@ -1169,20 +1165,17 @@ class TestSelectiveDecodeEfficiency:
             with patch.object(indexer, "_encode_frames", side_effect=mock_encode_frames):
                 indexer._selective_decode(segments, frames, timestamps)
 
-        skipped = sum(1 for s in segments if s.get("_skip_caption") is True)
-        # 14/20 = 70% are uniform; assert at least 60% skipped
-        assert skipped >= int(num_segments * 0.6), (
-            f"Expected at least {int(num_segments * 0.6)} skipped, got {skipped}"
-        )
-        # Verify the savings ratio: only ~30% need captioning → ~2.85x savings
-        caption_needed = num_segments - skipped
-        assert caption_needed <= int(num_segments * 0.4), (
-            f"Expected at most {int(num_segments * 0.4)} segments needing captions, "
-            f"got {caption_needed}"
-        )
+        # All segments should have variance computed, none should be skipped
+        for seg in segments:
+            assert "_visual_variance" in seg
+            assert seg.get("_skip_caption") is None
 
-    def test_mixed_video_caption_savings(self):
-        """10 segments: even=static, odd=dynamic. Verify exactly static ones skipped."""
+        # Uniform segments should have low variance
+        low_variance = sum(1 for s in segments if s["_visual_variance"] < 0.02)
+        assert low_variance >= num_uniform
+
+    def test_mixed_video_variance_classification(self):
+        """10 segments: even=static, odd=dynamic. Verify variance distinguishes them."""
         indexer = VideoIndexer()
 
         num_segments = 10
@@ -1205,18 +1198,15 @@ class TestSelectiveDecodeEfficiency:
         timestamps = [i / fps for i in range(total_frames)]
 
         call_counter = {"n": 0}
-        rng = np.random.default_rng(99)
 
         def mock_encode_frames(seg_frames, **kwargs):
             idx = call_counter["n"]
             call_counter["n"] += 1
             n = len(seg_frames)
             if idx % 2 == 0:
-                # Even index → static (identical unit vectors, sim = 1.0)
                 base = np.ones((1, 8), dtype=np.float32) / np.sqrt(8)
                 return np.tile(base, (n, 1))
             else:
-                # Odd index → dynamic (orthogonal unit vectors, sim ≈ 0)
                 embs = np.eye(8, dtype=np.float32)
                 return np.tile(embs, (max(1, n // 8 + 1), 1))[:n]
 
@@ -1225,11 +1215,13 @@ class TestSelectiveDecodeEfficiency:
                 indexer._selective_decode(segments, frames, timestamps)
 
         for i, seg in enumerate(segments):
+            # No segments should be skipped — all get captioned
+            assert seg.get("_skip_caption") is None
             if i % 2 == 0:
-                assert seg.get("_skip_caption") is True, (
-                    f"Segment {i} (static) should be skipped"
+                assert seg["_visual_variance"] < 0.02, (
+                    f"Segment {i} (static) should have low variance"
                 )
             else:
-                assert seg.get("_skip_caption") is not True, (
-                    f"Segment {i} (dynamic) should NOT be skipped"
+                assert seg["_visual_variance"] > 0.5, (
+                    f"Segment {i} (dynamic) should have high variance"
                 )

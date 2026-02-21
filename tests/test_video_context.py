@@ -6,8 +6,8 @@ import cv2
 import numpy as np
 import pytest
 
-from rlm.video.video_context import VideoContext, _encode_frame
-from rlm.video.video_loader import LoadedVideo, VideoMetadata, VideoSegment
+from kuavi.context import VideoContext, _encode_frame
+from kuavi.loader import LoadedVideo, VideoMetadata, VideoSegment
 
 
 def _make_frame(width: int = 8, height: int = 8, value: int = 128) -> np.ndarray:

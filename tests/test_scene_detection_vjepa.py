@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from rlm.video.video_indexer import VideoIndex, VideoIndexer
+from kuavi.indexer import VideoIndex, VideoIndexer
 
 
 def _fake_encode(frames, *, dim=4, **kw):
@@ -175,7 +175,7 @@ class TestIndexVideoWithSceneModel:
         mock_video.segments = []
         return mock_video
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_vjepa_path_called_when_scene_model_set(self, mock_detect_scenes):
         """When scene_model is set, V-JEPA 2 path is used for scene detection."""
         mock_detect_scenes.return_value = [(0.0, 4.0), (4.0, 7.5)]
@@ -205,7 +205,7 @@ class TestIndexVideoWithSceneModel:
         clip_reps = call_args[0][0]
         assert len(clip_reps) == 1  # 16 frames / 16 clip_size = 1 clip
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_siglip_path_when_no_scene_model(self, mock_detect_scenes):
         """When scene_model is None, the existing SigLIP2 path is used."""
         mock_detect_scenes.return_value = [(0.0, 4.0), (4.0, 7.5)]
@@ -227,7 +227,7 @@ class TestIndexVideoWithSceneModel:
         call_args = mock_detect_scenes.call_args
         assert len(call_args[0][0]) == 16  # all frames
 
-    @patch("rlm.video.video_indexer.detect_scenes")
+    @patch("kuavi.indexer.detect_scenes")
     def test_vjepa_clip_timestamps_are_midpoints(self, mock_detect_scenes):
         """V-JEPA 2 path should pass midpoint timestamps to detect_scenes."""
         mock_detect_scenes.return_value = [(1.0, 5.0)]

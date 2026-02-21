@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from rlm.video.video_loader import LoadedVideo, VideoLoader, VideoMetadata, VideoSegment
+from kuavi.loader import LoadedVideo, VideoLoader, VideoMetadata, VideoSegment
 
 
 def _make_synthetic_video(

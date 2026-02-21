@@ -57,7 +57,7 @@ def _install_shims():
 
 _install_shims()
 
-from rlm.video.scene_detection import detect_scenes  # noqa: E402
+from kuavi.scene_detection import detect_scenes  # noqa: E402
 
 
 @pytest.fixture(autouse=True, scope="module")

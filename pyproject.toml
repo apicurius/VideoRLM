@@ -1,10 +1,10 @@
 [project]
-name = "rlms"
+name = "kuavi"
 authors = [
     {name = "Alex Zhang", email = "altzhang@mit.edu"},
 ]
 version = "0.1.0"
-description = "Recursive Language Models."
+description = "KUAVi: Agentic Vision Intelligence for video analysis."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -19,14 +19,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "anthropic>=0.75.0",
-    "google-genai>=1.56.0",
-    "openai>=2.14.0",
-    "portkey-ai>=2.1.0",
-    "pytest>=9.0.2",
-    "python-dotenv>=1.2.1",
-    "requests>=2.32.5",
-    "rich>=13.0.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "scikit-learn>=1.4.0",
+    "mcp>=1.0.0",
 ]
 
 [project.urls]
@@ -35,25 +31,26 @@ Repository = "https://github.com/alexzhang13/rlm"
 Issues = "https://github.com/alexzhang13/rlm/issues"
 
 [project.optional-dependencies]
-modal = ["modal>=0.73.0", "dill>=0.3.7"]
-e2b = ["e2b-code-interpreter>=0.0.11", "dill>=0.3.7"]
-daytona = ["daytona>=0.128.1", "dill>=0.3.7"]
-prime = ["prime-sandboxes>=0.2.0", "dill>=0.3.7"]
-video = [
-    "opencv-python>=4.8.0",
-    "numpy>=1.24.0",
+embeddings = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
     "sentence-transformers>=3.0.0",
-    "faster-whisper>=1.1.0",
-    "scikit-learn>=1.4.0",
     "torchvision>=0.20.0",
 ]
+asr = [
+    "faster-whisper>=1.1.0",
+]
+
+[project.scripts]
+kuavi = "kuavi.cli:main"
+kuavi-mcp = "kuavi.mcp_server:mcp.run"
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["rlm", "rlm.*"]
+include = ["kuavi", "kuavi.*"]
 
 [dependency-groups]
 dev = [

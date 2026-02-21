@@ -4,11 +4,13 @@ import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
-// Type for the __image__ tagged dict from RLM traces
+// Type for image frames — supports both __image__-tagged dicts (RLM traces)
+// and KUAVi MCP format ({data, mime_type} without __image__ tag)
 interface ImageFrame {
-  __image__: true;
+  __image__?: true;
   data: string;
   mime_type: string;
+  timestamp?: string;
 }
 
 // A segment groups frames with optional metadata
@@ -26,11 +28,14 @@ interface VideoFrameViewerProps {
   className?: string;
 }
 
-/** Check if a value matches the __image__ tagged dict pattern */
+/** Check if a value matches an image frame pattern.
+ *  Accepts both __image__-tagged dicts and KUAVi MCP format ({data, mime_type}). */
 export function isImageFrame(value: unknown): value is ImageFrame {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
-  return obj.__image__ === true && typeof obj.data === 'string' && typeof obj.mime_type === 'string';
+  if (typeof obj.data !== 'string' || typeof obj.mime_type !== 'string') return false;
+  // Accept if __image__ tag is present OR if mime_type looks like an image
+  return obj.__image__ === true || (obj.mime_type as string).startsWith('image/');
 }
 
 /**
@@ -103,7 +108,9 @@ function FrameThumb({ frame, size, index }: { frame: ImageFrame; size: number; i
           loading="lazy"
         />
         <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/70 to-transparent px-1.5 py-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <span className="text-[9px] text-white font-mono">#{index + 1}</span>
+          <span className="text-[9px] text-white font-mono">
+            #{index + 1}{frame.timestamp ? ` · ${Number(frame.timestamp).toFixed(1)}s` : ''}
+          </span>
         </div>
       </button>
 

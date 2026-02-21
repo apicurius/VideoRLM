@@ -79,3 +79,73 @@ export function extractFinalAnswer(answer: string | [string, string] | null): st
   return answer;
 }
 
+// ─── KUAVi Trace Types ───────────────────────────────────────────────
+
+export interface KUAViToolCall {
+  type: "tool_call";
+  timestamp: string;
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_response: unknown;
+  duration_ms?: number | null;
+  has_error?: boolean;
+}
+
+export interface KUAViAgentEvent {
+  type: "agent_start" | "agent_stop";
+  timestamp: string;
+  agent_id: string;
+  agent_type: string;
+}
+
+export interface KUAViSessionEvent {
+  type: "session_start" | "session_end";
+  timestamp: string;
+  session_id?: string;
+  model?: string;
+  source?: string;
+  reason?: string;
+}
+
+export interface KUAViFinalAnswerEvent {
+  type: "final_answer";
+  timestamp: string;
+  text: string;
+}
+
+export type KUAViEvent = KUAViToolCall | KUAViAgentEvent | KUAViSessionEvent | KUAViFinalAnswerEvent;
+
+export interface KUAViLogMetadata {
+  totalToolCalls: number;
+  totalAgentSpawns: number;
+  totalFramesExtracted: number;
+  totalSearches: number;
+  sessionDuration: number;
+  model: string | null;
+  videoPath: string | null;
+  question: string | null;
+  toolBreakdown: Record<string, number>;
+  hasFrames: boolean;
+  isComplete: boolean;
+  hasErrors: boolean;
+  finalAnswer: string | null;
+}
+
+export interface KUAViLogFile {
+  fileName: string;
+  filePath: string;
+  events: KUAViEvent[];
+  metadata: KUAViLogMetadata;
+}
+
+// ─── Unified Log File Type ───────────────────────────────────────────
+
+export type LogFile = RLMLogFile | KUAViLogFile;
+
+export function isKUAViLog(log: LogFile): log is KUAViLogFile {
+  return 'events' in log;
+}
+
+export function isRLMLog(log: LogFile): log is RLMLogFile {
+  return 'iterations' in log;
+}
