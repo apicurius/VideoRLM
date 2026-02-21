@@ -60,6 +60,7 @@ def _build_gemini_parts(frames: list[Any]) -> list:
 def make_gemini_caption_fn(
     model: str = "gemini-2.5-flash",
     max_frames: int = 6,
+    api_key: str | None = None,
 ) -> callable:
     """Create a segment-level caption function using Gemini.
 
@@ -68,7 +69,7 @@ def make_gemini_caption_fn(
     """
     from google import genai
 
-    client = genai.Client()
+    client = genai.Client(api_key=api_key) if api_key else genai.Client()
 
     prompt_text = (
         "Analyze this video segment and produce a structured JSON annotation.\n\n"
@@ -131,6 +132,7 @@ def make_gemini_caption_fn(
 
 def make_gemini_frame_caption_fn(
     model: str = "gemini-2.5-flash",
+    api_key: str | None = None,
 ) -> callable:
     """Create a single-keyframe caption function using Gemini.
 
@@ -138,7 +140,7 @@ def make_gemini_frame_caption_fn(
     """
     from google import genai
 
-    client = genai.Client()
+    client = genai.Client(api_key=api_key) if api_key else genai.Client()
 
     prompt_text = (
         "Describe this single video frame in 1-2 sentences. "
@@ -163,6 +165,7 @@ def make_gemini_frame_caption_fn(
 
 def make_gemini_refine_fn(
     model: str = "gemini-2.5-flash",
+    api_key: str | None = None,
 ) -> callable:
     """Create a self-refine function using Gemini.
 
@@ -171,7 +174,7 @@ def make_gemini_refine_fn(
     """
     from google import genai
 
-    client = genai.Client()
+    client = genai.Client(api_key=api_key) if api_key else genai.Client()
 
     def refine_fn(draft: str, context: str, effort: str = "high") -> str:
         prompt = (
