@@ -1,6 +1,14 @@
 # Large test videos
 *.mp4
 
+# KUAVi cached indexes and experiment results
+cache/
+experiments/
+*.kuavi/
+
+# Misc images
+image.png
+
 # MacOS
 .DS_Store
 
