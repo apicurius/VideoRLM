@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kuavi": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "kuavi.mcp_server"]
+    }
+  }
+}

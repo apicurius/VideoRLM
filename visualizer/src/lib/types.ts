@@ -1,10 +1,24 @@
 // Types matching the RLM log format
 
+export interface ModelUsageSummary {
+  total_calls: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+}
+
+export interface UsageSummary {
+  model_usage_summaries: Record<string, ModelUsageSummary>;
+}
+
 export interface RLMChatCompletion {
+  root_model?: string;
   prompt: string | Record<string, unknown>;
   response: string;
-  prompt_tokens: number;
-  completion_tokens: number;
+  /** Newer log format: nested usage per model */
+  usage_summary?: UsageSummary;
+  /** Legacy fields (older logs) */
+  prompt_tokens?: number;
+  completion_tokens?: number;
   execution_time: number;
 }
 
@@ -81,14 +95,21 @@ export function extractFinalAnswer(answer: string | [string, string] | null): st
 
 // ─── KUAVi Trace Types ───────────────────────────────────────────────
 
+export interface KUAViTokenUsage {
+  input_tokens_approx: number;
+  output_tokens_approx: number;
+}
+
 export interface KUAViToolCall {
   type: "tool_call";
   timestamp: string;
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_response: unknown;
+  response_summary?: string | null;
   duration_ms?: number | null;
   has_error?: boolean;
+  token_usage?: KUAViTokenUsage | null;
 }
 
 export interface KUAViAgentEvent {
@@ -113,16 +134,102 @@ export interface KUAViFinalAnswerEvent {
   text: string;
 }
 
-export type KUAViEvent = KUAViToolCall | KUAViAgentEvent | KUAViSessionEvent | KUAViFinalAnswerEvent;
+export interface KUAViLLMCallEvent {
+  type: "llm_call";
+  timestamp: string;
+  model: string;
+  backend: string;
+  prompt_summary: string;
+  prompt_tokens_approx: number;
+  response_summary: string;
+  response_tokens_approx: number;
+  duration_ms: number;
+  has_error: boolean;
+  context?: string | null;
+}
+
+export interface KUAViEvalExecutionEvent {
+  type: "eval_execution";
+  timestamp: string;
+  code: string;
+  stdout: string;
+  execution_time_ms: number;
+  has_error: boolean;
+  result_type?: string | null;
+}
+
+/** Emitted by _TraceLogger after kuavi_index_video succeeds. */
+export interface KUAViMetadataEvent {
+  type: "metadata";
+  timestamp: string;
+  video_path?: string | null;
+  fps?: number | null;
+  duration?: number | null;
+  num_segments?: number | null;
+  num_scenes?: number | null;
+  has_embeddings?: boolean;
+  has_transcript?: boolean;
+}
+
+/** Emitted when there is a >3s gap between consecutive tool calls (new agent turn). */
+export interface KUAViTurnStartEvent {
+  type: "turn_start";
+  timestamp: string;
+  turn: number;
+  gap_seconds: number;
+}
+
+/** Emitted when the model produces reasoning text between tool calls. */
+export interface KUAViReasoningEvent {
+  type: "reasoning";
+  timestamp: string;
+  iteration: number;
+  text: string;
+  token_usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+}
+
+/** Emitted once at the start of the session with the full system prompt. */
+export interface KUAViSystemPromptEvent {
+  type: "system_prompt";
+  timestamp: string;
+  text: string;
+}
+
+/** Emitted right after session_start with the user's question for this run. */
+export interface KUAViQuestionEvent {
+  type: "question";
+  timestamp: string;
+  text: string;
+}
+
+export type KUAViEvent =
+  | KUAViToolCall
+  | KUAViAgentEvent
+  | KUAViSessionEvent
+  | KUAViFinalAnswerEvent
+  | KUAViLLMCallEvent
+  | KUAViEvalExecutionEvent
+  | KUAViMetadataEvent
+  | KUAViTurnStartEvent
+  | KUAViReasoningEvent
+  | KUAViSystemPromptEvent
+  | KUAViQuestionEvent;
 
 export interface KUAViLogMetadata {
   totalToolCalls: number;
   totalAgentSpawns: number;
+  totalAgentTurns: number;
+  totalTurns: number;
   totalFramesExtracted: number;
   totalSearches: number;
   sessionDuration: number;
   model: string | null;
   videoPath: string | null;
+  videoDuration: number | null;
   question: string | null;
   toolBreakdown: Record<string, number>;
   hasFrames: boolean;
@@ -136,6 +243,8 @@ export interface KUAViLogFile {
   filePath: string;
   events: KUAViEvent[];
   metadata: KUAViLogMetadata;
+  /** Stem of the log file (without .jsonl), used to resolve frame sidecar files */
+  logStem?: string;
 }
 
 // ─── Unified Log File Type ───────────────────────────────────────────

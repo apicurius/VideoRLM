@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(uv run python -m pytest *)",
+      "Bash(uv run python -m kuavi.*)",
+      "Bash(uv sync *)",
+      "Bash(uv pip install *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git status *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(kuavi *)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Bash(git push --force *)",
+      "Bash(rm -rf *)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/py_compile_check.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__kuavi__.*",
+        "hooks": [{ "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/kuavi_trace_logger.sh", "async": true }]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/session_start_reminder.sh"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/notify.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/hooks/validate_analysis.sh"
+          },
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/kuavi_trace_logger.sh", "async": true }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/kuavi_trace_logger.sh", "async": true }]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/kuavi_trace_logger.sh", "async": true }]
+      }
+    ],
+    "SessionEnd": []
+  }
+}

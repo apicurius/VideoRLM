@@ -5,8 +5,23 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { CodeBlock } from './CodeBlock';
-import { RLMIteration } from '@/lib/types';
+import { RLMIteration, RLMChatCompletion } from '@/lib/types';
 import { VideoFrameViewer, extractImageFrames, isImageFrame } from './VideoFrameViewer';
+
+/** Sum input or output tokens across all models in usage_summary, or fall back to legacy fields */
+function getTokenCount(call: RLMChatCompletion, kind: 'input' | 'output'): number | null {
+  if (call.usage_summary?.model_usage_summaries) {
+    const summaries = Object.values(call.usage_summary.model_usage_summaries);
+    if (summaries.length > 0) {
+      return summaries.reduce(
+        (sum, m) => sum + (kind === 'input' ? m.total_input_tokens : m.total_output_tokens),
+        0
+      );
+    }
+  }
+  const legacy = kind === 'input' ? call.prompt_tokens : call.completion_tokens;
+  return legacy != null ? legacy : null;
+}
 
 interface ExecutionPanelProps {
   iteration: RLMIteration | null;
@@ -124,16 +139,25 @@ export function ExecutionPanel({ iteration }: ExecutionPanelProps) {
                             <CardTitle className="text-sm flex items-center gap-2">
                               <span className="w-2 h-2 rounded-full bg-fuchsia-500 dark:bg-fuchsia-400" />
                               llm_query() from Block #{blockIdx + 1}
+                              {call.root_model && (
+                                <Badge variant="outline" className="text-[10px] font-mono text-fuchsia-600 dark:text-fuchsia-400 border-fuchsia-500/30">
+                                  {call.root_model}
+                                </Badge>
+                              )}
                             </CardTitle>
                             <div className="flex gap-2">
+                              {getTokenCount(call, 'input') != null && (
+                                <Badge variant="outline" className="text-[10px] font-mono">
+                                  {getTokenCount(call, 'input')} in
+                                </Badge>
+                              )}
+                              {getTokenCount(call, 'output') != null && (
+                                <Badge variant="outline" className="text-[10px] font-mono">
+                                  {getTokenCount(call, 'output')} out
+                                </Badge>
+                              )}
                               <Badge variant="outline" className="text-[10px] font-mono">
-                                {call.prompt_tokens} in
-                              </Badge>
-                              <Badge variant="outline" className="text-[10px] font-mono">
-                                {call.completion_tokens} out
-                              </Badge>
-                              <Badge variant="outline" className="text-[10px] font-mono">
-                                {call.execution_time.toFixed(2)}s
+                                {call.execution_time?.toFixed(2) ?? '?'}s
                               </Badge>
                             </div>
                           </div>

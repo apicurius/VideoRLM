@@ -1,0 +1,425 @@
+"""Search tool functions for KUAVi video indices.
+
+Each ``make_*`` function accepts a :class:`~kuavi.indexer.VideoIndex`
+and returns a dict ``{"tool": callable, "description": str}``.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+
+if TYPE_CHECKING:
+    from kuavi.indexer import VideoIndex
+
+
+def _mmr_rerank(
+    query_emb: np.ndarray,
+    candidate_embs: np.ndarray,
+    candidate_indices: np.ndarray,
+    scores: np.ndarray,
+    top_k: int = 5,
+    lambda_param: float = 0.7,
+) -> list[int]:
+    """Max-Marginal Relevance reranking for diverse search results."""
+    if len(candidate_indices) <= top_k:
+        return list(candidate_indices[np.argsort(scores)[::-1]])
+
+    selected = []
+    remaining = list(range(len(candidate_indices)))
+
+    first = int(np.argmax(scores))
+    selected.append(first)
+    remaining.remove(first)
+
+    for _ in range(top_k - 1):
+        if not remaining:
+            break
+
+        best_score = -np.inf
+        best_idx = remaining[0]
+
+        for idx in remaining:
+            relevance = scores[idx]
+
+            if candidate_embs is not None and len(selected) > 0:
+                selected_embs = candidate_embs[selected]
+                sim_to_selected = np.dot(candidate_embs[idx], selected_embs.T).max()
+            else:
+                sim_to_selected = 0.0
+
+            mmr_score = lambda_param * relevance - (1 - lambda_param) * sim_to_selected
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx = idx
+
+        selected.append(best_idx)
+        remaining.remove(best_idx)
+
+    return [int(candidate_indices[i]) for i in selected]
+
+
+def make_search_video(index: VideoIndex) -> dict[str, Any]:
+    """Semantic search over video segment embeddings."""
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    def _search_matrix(
+        query_emb: np.ndarray,
+        matrix: np.ndarray,
+    ) -> np.ndarray:
+        return cosine_similarity(query_emb, matrix)[0]
+
+    def search_video(
+        query: str,
+        top_k: int = 5,
+        field: str = "summary",
+        exclude_non_action: bool = True,
+        diverse: bool = True,
+        cluster_diverse: bool = False,
+        level: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Search video segments by semantic similarity to *query*."""
+        # Hierarchy level search
+        if (
+            level > 0
+            and hasattr(index, "segment_hierarchy")
+            and hasattr(index, "hierarchy_embeddings")
+            and index.segment_hierarchy
+            and len(index.segment_hierarchy) >= level
+            and index.hierarchy_embeddings
+            and len(index.hierarchy_embeddings) >= level
+        ):
+            h_segments = index.segment_hierarchy[level - 1]
+            h_emb = index.hierarchy_embeddings[level - 1]
+            if h_emb is not None and len(h_emb) > 0:
+                query_emb = index.embed_fn(query)
+                query_emb = np.asarray(query_emb).reshape(1, -1)
+                scores = _search_matrix(query_emb, h_emb)
+                top_indices = list(np.argsort(scores)[::-1][:top_k])
+                results = []
+                for idx in top_indices:
+                    seg = h_segments[idx]
+                    results.append(
+                        {
+                            "start_time": seg["start_time"],
+                            "end_time": seg["end_time"],
+                            "score": round(float(scores[idx]), 4),
+                            "caption": seg.get("caption", ""),
+                            "annotation": seg.get("annotation", {}),
+                        }
+                    )
+                return results
+
+        # Visual field
+        if field == "visual":
+            if (
+                hasattr(index, "frame_embeddings")
+                and index.frame_embeddings is not None
+                and len(index.frame_embeddings) > 0
+            ):
+                visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
+                query_emb = visual_fn(query)
+                query_emb = np.asarray(query_emb).reshape(1, -1)
+                scores = _search_matrix(query_emb, index.frame_embeddings)
+
+                scores = scores.copy()
+                for i, seg in enumerate(index.segments):
+                    if seg.get("is_duplicate"):
+                        scores[i] = -np.inf
+
+                top_indices = list(np.argsort(scores)[::-1][:top_k])
+                results = []
+                for idx in top_indices:
+                    seg = index.segments[idx]
+                    results.append(
+                        {
+                            "start_time": seg["start_time"],
+                            "end_time": seg["end_time"],
+                            "score": round(float(scores[idx]), 4),
+                            "caption": seg.get("caption", ""),
+                            "annotation": seg.get("annotation", {}),
+                            "quality_score": seg.get("caption_quality_score"),
+                        }
+                    )
+                return results
+            import logging
+            logging.getLogger(__name__).warning(
+                "No frame embeddings available — field='visual' falling back to 'summary'. "
+                "Visual search requires SigLIP2 frame embeddings from indexing."
+            )
+            field = "summary"
+
+        summary_emb = index.embeddings
+        action_emb = (
+            index.action_embeddings if index.action_embeddings is not None else index.embeddings
+        )
+
+        if field == "summary":
+            matrices = [summary_emb]
+        elif field == "action":
+            matrices = [action_emb]
+        else:  # "all"
+            matrices = [summary_emb, action_emb]
+
+        matrices = [m for m in matrices if m is not None and len(m) > 0]
+        if not matrices:
+            return []
+
+        query_emb = index.embed_fn(query)
+        query_emb = np.asarray(query_emb).reshape(1, -1)
+
+        all_scores = np.stack([_search_matrix(query_emb, m) for m in matrices])
+        scores = np.max(all_scores, axis=0)
+
+        if field == "action" and exclude_non_action:
+            scores = scores.copy()
+            for i, seg in enumerate(index.segments):
+                if seg.get("is_non_action"):
+                    scores[i] = -np.inf
+
+        scores = scores.copy()
+        for i, seg in enumerate(index.segments):
+            if seg.get("is_duplicate"):
+                scores[i] = -np.inf
+
+        if cluster_diverse and top_k > 2:
+            from sklearn.cluster import KMeans
+
+            active_matrix = matrices[0]
+            valid_mask = scores > -np.inf
+            valid_indices = np.where(valid_mask)[0]
+            n_valid = len(valid_indices)
+
+            if n_valid <= top_k:
+                top_indices = list(valid_indices[np.argsort(scores[valid_indices])[::-1]])
+            else:
+                k = min(top_k, n_valid)
+                valid_embs = active_matrix[valid_indices]
+                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                labels = kmeans.fit_predict(valid_embs)
+
+                clusters: dict[int, list[int]] = {}
+                for vi, label in zip(valid_indices, labels):
+                    clusters.setdefault(int(label), []).append(int(vi))
+
+                for label in clusters:
+                    clusters[label].sort(key=lambda idx: scores[idx], reverse=True)
+
+                top_indices: list[int] = []
+                cluster_keys = sorted(
+                    clusters.keys(), key=lambda l: scores[clusters[l][0]], reverse=True
+                )
+                cluster_ptrs = {l: 0 for l in cluster_keys}
+                while len(top_indices) < top_k:
+                    added_any = False
+                    for label in cluster_keys:
+                        if len(top_indices) >= top_k:
+                            break
+                        ptr = cluster_ptrs[label]
+                        if ptr < len(clusters[label]):
+                            top_indices.append(clusters[label][ptr])
+                            cluster_ptrs[label] = ptr + 1
+                            added_any = True
+                    if not added_any:
+                        break
+        elif diverse and top_k > 1:
+            n_candidates = min(top_k * 3, len(scores))
+            candidate_indices = np.argsort(scores)[::-1][:n_candidates]
+            candidate_scores = scores[candidate_indices]
+
+            active_matrix = matrices[0]
+            candidate_embs = active_matrix[candidate_indices] if active_matrix is not None else None
+
+            top_indices = _mmr_rerank(
+                query_emb,
+                candidate_embs,
+                candidate_indices,
+                candidate_scores,
+                top_k=top_k,
+                lambda_param=0.7,
+            )
+        else:
+            top_indices = list(np.argsort(scores)[::-1][:top_k])
+
+        results = []
+        for idx in top_indices:
+            seg = index.segments[idx]
+            results.append(
+                {
+                    "start_time": seg["start_time"],
+                    "end_time": seg["end_time"],
+                    "score": round(float(scores[idx]), 4),
+                    "caption": seg.get("caption", ""),
+                    "annotation": seg.get("annotation", {}),
+                    "quality_score": seg.get("caption_quality_score"),
+                }
+            )
+        return results
+
+    return {
+        "tool": search_video,
+        "description": (
+            "Semantic search over pre-indexed video segments. "
+            "Parameters: query (str), top_k (int, default 5), "
+            'field (str, default "summary" — can be "summary", "action", "visual", or "all"), '
+            "exclude_non_action (bool, default True — filters non-action segments when field is action), "
+            "diverse (bool, default True — MMR reranking for varied results), "
+            "cluster_diverse (bool, default False — KMeans clustering alternative to MMR), "
+            "level (int, default 0 — higher levels search coarser hierarchy). "
+            "Returns list of dicts with start_time, end_time, score, caption, and annotation."
+        ),
+    }
+
+
+def make_search_transcript(index: VideoIndex) -> dict[str, Any]:
+    """Keyword search over ASR transcript entries."""
+
+    def search_transcript(query: str) -> list[dict[str, Any]]:
+        """Search the video transcript for lines containing *query*."""
+        if not index.transcript:
+            return []
+
+        query_lower = query.lower()
+        results = []
+        for i, entry in enumerate(index.transcript):
+            if query_lower in entry["text"].lower():
+                context_entries = index.transcript[max(0, i - 1) : i + 2]
+                context = " ".join(e["text"] for e in context_entries)
+                results.append(
+                    {
+                        "start_time": entry["start_time"],
+                        "end_time": entry["end_time"],
+                        "text": entry["text"],
+                        "context": context,
+                    }
+                )
+        return results
+
+    return {
+        "tool": search_transcript,
+        "description": (
+            "Search spoken words in the video transcript (ASR). "
+            "Parameters: query (str — keyword or phrase, case-insensitive). "
+            "Returns list of dicts with start_time, end_time, text, and surrounding context."
+        ),
+    }
+
+
+def make_get_transcript(index: VideoIndex) -> dict[str, Any]:
+    """Retrieve transcript text for a time range."""
+
+    def get_transcript(start_time: float, end_time: float) -> str:
+        """Return transcript text for a specific time range."""
+        if not index.transcript:
+            return ""
+
+        lines = []
+        for entry in index.transcript:
+            if entry["end_time"] >= start_time and entry["start_time"] <= end_time:
+                lines.append(f"[{entry['start_time']:.1f}s] {entry['text']}")
+        return "\n".join(lines)
+
+    return {
+        "tool": get_transcript,
+        "description": (
+            "Get the spoken transcript for a specific time range of the video. "
+            "Parameters: start_time (float, seconds), end_time (float, seconds). "
+            "Returns concatenated transcript text as a string."
+        ),
+    }
+
+
+def make_discriminative_vqa(index: VideoIndex) -> dict[str, Any]:
+    """Embedding-based multiple-choice VQA without LLM generation."""
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    def discriminative_vqa(
+        question: str,
+        candidates: list[str],
+        time_range: tuple[float, float] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Answer a multiple-choice question by embedding matching."""
+        if not candidates or index.embeddings is None or index.embed_fn is None:
+            return []
+
+        candidate_embs = []
+        for c in candidates:
+            emb = index.embed_fn(f"{question} {c}")
+            candidate_embs.append(emb)
+        candidate_embs = np.stack(candidate_embs)
+
+        seg_embs = index.embeddings
+        seg_mask = np.ones(len(index.segments), dtype=bool)
+        if time_range is not None:
+            for i, seg in enumerate(index.segments):
+                if seg["end_time"] < time_range[0] or seg["start_time"] > time_range[1]:
+                    seg_mask[i] = False
+
+        active_embs = seg_embs[seg_mask]
+        if len(active_embs) == 0:
+            return []
+
+        sims = cosine_similarity(candidate_embs, active_embs)
+        max_sims = sims.max(axis=1)
+        best_seg_indices = sims.argmax(axis=1)
+
+        active_indices = np.where(seg_mask)[0]
+
+        results = []
+        for i, candidate in enumerate(candidates):
+            orig_idx = int(active_indices[best_seg_indices[i]])
+            seg = index.segments[orig_idx]
+            results.append(
+                {
+                    "answer": candidate,
+                    "confidence": round(float(max_sims[i]), 4),
+                    "best_segment": {
+                        "start_time": seg["start_time"],
+                        "end_time": seg["end_time"],
+                        "caption": seg.get("caption", ""),
+                    },
+                }
+            )
+
+        results.sort(key=lambda x: x["confidence"], reverse=True)
+        return results
+
+    return {
+        "tool": discriminative_vqa,
+        "description": (
+            "Answer a multiple-choice question about the video by embedding matching. "
+            "Parameters: question (str), candidates (list of answer strings), "
+            "time_range (optional tuple of start/end seconds). "
+            "Returns sorted list of dicts with answer, confidence score, and best matching segment. "
+            "Faster than LLM generation for closed-form questions."
+        ),
+    }
+
+
+def make_get_scene_list(index: VideoIndex) -> dict[str, Any]:
+    """Return scene boundaries with captions."""
+
+    def get_scene_list() -> list[dict[str, Any]]:
+        """List all detected scene boundaries with descriptions."""
+        scenes = []
+        for i, seg in enumerate(index.segments):
+            scenes.append(
+                {
+                    "scene_index": i,
+                    "start_time": seg["start_time"],
+                    "end_time": seg["end_time"],
+                    "caption": seg.get("caption", ""),
+                    "annotation": seg.get("annotation", {}),
+                }
+            )
+        return scenes
+
+    return {
+        "tool": get_scene_list,
+        "description": (
+            "List all detected scene boundaries. Takes no parameters. "
+            "Returns list of dicts with scene_index, start_time, end_time, "
+            "caption, and annotation. Use this to understand the video structure."
+        ),
+    }

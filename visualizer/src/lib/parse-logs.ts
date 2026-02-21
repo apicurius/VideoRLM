@@ -1,4 +1,4 @@
-import { RLMIteration, RLMLogFile, LogMetadata, RLMConfigMetadata, extractFinalAnswer, KUAViEvent, KUAViLogFile, KUAViLogMetadata, KUAViToolCall, KUAViFinalAnswerEvent, LogFile } from './types';
+import { RLMIteration, RLMLogFile, LogMetadata, RLMConfigMetadata, extractFinalAnswer, KUAViEvent, KUAViLogFile, KUAViLogMetadata, KUAViToolCall, KUAViFinalAnswerEvent, KUAViMetadataEvent, KUAViTurnStartEvent, KUAViReasoningEvent, KUAViSystemPromptEvent, KUAViQuestionEvent, LogFile } from './types';
 
 // Extract the context variable from code block locals
 export function extractContextVariable(iterations: RLMIteration[]): string | null {
@@ -146,6 +146,14 @@ export function extractContextQuestion(iterations: RLMIteration[]): string {
   return 'Context available in REPL environment';
 }
 
+/** Check if stderr content represents a real error (not model loading progress) */
+export function isRealStderrError(stderr: string): boolean {
+  if (!stderr) return false;
+  const hasErrorPattern = /Traceback|Error:|Exception:|error:|FAILED/i.test(stderr);
+  const isModelLoading = /Loading weights|Materializing param|tokenizer_config|model\.safetensors|Downloading|from_pretrained/i.test(stderr);
+  return hasErrorPattern && !isModelLoading;
+}
+
 // Count __image__ occurrences in a string (serialized prompt/call data)
 export function countImageTags(text: string): number {
   let count = 0;
@@ -203,7 +211,7 @@ export function computeMetadata(iterations: RLMIteration[], config: RLMConfigMet
 
     for (const block of iter.code_blocks) {
       if (block.result) {
-        if (block.result.stderr) {
+        if (block.result.stderr && isRealStderrError(block.result.stderr)) {
           hasErrors = true;
         }
         if (block.result.rlm_calls) {
@@ -248,6 +256,71 @@ export function computeMetadata(iterations: RLMIteration[], config: RLMConfigMet
     videoPath: config.video_path ?? null,
     totalFramesSent,
   };
+}
+
+// ─── KUAVi Turn Model ────────────────────────────────────────────────
+
+export interface KUAViTurn {
+  index: number;
+  reasoning: KUAViReasoningEvent | null;
+  toolCalls: KUAViToolCall[];
+  tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
+}
+
+/**
+ * Groups a flat list of KUAVi events into turns.
+ *
+ * A turn is one LLM response cycle: optional reasoning text followed by
+ * zero or more tool calls. Turn boundaries are defined by:
+ *   - A `reasoning` event — starts a new turn carrying that reasoning
+ *   - A `turn_start` event — starts a new turn with null reasoning
+ *
+ * Turn 0 collects any tool calls that appear before the first reasoning
+ * or turn_start event (null reasoning).
+ */
+export function groupEventsIntoTurns(events: KUAViEvent[]): KUAViTurn[] {
+  const turns: KUAViTurn[] = [];
+  let turnIndex = 0;
+  let currentTurn: KUAViTurn = { index: 0, reasoning: null, toolCalls: [] };
+
+  for (const event of events) {
+    if (event.type === 'reasoning') {
+      // Push current turn if it has content
+      if (currentTurn.toolCalls.length > 0 || currentTurn.reasoning !== null) {
+        turns.push(currentTurn);
+        turnIndex++;
+      }
+      const usage = (event as KUAViReasoningEvent).token_usage;
+      currentTurn = {
+        index: turnIndex,
+        reasoning: event as KUAViReasoningEvent,
+        toolCalls: [],
+        tokenUsage: usage
+          ? {
+              prompt_tokens: usage.prompt_tokens ?? 0,
+              completion_tokens: usage.completion_tokens ?? 0,
+              total_tokens: usage.total_tokens ?? 0,
+            }
+          : null,
+      };
+    } else if (event.type === 'turn_start') {
+      // turn_start marks a boundary if current turn has content
+      if (currentTurn.toolCalls.length > 0 || currentTurn.reasoning !== null) {
+        turns.push(currentTurn);
+        turnIndex++;
+        currentTurn = { index: turnIndex, reasoning: null, toolCalls: [] };
+      }
+    } else if (event.type === 'tool_call') {
+      currentTurn.toolCalls.push(event as KUAViToolCall);
+    }
+  }
+
+  // Flush the last turn if it has content
+  if (currentTurn.toolCalls.length > 0 || currentTurn.reasoning !== null) {
+    turns.push(currentTurn);
+  }
+
+  return turns;
 }
 
 // ─── KUAVi JSONL Parsing ─────────────────────────────────────────────
@@ -295,6 +368,8 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
   const toolCalls = events.filter((e): e is KUAViToolCall => e.type === 'tool_call');
   const agentStarts = events.filter((e) => e.type === 'agent_start');
   const sessionStart = events.find((e) => e.type === 'session_start');
+  const metadataEvent = events.find((e): e is KUAViMetadataEvent => e.type === 'metadata');
+  const turnStarts = events.filter((e): e is KUAViTurnStartEvent => e.type === 'turn_start');
 
   // Tool breakdown
   const toolBreakdown: Record<string, number> = {};
@@ -323,18 +398,35 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
     }
   }
 
-  // Detect video path from index_video input
-  let videoPath: string | null = null;
-  const indexCall = toolCalls.find((tc) => tc.tool_name.includes('index_video'));
-  if (indexCall?.tool_input?.video_path) {
-    videoPath = String(indexCall.tool_input.video_path);
+  // Detect video path: prefer metadata event, fall back to index_video input
+  let videoPath: string | null = metadataEvent?.video_path ?? null;
+  if (!videoPath) {
+    const indexCall = toolCalls.find((tc) => tc.tool_name.includes('index_video'));
+    if (indexCall?.tool_input?.video_path) {
+      videoPath = String(indexCall.tool_input.video_path);
+    }
   }
 
-  // Detect question from search or analyze calls
+  // Video duration from metadata event (if available)
+  const videoDuration: number | null = metadataEvent?.duration ?? null;
+
+  // Detect question: prefer explicit question event, then analyze_shards param, then search query
   let question: string | null = null;
-  const searchCall = toolCalls.find((tc) => tc.tool_name.includes('search_video'));
-  if (searchCall?.tool_input?.query) {
-    question = String(searchCall.tool_input.query);
+  const questionEvent = events.find((e): e is KUAViQuestionEvent => e.type === 'question');
+  if (questionEvent?.text) {
+    question = questionEvent.text;
+  }
+  if (!question) {
+    const shardCall = toolCalls.find((tc) => tc.tool_name.includes('analyze_shards'));
+    if (shardCall?.tool_input?.question) {
+      question = String(shardCall.tool_input.question);
+    }
+  }
+  if (!question) {
+    const searchCall = toolCalls.find((tc) => tc.tool_name.includes('search_video'));
+    if (searchCall?.tool_input?.query) {
+      question = String(searchCall.tool_input.query);
+    }
   }
 
   // Session duration — use tool call span, not total event span
@@ -349,7 +441,15 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
   // Model from session_start
   const model = sessionStart && 'model' in sessionStart ? (sessionStart.model ?? null) : null;
 
-  // isComplete: has index_video AND at least one search/VQA/scene_list call
+  // Agent turns: count turn_start events + 1 for the initial implicit turn (if any tool calls)
+  const totalAgentTurns = turnStarts.length + (toolCalls.length > 0 ? 1 : 0);
+
+  // isComplete: has a final_answer event, OR has session_end with reason "complete",
+  // OR has index_video + follow-up tool calls
+  const hasFinalAnswer = events.some((e) => e.type === 'final_answer');
+  const hasSessionEnd = events.some(
+    (e) => e.type === 'session_end' && 'reason' in e && e.reason === 'complete'
+  );
   const hasIndex = toolCalls.some((tc) => tc.tool_name.includes('index_video'));
   const hasFollowUp = toolCalls.some(
     (tc) =>
@@ -357,7 +457,7 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
       tc.tool_name.includes('discriminative_vqa') ||
       tc.tool_name.includes('scene_list')
   );
-  const isComplete = hasIndex && hasFollowUp;
+  const isComplete = hasFinalAnswer || hasSessionEnd || (hasIndex && hasFollowUp);
 
   // hasErrors: check has_error field first, then fall back to response string matching
   const hasErrors = toolCalls.some((tc) => {
@@ -376,14 +476,20 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
     ? finalAnswerEvents[finalAnswerEvents.length - 1].text
     : null;
 
+  // Compute turn count via groupEventsIntoTurns
+  const totalTurns = groupEventsIntoTurns(events).length;
+
   return {
     totalToolCalls: toolCalls.length,
     totalAgentSpawns: agentStarts.length,
+    totalAgentTurns,
+    totalTurns,
     totalFramesExtracted,
     totalSearches,
     sessionDuration,
     model,
     videoPath,
+    videoDuration,
     question,
     toolBreakdown,
     hasFrames: totalFramesExtracted > 0,
@@ -416,14 +522,23 @@ export function parseLogFile(fileName: string, content: string): LogFile {
       first.type === 'agent_start' ||
       first.type === 'session_end' ||
       first.type === 'agent_stop' ||
-      first.type === 'final_answer'
+      first.type === 'final_answer' ||
+      first.type === 'turn_start' ||
+      first.type === 'reasoning' ||
+      first.type === 'system_prompt' ||
+      first.type === 'question' ||
+      // metadata-only files from MCP server (session_start comes first normally,
+      // but guard against edge cases where metadata could appear early)
+      (first.type === 'metadata' && first.video_path != null)
     ) {
       const events = parseKUAViJSONL(content);
+      const logStem = fileName.replace(/\.jsonl$/, '');
       return {
         fileName,
         filePath: fileName,
         events,
         metadata: computeKUAViMetadata(events),
+        logStem,
       };
     }
   } catch {

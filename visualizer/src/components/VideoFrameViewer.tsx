@@ -4,13 +4,15 @@ import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
-// Type for image frames — supports both __image__-tagged dicts (RLM traces)
-// and KUAVi MCP format ({data, mime_type} without __image__ tag)
+// Type for image frames — supports both __image__-tagged dicts (RLM traces),
+// KUAVi MCP format ({data, mime_type}), and sidecar file references ({_frame_file})
 interface ImageFrame {
   __image__?: true;
   data: string;
   mime_type: string;
   timestamp?: string;
+  /** Sidecar frame file name (e.g. "frame_0001.jpg") — used when data is loaded from API */
+  _frame_file?: string;
 }
 
 // A segment groups frames with optional metadata
@@ -26,13 +28,18 @@ interface VideoFrameViewerProps {
   /** Max thumbnail width in pixels */
   thumbSize?: number;
   className?: string;
+  /** Log stem for resolving sidecar frame file references */
+  logStem?: string;
 }
 
 /** Check if a value matches an image frame pattern.
- *  Accepts both __image__-tagged dicts and KUAVi MCP format ({data, mime_type}). */
+ *  Accepts __image__-tagged dicts, KUAVi MCP format ({data, mime_type}),
+ *  and sidecar file references ({_frame_file, mime_type}). */
 export function isImageFrame(value: unknown): value is ImageFrame {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
+  // Sidecar file reference (from experiment runner)
+  if (typeof obj._frame_file === 'string' && typeof obj.mime_type === 'string') return true;
   if (typeof obj.data !== 'string' || typeof obj.mime_type !== 'string') return false;
   // Accept if __image__ tag is present OR if mime_type looks like an image
   return obj.__image__ === true || (obj.mime_type as string).startsWith('image/');
@@ -88,9 +95,23 @@ export function replaceBase64WithPlaceholder(text: string): string {
   );
 }
 
+/** Resolve image src — supports both inline base64 and sidecar API URLs */
+function frameSrc(frame: ImageFrame, logStem?: string): string {
+  if (frame.data) {
+    return `data:${frame.mime_type};base64,${frame.data}`;
+  }
+  if (frame._frame_file && logStem) {
+    return `/api/frames/${logStem}.frames/${frame._frame_file}`;
+  }
+  return '';
+}
+
 /** Render a single frame thumbnail */
-function FrameThumb({ frame, size, index }: { frame: ImageFrame; size: number; index: number }) {
+function FrameThumb({ frame, size, index, logStem }: { frame: ImageFrame; size: number; index: number; logStem?: string }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const src = frameSrc(frame, logStem);
+
+  if (!src) return null;
 
   return (
     <>
@@ -100,7 +121,7 @@ function FrameThumb({ frame, size, index }: { frame: ImageFrame; size: number; i
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={`data:${frame.mime_type};base64,${frame.data}`}
+          src={src}
           alt={`Frame ${index + 1}`}
           width={size}
           height={Math.round(size * 0.75)}
@@ -122,7 +143,7 @@ function FrameThumb({ frame, size, index }: { frame: ImageFrame; size: number; i
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={`data:${frame.mime_type};base64,${frame.data}`}
+            src={src}
             alt={`Frame ${index + 1} (expanded)`}
             className="max-w-full max-h-full rounded-lg shadow-2xl border border-white/10"
           />
@@ -134,7 +155,7 @@ function FrameThumb({ frame, size, index }: { frame: ImageFrame; size: number; i
 }
 
 /** Filmstrip / grid viewer for video frames */
-export function VideoFrameViewer({ frames, segments, thumbSize = 120, className }: VideoFrameViewerProps) {
+export function VideoFrameViewer({ frames, segments, thumbSize = 120, className, logStem }: VideoFrameViewerProps) {
   // Normalise into segments
   const resolvedSegments: FrameSegment[] = segments
     ? segments
@@ -178,6 +199,7 @@ export function VideoFrameViewer({ frames, segments, thumbSize = 120, className 
                   frame={frame}
                   size={thumbSize}
                   index={globalIdx}
+                  logStem={logStem}
                 />
               );
             })}

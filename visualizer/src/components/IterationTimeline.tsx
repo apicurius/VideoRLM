@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { RLMIteration, extractFinalAnswer } from '@/lib/types';
-import { countImageTags, getContentText } from '@/lib/parse-logs';
+import { countImageTags, getContentText, isRealStderrError } from '@/lib/parse-logs';
 
 interface IterationTimelineProps {
   iterations: RLMIteration[];
@@ -23,7 +23,7 @@ function getIterationStats(iteration: RLMIteration, isVideoRun?: boolean) {
   for (const block of iteration.code_blocks) {
     if (block.result) {
       codeExecTime += block.result.execution_time || 0;
-      if (block.result.stderr) hasError = true;
+      if (block.result.stderr && isRealStderrError(block.result.stderr)) hasError = true;
       if (block.result.rlm_calls) {
         totalSubCalls += block.result.rlm_calls.length;
         if (isVideoRun) {

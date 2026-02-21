@@ -1,0 +1,17 @@
+{
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Write"
+      },
+      "command": "python -m py_compile \"$FILEPATH\" 2>&1 || true",
+      "description": "Syntax-check Python files after writing"
+    },
+    {
+      "event": "SessionStart",
+      "command": "echo 'KUAVi plugin loaded. Use /kuavi-index, /kuavi-search, /kuavi-analyze, or /kuavi-compare skills.'",
+      "description": "Remind user of available KUAVi skills on session start"
+    }
+  ]
+}

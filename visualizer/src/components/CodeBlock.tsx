@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { cn } from '@/lib/utils';
 import { CodeBlock as CodeBlockType } from '@/lib/types';
+import { isRealStderrError } from '@/lib/parse-logs';
 import { CodeWithLineNumbers } from './CodeWithLineNumbers';
 import { isImageFrame, extractImageFrames, VideoFrameViewer } from './VideoFrameViewer';
 
@@ -17,7 +18,7 @@ interface CodeBlockProps {
 
 export function CodeBlock({ block, index }: CodeBlockProps) {
   const [isOpen, setIsOpen] = useState(true);
-  const hasError = block.result?.stderr && block.result.stderr.length > 0;
+  const hasError = block.result?.stderr ? isRealStderrError(block.result.stderr) : false;
   const hasOutput = block.result?.stdout && block.result.stdout.length > 0;
   const executionTime = block.result?.execution_time 
     ? block.result.execution_time.toFixed(2) 

@@ -371,6 +371,20 @@
           class="w-full px-4 py-3 text-sm resize-none"
         ></textarea>
 
+        <div class="mt-3">
+          <label class="block text-xs font-medium text-slate-500 mb-1.5">Pipeline</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <button id="pipeline-rlm" onclick="setPipeline('rlm')"
+              class="detail-btn active" style="padding:8px 0;font-size:0.83rem;">
+              🔁 RLM
+            </button>
+            <button id="pipeline-kuavi" onclick="setPipeline('kuavi')"
+              class="detail-btn" style="padding:8px 0;font-size:0.83rem;">
+              🎬 KUAVi
+            </button>
+          </div>
+        </div>
+
         <div class="model-row mt-3">
           <div>
             <label class="block text-xs font-medium text-slate-500 mb-1.5">Backend</label>
@@ -465,6 +479,13 @@
 
     let currentFile = null;
     let seekTimeout = null;
+    let currentPipeline = 'rlm';
+
+    function setPipeline(name) {
+      currentPipeline = name;
+      document.getElementById('pipeline-rlm').classList.toggle('active', name === 'rlm');
+      document.getElementById('pipeline-kuavi').classList.toggle('active', name === 'kuavi');
+    }
 
     const modelDefaults = {
       openrouter: 'openai/gpt-4o',
@@ -656,6 +677,7 @@
       form.append('question', question);
       form.append('backend', document.getElementById('backend').value);
       form.append('model', document.getElementById('model').value);
+      form.append('pipeline', currentPipeline);
 
       try {
         const response = await fetch('/api/analyze', { method: 'POST', body: form });

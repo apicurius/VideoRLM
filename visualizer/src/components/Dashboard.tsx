@@ -7,7 +7,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { FileUploader } from './FileUploader';
 import { LogViewer } from './LogViewer';
 import { KUAViLogViewer } from './KUAViLogViewer';
-import { AsciiRLM } from './AsciiGlobe';
+import { AsciiRLM, AsciiKUAVi } from './AsciiGlobe';
 import { ThemeToggle } from './ThemeToggle';
 import { parseLogFile } from '@/lib/parse-logs';
 import { LogFile, isKUAViLog, isRLMLog } from '@/lib/types';
@@ -160,6 +160,13 @@ export function Dashboard() {
                 </h2>
                 <div className="bg-muted/50 border border-border rounded-lg p-4 overflow-x-auto">
                   <AsciiRLM />
+                </div>
+                <h2 className="text-sm font-medium mb-3 mt-6 flex items-center gap-2 text-muted-foreground">
+                  <span className="text-primary font-mono">◈</span>
+                  KUAVi Pipeline
+                </h2>
+                <div className="bg-muted/50 border border-border rounded-lg p-4 overflow-x-auto">
+                  <AsciiKUAVi />
                 </div>
               </div>
             </div>

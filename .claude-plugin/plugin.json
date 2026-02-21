@@ -1,0 +1,10 @@
+{
+  "name": "kuavi",
+  "version": "0.1.0",
+  "description": "KUAVi: Agentic Vision Intelligence — video indexing, search, and analysis tools for Claude Code",
+  "author": {
+    "name": "KUAVi"
+  },
+  "license": "MIT",
+  "keywords": ["video", "vision", "analysis", "mcp", "embeddings"]
+}
