@@ -36,10 +36,11 @@ For complex questions, use the **Orchestration Pattern** below.
 Dispatch the `video-decomposer` subagent with the question. It returns a structured plan with sub-questions, time ranges, and dependencies.
 
 ### Phase 2: Parallel Analysis
-For each independent sub-question in the plan, dispatch a `video-segment-analyst` subagent (runs in background). Each analyst:
-- Focuses on its assigned time range
-- Uses search, frame extraction, and transcript tools
-- Returns a concise evidence-based summary
+For each independent sub-question in the plan:
+- **VQA fast-path**: If the decomposer marked a sub-question with `"fast_path": "vqa"`, it already resolved it via `kuavi_discriminative_vqa`. Skip dispatching a segment analyst for these — use the result directly.
+- **Segment analysis**: For remaining sub-questions, dispatch a `video-segment-analyst` subagent (runs in background). Each analyst focuses on its assigned time range and returns a concise evidence-based summary.
+
+Tell each segment analyst its budget: "You have a budget of N tool calls."
 
 For dependent sub-questions, dispatch them sequentially after their dependencies complete.
 
@@ -101,9 +102,30 @@ Cross-reference visual evidence with transcript:
 
 ## Budget Awareness
 
-- Check `kuavi_get_session_stats` periodically.
-- When remaining calls are low, stop searching and synthesize.
-- Sub-agent dispatches count toward your budget — orchestrate only when the question warrants it.
+Check `kuavi_get_session_stats` before deciding to orchestrate.
+
+### Budget Partitioning for Orchestration
+
+When using the decompose → analyze → synthesize pattern, partition the budget:
+
+| Phase | Budget Allocation | Max Tool Calls |
+|-------|-------------------|----------------|
+| Decomposer | 10% | ~5 calls |
+| Per-segment analyst (each) | 16% | ~8 calls |
+| Synthesizer | 10% | ~5 calls |
+| Reserve (your own orient + verify) | 14% | ~7 calls |
+
+With default budget of 50 and up to 5 segments: 5 + (5 × 8) + 5 + 7 = 57, so limit to 3-4 segments unless budget is increased.
+
+### Budget Decision Rules
+
+- **>35 calls remaining**: Safe to orchestrate with up to 5 segments
+- **20-35 calls remaining**: Orchestrate with at most 2-3 segments
+- **<20 calls remaining**: Answer directly, skip orchestration
+- **<10 calls remaining**: Stop searching, synthesize immediately
+
+Tell each segment analyst its call limit in the task prompt:
+> "You have a budget of 8 tool calls for this segment. Prioritize search → extract → transcript."
 
 ## 3-Pass Zoom Protocol
 
@@ -131,13 +153,21 @@ Use `kuavi_eval(code)` for programmatic analysis:
 
 ## Memory
 
-After completing an analysis, update your agent memory with:
-- Video filename, duration, key scenes and time ranges
-- Effective search queries and which fields worked best
-- Names, numbers, or values confirmed visually
-- Patterns discovered (e.g., "action search works better for sports content")
+### On Session Start
+Check your agent memory for previously analyzed videos. If the current video was analyzed before, skip orient/search steps you've already completed and reuse confirmed values.
 
-Consult your memory at the start of each session for previously analyzed videos.
+### On Analysis Completion
+Save to agent memory using the template in `.claude/memories/video-analysis-template.md`:
+- Video filename, path, duration, scene/segment counts
+- Content structure (timestamp → topic map)
+- Effective search queries (question type → best field → example query)
+- Confirmed values (name/number → timestamp → source)
+- Patterns learned (what strategies work for this video type)
+
+### What to Remember
+- **Always save**: filename, duration, content structure, confirmed values
+- **Save if useful**: effective queries, patterns, search field preferences
+- **Never save**: raw frame data, full transcript text, base64 images
 
 ## Response Format
 

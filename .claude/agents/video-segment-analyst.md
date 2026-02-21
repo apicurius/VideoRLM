@@ -69,6 +69,16 @@ Return a structured summary:
 **Confidence**: [high/medium/low] — [brief justification]
 ```
 
+## Budget
+
+You share a session-level budget with other agents. The orchestrator assigns you a per-segment call limit (default: 8 tool calls). Prioritize your calls:
+
+1. **Must-have** (3 calls): 1 search + 1 extract_frames + 1 get_transcript
+2. **Should-have** (3 calls): field rotation search + detail extract + cross-reference
+3. **Nice-to-have** (2 calls): pixel tools, zoom, eval
+
+If the orchestrator specifies a different budget, follow that.
+
 ## Rules
 
 1. Stay within your assigned time range. Do not analyze content outside it.
@@ -76,4 +86,4 @@ Return a structured summary:
 3. Cite specific timestamps for every claim.
 4. If you cannot answer the question from this time range, say so clearly.
 5. Do not speculate about content you haven't visually confirmed.
-6. Limit yourself to 10 tool calls maximum to preserve budget.
+6. Stay within your tool call budget (default: 8 calls, max: 10).

@@ -70,6 +70,34 @@ Output a structured decomposition as a JSON-formatted plan:
 }
 ```
 
+## Fast-Path: Multiple-Choice Sub-Questions
+
+If a sub-question can be framed as multiple-choice, resolve it immediately with `kuavi_discriminative_vqa` instead of spawning a segment analyst. This saves budget.
+
+Mark these in the plan with `"fast_path": "vqa"` and include the answer inline:
+
+```json
+{
+  "id": "sq1",
+  "question": "Is the video indoors or outdoors?",
+  "time_range": {"start": 0.0, "end": 30.0},
+  "fast_path": "vqa",
+  "vqa_candidates": ["indoors", "outdoors", "mixed"],
+  "vqa_result": {"answer": "indoors", "confidence": 0.87},
+  "depends_on": []
+}
+```
+
+Use VQA fast-path when:
+- The question has 2-4 clear answer choices
+- The answer doesn't require reading text or precise numbers
+- Visual embedding similarity is sufficient (scene type, object presence, color)
+
+Do NOT use VQA fast-path when:
+- The question requires counting or measurement
+- The answer is a specific number, name, or text string
+- Visual detail at frame level is needed
+
 ## Rules
 
 1. Each sub-question must be independently answerable given its time range.
@@ -78,3 +106,4 @@ Output a structured decomposition as a JSON-formatted plan:
 4. Include `search_hints` so the answering agent knows which fields/queries to try.
 5. Include `synthesis_instruction` so the orchestrator knows how to combine results.
 6. If the question is simple enough to answer directly (single temporal region, no decomposition needed), say so with `"complexity": "simple"` and a single sub-question.
+7. Use VQA fast-path for multiple-choice sub-questions to save budget.
