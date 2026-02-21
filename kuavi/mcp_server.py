@@ -508,6 +508,7 @@ _state: dict[str, Any] = {
         "tokens_used": 0,
     },
     "last_frames": [],  # cache of last extract_frames/zoom_frames result for reference by index
+    "llm_clients": {},  # cached LLM clients per backend (avoids per-call reconnection)
     "budget": {
         "max_tool_calls": 50,
         "warn_tool_calls": 35,
@@ -1751,6 +1752,33 @@ def kuavi_set_llm_config(
 # ---------------------------------------------------------------------------
 
 
+def _get_llm_client(backend: str) -> Any:
+    """Get or create a cached LLM client for the given backend."""
+    clients = _state["llm_clients"]
+    if backend not in clients:
+        if backend == "gemini":
+            from google import genai
+            from google.genai import types
+
+            http_options = types.HttpOptions(timeout=300_000)  # 5 min
+            clients[backend] = genai.Client(http_options=http_options)
+        elif backend == "anthropic":
+            import anthropic
+
+            clients[backend] = anthropic.Anthropic()
+        elif backend == "openai":
+            import openai
+
+            clients[backend] = openai.OpenAI()
+        else:
+            raise ValueError(f"Unsupported backend: {backend}")
+    return clients[backend]
+
+
+_LLM_MAX_RETRIES = 3
+_LLM_RETRY_BASE_DELAY = 2.0
+
+
 def _call_llm(
     prompt: str | list,
     backend: str,
@@ -1790,10 +1818,9 @@ def _call_llm(
         )
     try:
         if backend == "gemini":
-            from google import genai
             from google.genai import types
 
-            client = genai.Client()
+            client = _get_llm_client("gemini")
             if isinstance(prompt, list):
                 parts = []
                 for item in prompt:
@@ -1807,12 +1834,31 @@ def _call_llm(
                 contents = [parts]
             else:
                 contents = prompt
-            response = client.models.generate_content(model=model, contents=contents)
-            response_text = response.text
+            # Add thinking config for Gemini 3 models (matches RLM's approach)
+            config = None
+            if "gemini-3" in model:
+                config = types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+                )
+            # Retry on transient server errors
+            last_exc = None
+            for attempt in range(_LLM_MAX_RETRIES):
+                try:
+                    response = client.models.generate_content(
+                        model=model, contents=contents, config=config,
+                    )
+                    response_text = response.text
+                    break
+                except Exception as e:
+                    last_exc = e
+                    status = getattr(e, "status_code", None) or getattr(e, "code", 0)
+                    if status not in (500, 504) or attempt == _LLM_MAX_RETRIES - 1:
+                        raise
+                    delay = min(_LLM_RETRY_BASE_DELAY * (2 ** attempt), 15.0)
+                    logger.warning("Gemini %s on attempt %d, retrying in %.1fs", status, attempt + 1, delay)
+                    time.sleep(delay)
         elif backend == "anthropic":
-            import anthropic
-
-            client = anthropic.Anthropic()
+            client = _get_llm_client("anthropic")
             if isinstance(prompt, list):
                 content_parts = []
                 for item in prompt:
@@ -1833,9 +1879,7 @@ def _call_llm(
             message = client.messages.create(model=model, max_tokens=1024, messages=messages)
             response_text = message.content[0].text
         elif backend == "openai":
-            import openai
-
-            client = openai.OpenAI()
+            client = _get_llm_client("openai")
             if isinstance(prompt, list):
                 content_parts = []
                 for item in prompt:

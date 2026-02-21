@@ -477,6 +477,22 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
     toolBreakdown[name] = (toolBreakdown[name] || 0) + 1;
   }
 
+  // Aggregate token usage from tool_call and llm_call events
+  const llmCalls = events.filter((e): e is KUAViLLMCallEvent => e.type === 'llm_call');
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  for (const tc of toolCalls) {
+    const tu = tc.token_usage;
+    if (tu) {
+      totalInputTokens += tu.input_tokens_approx ?? 0;
+      totalOutputTokens += tu.output_tokens_approx ?? 0;
+    }
+  }
+  for (const lc of llmCalls) {
+    totalInputTokens += lc.prompt_tokens_approx ?? 0;
+    totalOutputTokens += lc.response_tokens_approx ?? 0;
+  }
+
   // Count searches and frames
   const totalSearches = toolCalls.filter(
     (tc) => tc.tool_name.includes('search') || tc.tool_name.includes('discriminative_vqa')
@@ -611,6 +627,8 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
     hasErrors,
     finalAnswer,
     finalAnswerBrief: extractFinalAnswerBrief(finalAnswer ?? ''),
+    totalInputTokens,
+    totalOutputTokens,
   };
 }
 

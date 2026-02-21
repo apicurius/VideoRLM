@@ -241,6 +241,8 @@ export interface KUAViLogMetadata {
   hasErrors: boolean;
   finalAnswer: string | null;
   finalAnswerBrief: string | null;
+  totalInputTokens: number;
+  totalOutputTokens: number;
 }
 
 export interface KUAViLogFile {

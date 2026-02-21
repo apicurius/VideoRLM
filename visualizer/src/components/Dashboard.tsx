@@ -316,6 +316,11 @@ export function Dashboard() {
                                   <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4">
                                     {isKUAViLog(log) ? `${log.metadata.totalToolCalls} tools` : `${log.metadata.totalIterations} iter`}
                                   </Badge>
+                                  {isKUAViLog(log) && (log.metadata.totalInputTokens + log.metadata.totalOutputTokens) > 0 && (
+                                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/30">
+                                      {`${(((log.metadata.totalInputTokens + log.metadata.totalOutputTokens) / 1000)).toFixed(1)}K tok`}
+                                    </Badge>
+                                  )}
                                   <Badge variant="outline" className={cn(
                                     "text-[9px] px-1.5 py-0 h-4",
                                     isKUAViLog(log)

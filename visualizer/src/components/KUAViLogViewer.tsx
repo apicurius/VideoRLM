@@ -223,6 +223,14 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
               icon="⏱"
               variant="yellow"
             />
+            {(metadata.totalInputTokens > 0 || metadata.totalOutputTokens > 0) && (
+              <StatsCard
+                label="Tokens"
+                value={`${((metadata.totalInputTokens + metadata.totalOutputTokens) / 1000).toFixed(1)}K`}
+                icon="◈"
+                variant="cyan"
+              />
+            )}
             {metadata.hasFrames && (
               <StatsCard
                 label="Frames"
