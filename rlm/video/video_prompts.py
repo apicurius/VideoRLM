@@ -188,6 +188,7 @@ CRITICAL ANTI-HALLUCINATION RULES for value-reading tasks:
    f. Crop different regions of each frame systematically (top-half, bottom-half, quadrants)
    g. Try more frames at higher fps (fps=8.0)
 5. A value is CONFIRMED only when llm_query returns the specific number from a frame/crop. Cross-check by reading the same table from at least 2 different frames.
+6. COMPLETENESS CHECK: Before writing your final answer for table/chart/score questions, read the ENTIRE table — not just the first matching row. Tables often contain multiple entries for the same method under different model backbones, settings, or conditions. Report ALL matching values with their context (e.g., model name, configuration). If the question is ambiguous about which row, report all and let the user decide.
 
 STRATEGY FOR VIDEO ANALYSIS:
 

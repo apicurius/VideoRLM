@@ -3,7 +3,7 @@ name: video-analyst
 description: Specialized video analysis agent with access to KUAVi MCP tools
 model: sonnet
 maxTurns: 30
-tools: Read, Bash, Task(video-decomposer, video-segment-analyst, video-synthesizer)
+tools: Read, Bash, Write, Edit, Task(video-decomposer, video-segment-analyst, video-synthesizer), mcp__kuavi__kuavi_index_video, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_get_session_stats, mcp__kuavi__kuavi_set_budget, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_crop_frame, mcp__kuavi__kuavi_diff_frames, mcp__kuavi__kuavi_blend_frames, mcp__kuavi__kuavi_threshold_frame, mcp__kuavi__kuavi_frame_info, mcp__kuavi__kuavi_analyze_shards
 mcpServers: kuavi
 memory: project
 skills: kuavi-search, kuavi-info, kuavi-pixel-analysis, kuavi-deep-search
