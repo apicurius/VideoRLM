@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 
 from rlm.clients.base_lm import DEFAULT_TIMEOUT
@@ -17,6 +16,7 @@ class TestDefaultTimeout:
 
     def test_base_lm_stores_timeout(self):
         """BaseLM should store timeout in instance."""
+        openai = pytest.importorskip("openai")
         from rlm.clients.openai import OpenAIClient
 
         with patch("rlm.clients.openai.openai.OpenAI"):
@@ -26,6 +26,7 @@ class TestDefaultTimeout:
 
     def test_custom_timeout_override(self):
         """Custom timeout should override default."""
+        openai = pytest.importorskip("openai")
         from rlm.clients.openai import OpenAIClient
 
         with patch("rlm.clients.openai.openai.OpenAI"):
@@ -39,6 +40,7 @@ class TestOpenAIClientTimeout:
 
     def test_timeout_passed_to_client(self):
         """Timeout should be passed to OpenAI client."""
+        openai = pytest.importorskip("openai")
         from rlm.clients.openai import OpenAIClient
 
         with patch("rlm.clients.openai.openai.OpenAI") as mock_openai:
@@ -57,6 +59,8 @@ class TestOpenAIClientTimeout:
 
     def test_timeout_raises_exception(self):
         """Timeout should raise appropriate exception."""
+        openai = pytest.importorskip("openai")
+        httpx = pytest.importorskip("httpx")
         from rlm.clients.openai import OpenAIClient
 
         # Create a mock client that raises timeout
@@ -78,6 +82,7 @@ class TestAnthropicClientTimeout:
 
     def test_timeout_passed_to_client(self):
         """Timeout should be passed to Anthropic client."""
+        anthropic = pytest.importorskip("anthropic")
         from rlm.clients.anthropic import AnthropicClient
 
         with patch("rlm.clients.anthropic.anthropic.Anthropic") as mock_anthropic:
@@ -100,6 +105,7 @@ class TestAzureOpenAIClientTimeout:
 
     def test_timeout_passed_to_client(self):
         """Timeout should be passed to Azure OpenAI client."""
+        openai = pytest.importorskip("openai")
         from rlm.clients.azure_openai import AzureOpenAIClient
 
         with patch("rlm.clients.azure_openai.openai.AzureOpenAI") as mock_azure:
@@ -125,6 +131,7 @@ class TestPortkeyClientTimeout:
 
     def test_timeout_passed_to_client(self):
         """Timeout should be passed to Portkey client."""
+        pytest.importorskip("portkey_ai")
         from rlm.clients.portkey import PortkeyClient
 
         with patch("rlm.clients.portkey.Portkey") as mock_portkey:
