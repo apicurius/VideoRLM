@@ -658,9 +658,10 @@ def kuavi_index_video(
                 make_gemini_refine_fn,
             )
 
-            caption_fn = make_gemini_caption_fn()
-            frame_caption_fn = make_gemini_frame_caption_fn()
-            refine_fn = make_gemini_refine_fn()
+            gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            caption_fn = make_gemini_caption_fn(api_key=gemini_key)
+            frame_caption_fn = make_gemini_frame_caption_fn(api_key=gemini_key)
+            refine_fn = make_gemini_refine_fn(api_key=gemini_key)
         except Exception:
             logger.warning("Failed to initialize Gemini captioning; indexing without captions.")
 

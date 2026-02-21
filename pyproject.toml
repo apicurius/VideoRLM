@@ -24,6 +24,8 @@ dependencies = [
     "scikit-learn>=1.4.0",
     "mcp>=1.0.0",
     "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.28.0",
 ]
 
 [project.urls]
@@ -40,6 +42,44 @@ embeddings = [
 ]
 asr = [
     "faster-whisper>=1.1.0",
+]
+gemini = [
+    "google-genai>=1.0.0",
+]
+openai = [
+    "openai>=1.0.0",
+]
+anthropic = [
+    "anthropic>=0.20.0",
+]
+litellm = [
+    "litellm>=1.0.0",
+]
+portkey = [
+    "portkey-ai>=0.1.0",
+]
+web = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+]
+modal = [
+    "modal>=0.55.0",
+    "flask>=2.0.0",
+]
+prime = [
+    "prime-sandboxes>=0.1.0",
+    "flask>=2.0.0",
+]
+e2b = [
+    "e2b-code-interpreter>=1.0.0",
+    "flask>=2.0.0",
+]
+daytona = [
+    "daytona>=0.1.0",
+    "flask>=2.0.0",
+]
+all = [
+    "kuavi[embeddings,asr,gemini,openai,anthropic,web]",
 ]
 
 [project.scripts]
