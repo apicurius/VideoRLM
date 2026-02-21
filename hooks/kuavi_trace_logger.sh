@@ -55,6 +55,9 @@ case "$EVENT" in
 
     if [[ "$TOOL_NAME" == *index_video* ]]; then
       LOG_FILE=$(new_run_file)
+      # Emit session_start event for the new run
+      printf '{"type":"session_start","timestamp":"%s","source":"claude-code"}\n' \
+        "$TIMESTAMP" >> "$LOG_FILE" 2>/dev/null
       # Reset timing and turn counter for new run
       rm -f "$TIMING_FILE"
       echo "1" > "$TURN_COUNT_FILE"
@@ -83,10 +86,12 @@ case "$EVENT" in
     # Update timing state for next call
     echo "$EPOCH_MS" > "$TIMING_FILE"
 
-    # Detect errors in tool response
+    # Detect errors in tool response (exclude Claude Code truncation warnings)
     HAS_ERROR=$(echo "$INPUT" | jq -r '
       (.tool_response // "") |
-      if (test("(?i)(error:|exception:|traceback|failed to|cannot |could not )")) then true else false end
+      if test("exceeds maximum allowed tokens") then false
+      elif test("(?i)(error:|exception:|traceback|failed to|cannot |could not )") then true
+      else false end
     ' 2>/dev/null || echo "false")
 
     # Build the tool_call event with duration and error status

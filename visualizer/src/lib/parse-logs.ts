@@ -459,22 +459,35 @@ export function computeKUAViMetadata(events: KUAViEvent[]): KUAViLogMetadata {
   );
   const isComplete = hasFinalAnswer || hasSessionEnd || (hasIndex && hasFollowUp);
 
-  // hasErrors: check has_error field first, then fall back to response string matching
+  // hasErrors: check response content first for known non-errors, then check has_error flag
   const hasErrors = toolCalls.some((tc) => {
-    if (tc.has_error) return true;
     const resp = tc.tool_response;
     const respStr = typeof resp === 'string' ? resp : JSON.stringify(resp ?? '');
+    // Truncation warnings from Claude Code are not real errors
     if (respStr.includes('exceeds maximum allowed tokens')) return false;
+    if (tc.has_error) return true;
     return respStr.includes('Error:') || respStr.includes('BUDGET EXCEEDED');
   });
 
-  // Extract final answer from the last final_answer event
+  // Extract final answer: prefer the first final_answer that appears after the last tool call.
+  // In interactive sessions the Stop hook fires multiple times (every conversation pause),
+  // so taking the last final_answer captures unrelated conversational messages.
   const finalAnswerEvents = events.filter(
     (e): e is KUAViFinalAnswerEvent => e.type === 'final_answer'
   );
-  const finalAnswer = finalAnswerEvents.length > 0
-    ? finalAnswerEvents[finalAnswerEvents.length - 1].text
-    : null;
+  let finalAnswer: string | null = null;
+  if (finalAnswerEvents.length > 0) {
+    if (toolCalls.length > 0) {
+      const lastToolTime = new Date(toolCalls[toolCalls.length - 1].timestamp).getTime();
+      // Find the first final_answer after the last tool call
+      const afterTool = finalAnswerEvents.find(
+        (e) => new Date(e.timestamp).getTime() >= lastToolTime
+      );
+      finalAnswer = (afterTool ?? finalAnswerEvents[0]).text;
+    } else {
+      finalAnswer = finalAnswerEvents[0].text;
+    }
+  }
 
   // Compute turn count via groupEventsIntoTurns
   const totalTurns = groupEventsIntoTurns(events).length;

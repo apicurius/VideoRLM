@@ -138,7 +138,7 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
                   </Badge>
                 </h1>
                 <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                  {metadata.model ?? 'Unknown model'}
+                  {metadata.model ?? 'Claude Code'}
                   {metadata.videoPath && (
                     <>
                       {' • '}
