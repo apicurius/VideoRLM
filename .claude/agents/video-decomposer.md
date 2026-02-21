@@ -4,7 +4,7 @@ description: Decomposes complex video questions into sub-questions targeting spe
 tools: mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_discriminative_vqa
 model: haiku
 maxTurns: 8
-permissionMode: acceptEdits
+permissionMode: default
 mcpServers: kuavi
 ---
 

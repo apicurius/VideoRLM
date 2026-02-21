@@ -4,7 +4,7 @@ description: Synthesizes results from multiple parallel segment analyses into a 
 tools: mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript
 model: sonnet
 maxTurns: 8
-permissionMode: acceptEdits
+permissionMode: default
 mcpServers: kuavi
 ---
 

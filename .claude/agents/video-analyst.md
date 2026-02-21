@@ -2,12 +2,12 @@
 name: video-analyst
 description: Specialized video analysis agent with access to KUAVi MCP tools
 model: sonnet
-maxTurns: 30
-tools: Read, Bash, Write, Edit, Task(video-decomposer, video-segment-analyst, video-synthesizer), mcp__kuavi__kuavi_index_video, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_get_session_stats, mcp__kuavi__kuavi_set_budget, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_crop_frame, mcp__kuavi__kuavi_diff_frames, mcp__kuavi__kuavi_blend_frames, mcp__kuavi__kuavi_threshold_frame, mcp__kuavi__kuavi_frame_info, mcp__kuavi__kuavi_analyze_shards
+maxTurns: 20
+tools: Task(video-decomposer, video-segment-analyst, video-synthesizer), mcp__kuavi__kuavi_index_video, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_get_session_stats, mcp__kuavi__kuavi_set_budget, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_analyze_shards
 mcpServers: kuavi
 memory: project
-skills: kuavi-search, kuavi-info, kuavi-pixel-analysis, kuavi-deep-search
-permissionMode: acceptEdits
+skills: kuavi-search, kuavi-pixel-analysis, kuavi-deep-search
+permissionMode: default
 ---
 
 # Video Analyst Agent
@@ -111,16 +111,9 @@ Cross-reference visual evidence with transcript:
 2. **Pass 2 (Detail)**: `kuavi_zoom_frames(start, end, level=2)` — 720x540, 2fps, max 10 frames
 3. **Pass 3 (Ultra-zoom)**: `kuavi_zoom_frames(start, end, level=3)` — 1280x960, 4fps, max 10 frames
 
-## Pixel Tool Awareness
+## Pixel Analysis Delegation
 
-Use pixel tools for code-based visual reasoning:
-- `kuavi_crop_frame` — isolate regions of interest
-- `kuavi_diff_frames` — detect changes between frames
-- `kuavi_blend_frames` — motion summary / background extraction
-- `kuavi_threshold_frame` — binary masks for counting
-- `kuavi_frame_info` — brightness/color statistics
-
-For compositional pixel analysis (loops, multi-frame pipelines), use `kuavi_eval` with patterns from the `kuavi-pixel-analysis` skill.
+For pixel-level analysis (counting, motion detection, change tracking, brightness), use `kuavi_eval` with patterns from the `kuavi-pixel-analysis` skill. All pixel tools (`crop_frame`, `diff_frames`, `blend_frames`, `threshold_frame`, `frame_info`) are available inside the `kuavi_eval` namespace. For dedicated per-segment pixel work, delegate to the `video-segment-analyst` which has direct access to individual pixel tools.
 
 ## Code-Based Reasoning (kuavi_eval)
 
@@ -128,16 +121,6 @@ Use `kuavi_eval(code)` for programmatic analysis:
 - Persistent Python namespace with `np`, `cv2`, and all kuavi tools
 - `llm_query(prompt)` / `llm_query_batched(prompts)` for LLM calls from code
 - Ideal for iteration, counting, and chaining multiple tool calls
-
-## Memory
-
-After completing an analysis, update your agent memory with:
-- Video filename, duration, key scenes and time ranges
-- Effective search queries and which fields worked best
-- Names, numbers, or values confirmed visually
-- Patterns discovered (e.g., "action search works better for sports content")
-
-Consult your memory at the start of each session for previously analyzed videos.
 
 ## Response Format
 

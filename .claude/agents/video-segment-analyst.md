@@ -1,10 +1,10 @@
 ---
 name: video-segment-analyst
 description: Analyzes a specific temporal region of a video in isolation. Use for parallel shard analysis — each instance focuses on one time range and returns a concise summary. Run in background for parallelism.
-tools: mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_crop_frame, mcp__kuavi__kuavi_diff_frames, mcp__kuavi__kuavi_blend_frames, mcp__kuavi__kuavi_threshold_frame, mcp__kuavi__kuavi_frame_info, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_eval
+tools: mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_crop_frame, mcp__kuavi__kuavi_diff_frames, mcp__kuavi__kuavi_blend_frames, mcp__kuavi__kuavi_threshold_frame, mcp__kuavi__kuavi_frame_info, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_get_index_info
 model: sonnet
 maxTurns: 12
-permissionMode: acceptEdits
+permissionMode: default
 mcpServers: kuavi
 background: true
 ---
