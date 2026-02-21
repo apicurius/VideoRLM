@@ -12,8 +12,8 @@ image.png
 # MacOS
 .DS_Store
 
-# Logs
-logs/
+# Logs (root-level only — don't ignore visualizer/src/app/api/logs/)
+/logs/
 
 # Research papers and docs
 *.pdf
