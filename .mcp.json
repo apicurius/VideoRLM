@@ -2,7 +2,10 @@
   "mcpServers": {
     "kuavi": {
       "command": "uv",
-      "args": ["run", "python", "-m", "kuavi.mcp_server"]
+      "args": ["run", "python", "-m", "kuavi.mcp_server"],
+      "env": {
+        "KUAVI_LOG_DIR": "/Users/oerdogan/LVU/logs"
+      }
     }
   }
 }

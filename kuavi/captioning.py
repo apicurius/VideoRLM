@@ -69,8 +69,6 @@ def make_gemini_caption_fn(
     """
     from google import genai
 
-    client = genai.Client(api_key=api_key) if api_key else genai.Client()
-
     prompt_text = (
         "Analyze this video segment and produce a structured JSON annotation.\n\n"
         "Return ONLY valid JSON with this exact structure:\n"
@@ -111,6 +109,7 @@ def make_gemini_caption_fn(
         gemini_parts = _build_gemini_parts(parts + real_frames)
 
         try:
+            client = genai.Client(api_key=api_key) if api_key else genai.Client()
             response = client.models.generate_content(model=model, contents=gemini_parts)
             text = response.text.strip()
             # Strip markdown code fences if present
@@ -140,8 +139,6 @@ def make_gemini_frame_caption_fn(
     """
     from google import genai
 
-    client = genai.Client(api_key=api_key) if api_key else genai.Client()
-
     prompt_text = (
         "Describe this single video frame in 1-2 sentences. "
         "Focus on what is shown visually: objects, people, text, actions, "
@@ -154,6 +151,7 @@ def make_gemini_frame_caption_fn(
         frame = frames[0]
         gemini_parts = _build_gemini_parts([prompt_text, frame])
         try:
+            client = genai.Client(api_key=api_key) if api_key else genai.Client()
             response = client.models.generate_content(model=model, contents=gemini_parts)
             return response.text.strip()
         except Exception as e:
@@ -174,8 +172,6 @@ def make_gemini_refine_fn(
     """
     from google import genai
 
-    client = genai.Client(api_key=api_key) if api_key else genai.Client()
-
     def refine_fn(draft: str, context: str, effort: str = "high") -> str:
         prompt = (
             "You are refining a video segment annotation. "
@@ -185,6 +181,7 @@ def make_gemini_refine_fn(
             "Return ONLY the refined JSON annotation. No markdown fences, no explanation."
         )
         try:
+            client = genai.Client(api_key=api_key) if api_key else genai.Client()
             response = client.models.generate_content(model=model, contents=prompt)
             text = response.text.strip()
             # Strip markdown code fences if present

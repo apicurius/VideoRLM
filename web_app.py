@@ -19,7 +19,17 @@ from fastapi.staticfiles import StaticFiles
 
 load_dotenv(Path(__file__).parent / ".env")
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="VideoRLM Web")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In development, allow Next.js on localhost:3000
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 UPLOAD_DIR = Path("/tmp/rlm_web_uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -829,6 +839,7 @@ async def analyze(
     backend: str = Form(default="openrouter"),
     model: str = Form(default="openai/gpt-4o"),
     pipeline: str = Form(default="rlm"),
+    custom_api_key: str = Form(default=""),
 ):
     suffix = Path(video.filename or "upload.mp4").suffix or ".mp4"
     video_id = str(uuid.uuid4())
@@ -837,12 +848,14 @@ async def analyze(
     with open(video_path, "wb") as f:
         shutil.copyfileobj(video.file, f)
 
-    api_key = {
+    env_key = {
         "openai": os.getenv("OPENAI_API_KEY"),
         "openrouter": os.getenv("OPENROUTER_API_KEY"),
         "anthropic": os.getenv("ANTHROPIC_API_KEY"),
         "gemini": os.getenv("GEMINI_API_KEY"),
     }.get(backend) or os.getenv("OPENROUTER_API_KEY", "")
+    
+    api_key = custom_api_key.strip() or env_key
 
     event_q: queue.Queue = queue.Queue()
 

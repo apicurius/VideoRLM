@@ -6,8 +6,8 @@
 
 This project provides two complementary pipelines for agentic video analysis:
 
-- **VideoRLM** — REPL-based recursive reasoning. The agent writes Python code that calls tools, makes sub-LLM calls, and recursively decomposes problems. Best for complex multi-step reasoning and custom logic.
-- **KUAVi** — MCP-based structured tool calling. The agent uses standard LLM function calling (OpenAI/Gemini native) with hard budget enforcement and search-first guidance. Best for production use and Claude Code integration.
+- **VideoRLM** (Recursive Language Models) — REPL-based recursive reasoning. The agent writes Python code that calls tools, makes sub-LLM calls, and recursively decomposes problems. Best for complex multi-step reasoning and custom logic.
+- **KUAVi** (Koc Univesity Agentic Visual intelligence) — MCP-based structured tool calling. The agent uses standard LLM function calling (OpenAI/Gemini native) with hard budget enforcement and search-first guidance. Best for production use and Claude Code integration.
 
 Both pipelines share the same indexing backend — V-JEPA 2 for scene detection, SigLIP2 for visual embeddings, EmbeddingGemma for semantic embeddings, and Whisper for ASR — but differ in how the agent interacts with the tools.
 
