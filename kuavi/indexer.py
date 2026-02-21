@@ -35,6 +35,7 @@ class VideoIndex:
     embed_fn: Any = None
     frame_embeddings: np.ndarray | None = None
     visual_embed_fn: Any = None
+    temporal_embeddings: np.ndarray | None = None  # (N_segments, 1024) from V-JEPA 2
     segment_hierarchy: list[list[dict]] = field(default_factory=list)
     hierarchy_embeddings: list[np.ndarray | None] = field(default_factory=list)
 
@@ -56,6 +57,8 @@ class VideoIndex:
             arrays["action_embeddings"] = self.action_embeddings
         if self.frame_embeddings is not None:
             arrays["frame_embeddings"] = self.frame_embeddings
+        if self.temporal_embeddings is not None:
+            arrays["temporal_embeddings"] = self.temporal_embeddings
         for lvl_idx, h_emb in enumerate(self.hierarchy_embeddings):
             if h_emb is not None:
                 arrays[f"hierarchy_emb_L{lvl_idx}"] = h_emb
@@ -85,6 +88,7 @@ class VideoIndex:
         embeddings = npz["embeddings"] if "embeddings" in npz else None
         action_embeddings = npz["action_embeddings"] if "action_embeddings" in npz else None
         frame_embeddings = npz["frame_embeddings"] if "frame_embeddings" in npz else None
+        temporal_embeddings = npz["temporal_embeddings"] if "temporal_embeddings" in npz else None
 
         # Load hierarchy embeddings
         hierarchy_embeddings: list[np.ndarray | None] = []
@@ -98,6 +102,7 @@ class VideoIndex:
             embeddings=embeddings,
             action_embeddings=action_embeddings,
             frame_embeddings=frame_embeddings,
+            temporal_embeddings=temporal_embeddings,
             transcript=metadata["transcript"],
             scene_boundaries=metadata["scene_boundaries"],
             embedding_quality=metadata.get("embedding_quality", {}),
@@ -314,6 +319,8 @@ class VideoIndexer:
 
         # 2. Detect scene boundaries
         hierarchy_result: dict | None = None
+        vjepa_clip_embeddings: np.ndarray | None = None
+        vjepa_clip_timestamps: list[float] | None = None
         if self._scene_model_name:
             # V-JEPA 2 clip-level scene detection
             self._ensure_scene_model()
@@ -321,8 +328,12 @@ class VideoIndexer:
                 frames, timestamps, self._scene_clip_size
             )
 
+            # Compute clip embeddings once and cache for reuse
+            vjepa_clip_embeddings = self._encode_clips_vjepa(clips)
+            vjepa_clip_timestamps = clip_timestamps
+
             def _vjepa_embed_fn(_frames):
-                return self._encode_clips_vjepa(clips)
+                return vjepa_clip_embeddings
 
             clip_representatives = [c[len(c) // 2] for c in clips]
 
@@ -375,8 +386,14 @@ class VideoIndexer:
         #     and only caption representatives, propagating results afterward.
         self._pre_caption_dedup(segment_infos)
 
-        # 4c. Selective decoding: skip captioning for visually uniform segments
-        self._selective_decode(segment_infos, frames, timestamps)
+        # 4c. Selective decoding: 3-tier (dead / static-informative / dynamic)
+        self._selective_decode(
+            segment_infos,
+            frames,
+            timestamps,
+            temporal_clip_embeddings=vjepa_clip_embeddings,
+            temporal_clip_timestamps=vjepa_clip_timestamps,
+        )
 
         # 5. Caption each segment (if a caption function was provided)
         if caption_fn is not None or frame_caption_fn is not None:
@@ -541,6 +558,28 @@ class VideoIndexer:
         frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
         self._check_embedding_quality(frame_embeddings, label="frame")
 
+        # 7d. Aggregate V-JEPA 2 temporal embeddings per segment
+        temporal_embeddings: np.ndarray | None = None
+        if vjepa_clip_embeddings is not None and vjepa_clip_timestamps is not None:
+            temporal_per_seg: list[np.ndarray] = []
+            for seg in segment_infos:
+                clip_indices = [
+                    i
+                    for i, ct in enumerate(vjepa_clip_timestamps)
+                    if seg["start_time"] <= ct <= seg["end_time"]
+                ]
+                if clip_indices:
+                    seg_emb = vjepa_clip_embeddings[clip_indices].mean(axis=0)
+                    norm = np.linalg.norm(seg_emb)
+                    if norm > 1e-10:
+                        seg_emb = seg_emb / norm
+                    temporal_per_seg.append(seg_emb)
+                else:
+                    temporal_per_seg.append(np.zeros(vjepa_clip_embeddings.shape[1]))
+            temporal_embeddings = np.stack(temporal_per_seg)
+            temporal_embeddings = self._smooth_embeddings(temporal_embeddings, window=3)
+            self._check_embedding_quality(temporal_embeddings, label="temporal")
+
         # 8. Build hierarchy levels (when hierarchical mode is enabled)
         segment_hierarchy: list[list[dict]] = []
         hierarchy_embeddings: list[np.ndarray | None] = []
@@ -589,6 +628,7 @@ class VideoIndexer:
             embeddings=embeddings,
             action_embeddings=action_embeddings,
             frame_embeddings=frame_embeddings,
+            temporal_embeddings=temporal_embeddings,
             transcript=transcript,
             scene_boundaries=scene_boundaries,
             embedding_quality=quality,
@@ -1229,13 +1269,26 @@ class VideoIndexer:
         frames: list[np.ndarray],
         timestamps: list[float],
         similarity_threshold: float = 0.98,
+        temporal_clip_embeddings: np.ndarray | None = None,
+        temporal_clip_timestamps: list[float] | None = None,
     ) -> None:
-        """Compute visual variance for segments. Static segments are still captioned
-        since static content (e.g. slides, tables, charts) often contains important
-        information that captions need to capture."""
+        """3-tier selective decoding to optimize captioning cost.
+
+        Tier 0 — DEAD: Skip captioning entirely (black/blank frames).
+        Tier 1 — STATIC-INFORMATIVE: Caption with 1 keyframe only (slides, charts).
+        Tier 2 — DYNAMIC: Full captioning pipeline (no change).
+
+        V-JEPA temporal variance can promote Tier 1 → Tier 2 when subtle motion
+        is detected that SigLIP2 misses.
+        """
+        import cv2
+
         self._ensure_model()
 
-        static_count = 0
+        tier_0_count = 0
+        tier_1_count = 0
+        tier_2_count = 0
+
         for seg in segments:
             if seg.get("_skip_caption"):
                 continue
@@ -1243,31 +1296,104 @@ class VideoIndexer:
                 f for f, t in zip(frames, timestamps)
                 if seg["start_time"] <= t <= seg["end_time"]
             ]
-            if len(seg_frames) < 3:
+            if not seg_frames:
                 continue
+
+            # --- Tier 0: DEAD frame detection ---
+            # Sample 1-2 frames and check pixel variance + edge density
+            sample_indices = [len(seg_frames) // 2]
+            if len(seg_frames) >= 4:
+                sample_indices.append(len(seg_frames) // 4)
+            is_dead = True
+            for si in sample_indices:
+                sample = seg_frames[si]
+                gray = cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY)
+                pixel_std = float(gray.std())
+                laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                edge_density = laplacian_var / max(gray.mean(), 1.0)
+                if pixel_std >= 5.0 and edge_density >= 0.01:
+                    is_dead = False
+                    break
+
+            if is_dead:
+                seg["_skip_caption"] = True
+                seg["_selective_tier"] = 0
+                seg["caption"] = "Dead frame (black/blank)"
+                seg["annotation"] = {
+                    "summary": {
+                        "brief": "Dead frame (black/blank)",
+                        "detailed": "This segment contains dead frames with no visual content.",
+                    },
+                    "action": {"brief": "N/A", "detailed": "", "actor": None},
+                }
+                seg["is_non_action"] = True
+                tier_0_count += 1
+                continue
+
+            # --- Compute SigLIP2 visual similarity for Tier 1/2 ---
+            if len(seg_frames) < 3:
+                seg["_selective_tier"] = 2
+                tier_2_count += 1
+                continue
+
             try:
                 embs = self._encode_frames(seg_frames)
                 sim_matrix = embs @ embs.T
                 n = len(sim_matrix)
                 if n < 2:
+                    seg["_selective_tier"] = 2
+                    tier_2_count += 1
                     continue
                 mean_sim = float(
                     (sim_matrix.sum() - np.trace(sim_matrix)) / (n * (n - 1))
                 )
                 seg["_visual_variance"] = round(1.0 - mean_sim, 6)
-                if mean_sim > similarity_threshold:
-                    static_count += 1
             except Exception:
-                pass
+                seg["_selective_tier"] = 2
+                tier_2_count += 1
+                continue
 
-        if static_count:
-            logger.info(
-                "Selective decode: %d/%d segments are visually static (similarity > %.2f), "
-                "but will still be captioned",
-                static_count,
-                len(segments),
-                similarity_threshold,
-            )
+            if mean_sim <= similarity_threshold:
+                # Dynamic — full captioning
+                seg["_selective_tier"] = 2
+                tier_2_count += 1
+                continue
+
+            # --- Tier 1 candidate: check V-JEPA temporal variance for promotion ---
+            if temporal_clip_embeddings is not None and temporal_clip_timestamps is not None:
+                clip_indices = [
+                    i
+                    for i, ct in enumerate(temporal_clip_timestamps)
+                    if seg["start_time"] <= ct <= seg["end_time"]
+                ]
+                if len(clip_indices) >= 2:
+                    clip_embs = temporal_clip_embeddings[clip_indices]
+                    temporal_var = float(np.var(clip_embs, axis=0).mean())
+                    seg["_temporal_variance"] = round(temporal_var, 6)
+                    if temporal_var > 0.05:
+                        # Subtle motion detected — promote to dynamic
+                        seg["_selective_tier"] = 2
+                        tier_2_count += 1
+                        continue
+
+            # --- Tier 1: STATIC-INFORMATIVE — keep only middle keyframe ---
+            seg["_selective_tier"] = 1
+            seg["_static_informative"] = True
+            real_frames = [f for f in seg.get("_frames", []) if not isinstance(f, str)]
+            if real_frames:
+                mid_frame = real_frames[len(real_frames) // 2]
+                str_tokens = [f for f in seg.get("_frames", []) if isinstance(f, str)]
+                seg["_frames"] = str_tokens + [mid_frame]
+            tier_1_count += 1
+
+        logger.info(
+            "Selective decode: Tier 0 (dead): %d, Tier 1 (static-informative): %d, "
+            "Tier 2 (dynamic): %d out of %d segments",
+            tier_0_count,
+            tier_1_count,
+            tier_2_count,
+            len(segments),
+        )
 
     def _build_coarse_level(
         self,

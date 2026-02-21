@@ -583,11 +583,20 @@ def kuavi_index_video(
     cache_dir: str | None = None,
     no_scene_model: bool = False,
     no_text_embedding: bool = False,
+    no_caption: bool = False,
+    caption_resize_width: int | None = None,
+    caption_resize_height: int | None = None,
+    transcript_path: str | None = None,
+    auto_shard_segments: int | None = None,
+    num_segments: int | None = None,
 ) -> dict[str, Any]:
     """Index a video file for search and analysis.
 
     Must be called before using search or analysis tools.
     Performs scene detection, frame embedding, and optional ASR transcription.
+
+    When num_segments is set, the video is split into that many equal-duration
+    temporal segments instead of using V-JEPA 2 scene detection.
     """
     from kuavi.indexer import VideoIndexer
     from kuavi.loader import VideoLoader
@@ -619,18 +628,49 @@ def kuavi_index_video(
             cap.release()
 
     loader = VideoLoader(fps=actual_fps)
-    loaded_video = loader.load(video_path)
+    if num_segments is not None:
+        loaded_video = loader.load_and_segment(video_path, num_segments=num_segments)
+    else:
+        loaded_video = loader.load(video_path)
+
+    # Resolve caption_resize from width/height params
+    caption_resize: tuple[int, int] | None = None
+    if caption_resize_width is not None and caption_resize_height is not None:
+        caption_resize = (caption_resize_width, caption_resize_height)
 
     indexer = VideoIndexer(
         embedding_model=embedding_model,
         cache_dir=cache_dir,
         text_embedding_model=text_embedding_model_resolved,
         scene_model=scene_model_resolved,
+        caption_resize=caption_resize,
     )
+
+    # Build captioning functions when captioning is enabled
+    caption_fn = None
+    frame_caption_fn = None
+    refine_fn = None
+    if not no_caption:
+        try:
+            from kuavi.captioning import (
+                make_gemini_caption_fn,
+                make_gemini_frame_caption_fn,
+                make_gemini_refine_fn,
+            )
+
+            caption_fn = make_gemini_caption_fn()
+            frame_caption_fn = make_gemini_frame_caption_fn()
+            refine_fn = make_gemini_refine_fn()
+        except Exception:
+            logger.warning("Failed to initialize Gemini captioning; indexing without captions.")
 
     index = indexer.index_video(
         loaded_video,
+        caption_fn=caption_fn,
+        frame_caption_fn=frame_caption_fn,
+        refine_fn=refine_fn,
         whisper_model=whisper_model,
+        transcript_path=transcript_path,
     )
 
     video_id = Path(video_path).stem
@@ -643,19 +683,31 @@ def kuavi_index_video(
     _state["active_video"] = video_id
     _track_tool_call("index")
 
-    result = {
+    num_segments = len(index.segments)
+
+    result: dict[str, Any] = {
         "status": "indexed",
         "video_id": video_id,
         "video_path": video_path,
         "duration": round(loaded_video.metadata.duration, 2),
         "fps": round(actual_fps, 3),
         "frames_extracted": loaded_video.metadata.extracted_frame_count,
-        "segments": len(index.segments),
+        "segments": num_segments,
         "scenes": len(index.scene_boundaries),
         "transcript_entries": len(index.transcript),
         "has_embeddings": index.embeddings is not None,
         "has_frame_embeddings": index.frame_embeddings is not None,
+        "has_temporal_embeddings": index.temporal_embeddings is not None,
     }
+
+    # Auto-sharding: if segment count exceeds threshold, recommend shard analysis
+    shard_threshold = auto_shard_segments or 30
+    if num_segments > shard_threshold:
+        result["auto_shard_recommended"] = True
+        result["auto_shard_reason"] = (
+            f"Video has {num_segments} segments (threshold: {shard_threshold}). "
+            f"Consider calling kuavi_analyze_shards() for efficient long-video analysis."
+        )
 
     # Emit a metadata event so the visualizer can display rich video info
     _trace_logger.log_video_metadata(
@@ -685,7 +737,8 @@ def kuavi_search_video(
     """Semantic search over indexed video segments.
 
     Fields: "summary" (visual descriptions), "action" (activities),
-    "visual" (frame embeddings), "all" (everything).
+    "visual" (frame embeddings), "temporal" (V-JEPA 2 motion dynamics),
+    "all" (weighted composite of all fields).
     Level 0 = fine-grained, level 1+ = coarser hierarchy.
     """
     index = _get_active_index(video_id)
@@ -916,6 +969,7 @@ def kuavi_get_index_info(video_id: str | None = None) -> dict[str, Any]:
         "has_embeddings": index.embeddings is not None,
         "has_action_embeddings": index.action_embeddings is not None,
         "has_frame_embeddings": index.frame_embeddings is not None,
+        "has_temporal_embeddings": index.temporal_embeddings is not None,
         "hierarchy_levels": len(index.segment_hierarchy),
     }
 
@@ -1097,7 +1151,152 @@ def kuavi_load_index(
         "scene_boundaries": len(index.scene_boundaries),
         "has_embeddings": index.embeddings is not None,
         "has_frame_embeddings": index.frame_embeddings is not None,
+        "has_temporal_embeddings": index.temporal_embeddings is not None,
     }
+
+
+def _build_shard_prompts(
+    shard_duration: float = 30.0,
+    max_frames_per_segment: int = 3,
+    frame_width: int = 480,
+    frame_height: int = 360,
+) -> list[list]:
+    """Build multimodal shard prompts with text captions and actual keyframes.
+
+    Each shard prompt is a list of strings and image dicts suitable for
+    ``llm_query()`` or ``llm_query_batched()``.  This mirrors RLM's
+    ``shard_prompts`` variable.
+    """
+    index = _get_active_index()
+    if index is None:
+        return []
+
+    segments = index.segments
+    if not segments:
+        return []
+
+    video_path = _get_active_video_path()
+    all_starts = [s["start_time"] for s in segments]
+    all_ends = [s["end_time"] for s in segments]
+    video_start = min(all_starts)
+    video_end = max(all_ends)
+
+    # Build shards
+    shards: list[list[dict]] = []
+    t = video_start
+    while t < video_end:
+        shard_end = min(t + shard_duration, video_end)
+        shard_segs = [
+            s for s in segments if s["start_time"] >= t and s["start_time"] < shard_end
+        ]
+        if shard_segs:
+            shards.append(shard_segs)
+        t = shard_end
+
+    total = len(shards)
+
+    # Extract frames if video path is available
+    cap = None
+    original_fps = 0.0
+    if video_path:
+        try:
+            import cv2
+
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                original_fps = cap.get(cv2.CAP_PROP_FPS)
+            else:
+                cap = None
+        except Exception:
+            cap = None
+
+    shard_prompts: list[list] = []
+    try:
+        for shard_idx, shard_segs in enumerate(shards):
+            parts: list = [
+                f"You are analyzing shard {shard_idx + 1}/{total} of a video "
+                f"(time range {shard_segs[0]['start_time']:.1f}s - "
+                f"{shard_segs[-1]['end_time']:.1f}s).\n"
+            ]
+            for s in shard_segs:
+                ann = s.get("annotation", {})
+                summary = ann.get("summary", {}).get("brief", s.get("caption", "No caption"))
+                parts.append(
+                    f"\n--- Segment [{s['start_time']:.1f}s - {s['end_time']:.1f}s]: "
+                    f"{summary}"
+                )
+                # Extract keyframes for this segment
+                if cap is not None and original_fps > 0:
+                    from kuavi.context import _encode_frame
+
+                    seg_start = s["start_time"]
+                    seg_end = s["end_time"]
+                    seg_dur = seg_end - seg_start
+                    n_frames = min(max_frames_per_segment, max(1, int(seg_dur * 0.5)))
+                    if n_frames == 1:
+                        times = [(seg_start + seg_end) / 2]
+                    else:
+                        step = seg_dur / (n_frames + 1)
+                        times = [seg_start + step * (j + 1) for j in range(n_frames)]
+                    for t_frame in times:
+                        frame_idx = int(t_frame * original_fps)
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                        ret, frame = cap.read()
+                        if ret:
+                            frame = cv2.resize(frame, (frame_width, frame_height))
+                            encoded = _encode_frame(frame, format=".jpg", quality=75)
+                            parts.append({
+                                "data": encoded["data"],
+                                "mime_type": encoded.get("mime_type", "image/jpeg"),
+                            })
+            shard_prompts.append(parts)
+    finally:
+        if cap is not None:
+            cap.release()
+
+    return shard_prompts
+
+
+def _build_shard_info(shard_duration: float = 30.0) -> list[str]:
+    """Build shard descriptions from the current index's segments."""
+    index = _get_active_index()
+    if index is None:
+        return ["No video indexed."]
+
+    segments = index.segments
+    if not segments:
+        return ["No segments in index."]
+
+    all_starts = [s["start_time"] for s in segments]
+    all_ends = [s["end_time"] for s in segments]
+    video_start = min(all_starts)
+    video_end = max(all_ends)
+
+    descriptions: list[str] = []
+    t = video_start
+    shard_idx = 0
+    while t < video_end:
+        shard_end = min(t + shard_duration, video_end)
+        shard_segs = [
+            s for s in segments if s["start_time"] >= t and s["start_time"] < shard_end
+        ]
+        if shard_segs:
+            seg_summaries = []
+            for s in shard_segs:
+                ann = s.get("annotation", {})
+                brief = ann.get("summary", {}).get("brief", s.get("caption", "No caption"))
+                seg_summaries.append(
+                    f"  [{s['start_time']:.1f}s-{s['end_time']:.1f}s] {brief}"
+                )
+            desc = (
+                f"Shard {shard_idx} ({t:.1f}s-{shard_end:.1f}s): "
+                f"{len(shard_segs)} segments\n" + "\n".join(seg_summaries)
+            )
+            descriptions.append(desc)
+        t = shard_end
+        shard_idx += 1
+
+    return descriptions
 
 
 @mcp.tool()
@@ -1144,7 +1343,20 @@ def kuavi_eval(code: str) -> dict[str, Any]:
                 prompt, backend, model, role="secondary", _log_context="kuavi_eval:llm_query"
             ),
             "llm_query_batched": _llm_query_batched,
+            "SHOW_VARS": lambda: {
+                k: type(v).__name__
+                for k, v in _state["eval_namespace"].items()
+                if not k.startswith("_")
+            },
+            "get_shard_info": lambda shard_duration=30.0: _build_shard_info(shard_duration),
+            "build_shard_prompts": _build_shard_prompts,
         }
+
+    # Snapshot protected tool refs for namespace protection
+    _protected_keys = {
+        k for k in _state["eval_namespace"] if not k.startswith("_")
+    }
+    _protected_refs = {k: _state["eval_namespace"][k] for k in _protected_keys}
 
     ns = _state["eval_namespace"]
     stdout_buf = io.StringIO()
@@ -1159,6 +1371,10 @@ def kuavi_eval(code: str) -> dict[str, Any]:
             except SyntaxError:
                 exec(code, ns)
                 result = None
+        # Namespace protection: restore any overwritten tool functions
+        for k, ref in _protected_refs.items():
+            if ns.get(k) is not ref:
+                ns[k] = ref
         ret = {"result": result, "stdout": stdout_buf.getvalue()}
         _track_response_tokens(ret)
         if warning:
@@ -1403,14 +1619,18 @@ def kuavi_set_llm_config(
 
 
 def _call_llm(
-    prompt: str,
+    prompt: str | list,
     backend: str,
     model: str,
     *,
     role: str = "default",
     _log_context: str | None = None,
 ) -> str:
-    """Call an LLM with a text prompt. Supports gemini, anthropic, openai backends.
+    """Call an LLM with a text or multimodal prompt. Supports gemini, anthropic, openai.
+
+    When ``prompt`` is a list, items can be:
+      - ``str``: text content
+      - ``dict`` with ``"data"`` and ``"mime_type"`` keys: base64-encoded image
 
     If ``role`` is "primary" or "secondary" and ``_state["llm_config"]`` is set,
     the configured backend/model for that role overrides the passed values.
@@ -1428,28 +1648,70 @@ def _call_llm(
     t0 = time.time()
     response_text = ""
     has_error = False
+    prompt_log = prompt if isinstance(prompt, str) else f"[multimodal: {len(prompt)} parts]"
     try:
         if backend == "gemini":
             from google import genai
+            from google.genai import types
 
             client = genai.Client()
-            response = client.models.generate_content(model=model, contents=prompt)
+            if isinstance(prompt, list):
+                parts = []
+                for item in prompt:
+                    if isinstance(item, str):
+                        parts.append(types.Part(text=item))
+                    elif isinstance(item, dict) and "data" in item:
+                        parts.append(types.Part(inline_data=types.Blob(
+                            mime_type=item.get("mime_type", "image/jpeg"),
+                            data=base64.b64decode(item["data"]),
+                        )))
+                contents = [parts]
+            else:
+                contents = prompt
+            response = client.models.generate_content(model=model, contents=contents)
             response_text = response.text
         elif backend == "anthropic":
             import anthropic
 
             client = anthropic.Anthropic()
-            message = client.messages.create(
-                model=model, max_tokens=1024, messages=[{"role": "user", "content": prompt}]
-            )
+            if isinstance(prompt, list):
+                content_parts = []
+                for item in prompt:
+                    if isinstance(item, str):
+                        content_parts.append({"type": "text", "text": item})
+                    elif isinstance(item, dict) and "data" in item:
+                        content_parts.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": item.get("mime_type", "image/jpeg"),
+                                "data": item["data"],
+                            },
+                        })
+                messages = [{"role": "user", "content": content_parts}]
+            else:
+                messages = [{"role": "user", "content": prompt}]
+            message = client.messages.create(model=model, max_tokens=1024, messages=messages)
             response_text = message.content[0].text
         elif backend == "openai":
             import openai
 
             client = openai.OpenAI()
-            response = client.chat.completions.create(
-                model=model, messages=[{"role": "user", "content": prompt}]
-            )
+            if isinstance(prompt, list):
+                content_parts = []
+                for item in prompt:
+                    if isinstance(item, str):
+                        content_parts.append({"type": "text", "text": item})
+                    elif isinstance(item, dict) and "data" in item:
+                        mime = item.get("mime_type", "image/jpeg")
+                        content_parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{item['data']}"},
+                        })
+                messages = [{"role": "user", "content": content_parts}]
+            else:
+                messages = [{"role": "user", "content": prompt}]
+            response = client.chat.completions.create(model=model, messages=messages)
             response_text = response.choices[0].message.content
         else:
             raise ValueError(f"Unsupported backend: {backend}")
@@ -1460,7 +1722,7 @@ def _call_llm(
     finally:
         duration_ms = int((time.time() - t0) * 1000)
         _trace_logger.log_llm_call(
-            prompt=prompt,
+            prompt=prompt_log,
             model=model,
             backend=backend,
             response=response_text,
@@ -1471,12 +1733,15 @@ def _call_llm(
 
 
 def _llm_query_batched(
-    prompts: list[str],
+    prompts: list[str | list],
     backend: str = "gemini",
     model: str = "gemini-2.5-flash",
     max_workers: int = 4,
 ) -> list[str]:
-    """Call an LLM with multiple prompts in parallel. Returns list of response texts."""
+    """Call an LLM with multiple prompts in parallel. Returns list of response texts.
+
+    Each prompt can be a string or a multimodal list (see ``_call_llm``).
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     results: list[str | None] = [None] * len(prompts)
@@ -1503,6 +1768,8 @@ def kuavi_analyze_shards(
     question: str,
     shard_duration: float = 30.0,
     max_shards: int = 20,
+    include_frames: bool = True,
+    frames_per_shard: int = 2,
     backend: str = "gemini",
     model: str = "gemini-2.5-flash",
     video_id: str | None = None,
@@ -1511,6 +1778,9 @@ def kuavi_analyze_shards(
 
     Splits the indexed video into time-based shards, sends each shard's
     segment captions to an LLM in parallel, and returns structured results.
+
+    When include_frames=True (default), keyframes are extracted and included
+    in each shard prompt for multimodal analysis.
     """
     import concurrent.futures
 
@@ -1555,15 +1825,54 @@ def kuavi_analyze_shards(
 
     total = len(shards)
 
+    # Pre-extract keyframes for all shards if multimodal mode is enabled
+    shard_frames: list[list[dict[str, str]]] = [[] for _ in range(total)]
+    if include_frames:
+        video_path = _get_active_video_path(video_id)
+        if video_path:
+            try:
+                import cv2
+
+                from kuavi.context import _encode_frame
+
+                cap = cv2.VideoCapture(video_path)
+                if cap.isOpened():
+                    original_fps = cap.get(cv2.CAP_PROP_FPS)
+                    try:
+                        for si, shard in enumerate(shards):
+                            shard_start = shard["start_time"]
+                            shard_end = shard["end_time"]
+                            shard_dur = shard_end - shard_start
+                            # Pick evenly spaced timestamps within the shard
+                            n_frames = min(frames_per_shard, max(1, int(shard_dur)))
+                            if n_frames == 1:
+                                times = [(shard_start + shard_end) / 2]
+                            else:
+                                step = shard_dur / (n_frames + 1)
+                                times = [shard_start + step * (j + 1) for j in range(n_frames)]
+                            for t_frame in times:
+                                frame_idx = int(t_frame * original_fps)
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                                ret, frame = cap.read()
+                                if ret:
+                                    frame = cv2.resize(frame, (480, 360))
+                                    encoded = _encode_frame(frame, format=".jpg", quality=75)
+                                    shard_frames[si].append(encoded)
+                    finally:
+                        cap.release()
+            except Exception:
+                logger.warning("Failed to extract shard keyframes; falling back to text-only.")
+
     def _analyze_shard(i: int, shard: dict[str, Any]) -> dict[str, Any]:
         seg_lines = []
         for s in shard["segments"]:
             ann = s.get("annotation", {})
             summary = ann.get("summary", {}).get("brief", "No caption")
             seg_lines.append(
-                f"- Segment {s['segment_index']} [{s['start_time']:.1f}s - {s['end_time']:.1f}s]: {summary}"
+                f"- Segment {s.get('segment_index', '?')} "
+                f"[{s['start_time']:.1f}s - {s['end_time']:.1f}s]: {summary}"
             )
-        prompt = (
+        text_prompt = (
             f"You are analyzing shard {i + 1}/{total} of a video "
             f"(time range {shard['start_time']:.1f}s - {shard['end_time']:.1f}s).\n\n"
             f"Segments in this shard:\n"
@@ -1571,6 +1880,17 @@ def kuavi_analyze_shards(
             + f"\n\nQuestion: {question}\n\n"
             f"Provide a concise answer based only on the content in this shard."
         )
+
+        # Build multimodal prompt if frames are available
+        frames = shard_frames[i]
+        if frames:
+            prompt: str | list = [text_prompt] + [
+                {"data": f["data"], "mime_type": f.get("mime_type", "image/jpeg")}
+                for f in frames
+            ]
+        else:
+            prompt = text_prompt
+
         try:
             answer = _call_llm(
                 prompt, backend, model,
@@ -1582,6 +1902,7 @@ def kuavi_analyze_shards(
                 "start_time": shard["start_time"],
                 "end_time": shard["end_time"],
                 "answer": answer,
+                "has_frames": bool(frames),
             }
         except Exception as e:
             return {
@@ -1600,9 +1921,10 @@ def kuavi_analyze_shards(
             idx = futures[future]
             results[idx] = future.result()
 
-    result = {
+    result: dict[str, Any] = {
         "question": question,
         "shard_count": total,
+        "multimodal": include_frames and any(f for f in shard_frames),
         "results": results,
     }
     if warning:

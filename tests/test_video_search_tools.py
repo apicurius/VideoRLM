@@ -55,12 +55,18 @@ def _make_index(
     action_embeddings=None,
     transcript=None,
     embed_fn=None,
+    frame_embeddings=None,
+    temporal_embeddings=None,
+    visual_embed_fn=None,
 ):
     """Create a mock VideoIndex with the given attributes."""
     index = MagicMock()
     index.segments = segments or []
     index.embeddings = embeddings
     index.action_embeddings = action_embeddings
+    index.frame_embeddings = frame_embeddings
+    index.temporal_embeddings = temporal_embeddings
+    index.visual_embed_fn = visual_embed_fn
     index.transcript = transcript or []
     index.embed_fn = embed_fn
     return index
@@ -147,8 +153,8 @@ class TestSearchVideo:
         assert results[0]["caption"] == "seg0"
         assert results[0]["score"] > results[1]["score"]
 
-    def test_field_all_merges_max_score(self):
-        """field='all' should merge summary and action by max score."""
+    def test_field_all_weighted_composite(self):
+        """field='all' should use weighted composite (summary 0.4, action 0.2, visual 0.2, temporal 0.2)."""
         summary_emb = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
         action_emb = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
 
@@ -156,7 +162,7 @@ class TestSearchVideo:
             {"start_time": 0.0, "end_time": 5.0, "caption": "seg0"},
             {"start_time": 5.0, "end_time": 10.0, "caption": "seg1"},
         ]
-        # Query close to [1, 0, 0] — seg0 wins via summary, seg1 wins via action
+        # Query [1, 0, 0]: seg0 has summary=1.0, action=0.0; seg1 has summary=0.0, action=1.0
         embed_fn = MagicMock(return_value=np.array([1.0, 0.0, 0.0]))
         index = _make_index(
             segments=segments,
@@ -166,9 +172,12 @@ class TestSearchVideo:
         )
 
         results = make_search_video(index)["tool"]("q", top_k=2, field="all")
-        # Both segments have a max score of 1.0 (seg0 via summary, seg1 via action)
         assert len(results) == 2
-        assert abs(results[0]["score"] - results[1]["score"]) < 0.01
+        # With only summary (0.4) and action (0.2) available:
+        # seg0: (0.4*1.0 + 0.2*0.0) / 0.6 = 0.667
+        # seg1: (0.4*0.0 + 0.2*1.0) / 0.6 = 0.333
+        assert results[0]["caption"] == "seg0"
+        assert results[0]["score"] > results[1]["score"]
 
     def test_result_includes_annotation(self):
         """Results should include the annotation dict when present."""

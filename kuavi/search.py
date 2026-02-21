@@ -111,6 +111,46 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                     )
                 return results
 
+        # Temporal field (V-JEPA 2 embeddings)
+        if field == "temporal":
+            if (
+                hasattr(index, "temporal_embeddings")
+                and index.temporal_embeddings is not None
+                and len(index.temporal_embeddings) > 0
+            ):
+                # V-JEPA is vision-only; use SigLIP2 text encoder for query
+                visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
+                query_emb = visual_fn(query)
+                query_emb = np.asarray(query_emb).reshape(1, -1)
+                scores = _search_matrix(query_emb, index.temporal_embeddings)
+
+                scores = scores.copy()
+                for i, seg in enumerate(index.segments):
+                    if seg.get("is_duplicate"):
+                        scores[i] = -np.inf
+
+                top_indices = list(np.argsort(scores)[::-1][:top_k])
+                results = []
+                for idx in top_indices:
+                    seg = index.segments[idx]
+                    results.append(
+                        {
+                            "start_time": seg["start_time"],
+                            "end_time": seg["end_time"],
+                            "score": round(float(scores[idx]), 4),
+                            "caption": seg.get("caption", ""),
+                            "annotation": seg.get("annotation", {}),
+                            "quality_score": seg.get("caption_quality_score"),
+                        }
+                    )
+                return results
+            import logging
+            logging.getLogger(__name__).warning(
+                "No temporal embeddings available — field='temporal' falling back to 'summary'. "
+                "Temporal search requires V-JEPA 2 embeddings from indexing."
+            )
+            field = "summary"
+
         # Visual field
         if field == "visual":
             if (
@@ -154,13 +194,125 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
         action_emb = (
             index.action_embeddings if index.action_embeddings is not None else index.embeddings
         )
+        temporal_emb = getattr(index, "temporal_embeddings", None)
+        frame_emb = getattr(index, "frame_embeddings", None)
 
         if field == "summary":
             matrices = [summary_emb]
         elif field == "action":
             matrices = [action_emb]
-        else:  # "all"
-            matrices = [summary_emb, action_emb]
+        elif field == "all":
+            # Weighted composite: summary 0.4, action 0.2, visual 0.2, temporal 0.2
+            query_emb = index.embed_fn(query)
+            query_emb = np.asarray(query_emb).reshape(1, -1)
+
+            # SigLIP2 query for visual/temporal (different embedding space)
+            visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
+            query_emb_visual = visual_fn(query)
+            query_emb_visual = np.asarray(query_emb_visual).reshape(1, -1)
+
+            weighted_scores = np.zeros(len(index.segments))
+            total_weight = 0.0
+
+            if summary_emb is not None and len(summary_emb) > 0:
+                weighted_scores += 0.4 * _search_matrix(query_emb, summary_emb)
+                total_weight += 0.4
+            if action_emb is not None and len(action_emb) > 0:
+                weighted_scores += 0.2 * _search_matrix(query_emb, action_emb)
+                total_weight += 0.2
+            if frame_emb is not None and len(frame_emb) > 0:
+                weighted_scores += 0.2 * _search_matrix(query_emb_visual, frame_emb)
+                total_weight += 0.2
+            if temporal_emb is not None and len(temporal_emb) > 0:
+                weighted_scores += 0.2 * _search_matrix(query_emb_visual, temporal_emb)
+                total_weight += 0.2
+
+            if total_weight > 0:
+                scores = weighted_scores / total_weight
+            else:
+                return []
+
+            # Skip directly to filtering (bypass the max-over-matrices logic below)
+            scores = scores.copy()
+            for i, seg in enumerate(index.segments):
+                if seg.get("is_duplicate"):
+                    scores[i] = -np.inf
+
+            if cluster_diverse and top_k > 2:
+                from sklearn.cluster import KMeans
+
+                active_matrix = summary_emb if summary_emb is not None else frame_emb
+                valid_mask = scores > -np.inf
+                valid_indices_arr = np.where(valid_mask)[0]
+                n_valid = len(valid_indices_arr)
+
+                if n_valid <= top_k:
+                    top_indices = list(
+                        valid_indices_arr[np.argsort(scores[valid_indices_arr])[::-1]]
+                    )
+                else:
+                    k = min(top_k, n_valid)
+                    valid_embs = active_matrix[valid_indices_arr]
+                    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                    labels = kmeans.fit_predict(valid_embs)
+
+                    clusters: dict[int, list[int]] = {}
+                    for vi, label in zip(valid_indices_arr, labels):
+                        clusters.setdefault(int(label), []).append(int(vi))
+                    for label in clusters:
+                        clusters[label].sort(key=lambda idx: scores[idx], reverse=True)
+                    top_indices: list[int] = []
+                    cluster_keys = sorted(
+                        clusters.keys(), key=lambda l: scores[clusters[l][0]], reverse=True
+                    )
+                    cluster_ptrs = {l: 0 for l in cluster_keys}
+                    while len(top_indices) < top_k:
+                        added_any = False
+                        for label in cluster_keys:
+                            if len(top_indices) >= top_k:
+                                break
+                            ptr = cluster_ptrs[label]
+                            if ptr < len(clusters[label]):
+                                top_indices.append(clusters[label][ptr])
+                                cluster_ptrs[label] = ptr + 1
+                                added_any = True
+                        if not added_any:
+                            break
+            elif diverse and top_k > 1:
+                n_candidates = min(top_k * 3, len(scores))
+                candidate_indices = np.argsort(scores)[::-1][:n_candidates]
+                candidate_scores = scores[candidate_indices]
+                active_matrix = summary_emb if summary_emb is not None else frame_emb
+                candidate_embs = (
+                    active_matrix[candidate_indices] if active_matrix is not None else None
+                )
+                top_indices = _mmr_rerank(
+                    query_emb,
+                    candidate_embs,
+                    candidate_indices,
+                    candidate_scores,
+                    top_k=top_k,
+                    lambda_param=0.7,
+                )
+            else:
+                top_indices = list(np.argsort(scores)[::-1][:top_k])
+
+            results = []
+            for idx in top_indices:
+                seg = index.segments[idx]
+                results.append(
+                    {
+                        "start_time": seg["start_time"],
+                        "end_time": seg["end_time"],
+                        "score": round(float(scores[idx]), 4),
+                        "caption": seg.get("caption", ""),
+                        "annotation": seg.get("annotation", {}),
+                        "quality_score": seg.get("caption_quality_score"),
+                    }
+                )
+            return results
+        else:
+            matrices = [summary_emb]
 
         matrices = [m for m in matrices if m is not None and len(m) > 0]
         if not matrices:
@@ -262,7 +414,7 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
         "description": (
             "Semantic search over pre-indexed video segments. "
             "Parameters: query (str), top_k (int, default 5), "
-            'field (str, default "summary" — can be "summary", "action", "visual", or "all"), '
+            'field (str, default "summary" — can be "summary", "action", "visual", "temporal", or "all"), '
             "exclude_non_action (bool, default True — filters non-action segments when field is action), "
             "diverse (bool, default True — MMR reranking for varied results), "
             "cluster_diverse (bool, default False — KMeans clustering alternative to MMR), "

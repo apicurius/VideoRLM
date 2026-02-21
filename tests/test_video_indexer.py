@@ -78,7 +78,14 @@ class TestVideoIndexerIndexVideo:
 
     def _make_loaded_video(self, num_frames=10, fps=2.0):
         """Create a mock LoadedVideo with synthetic frames."""
-        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(num_frames)]
+        # Use random frames (not solid color) to avoid dead-frame detection
+        rng = np.random.RandomState(42 + num_frames)
+        frames = [
+            np.clip(rng.randint(50, 200, (48, 64, 3), dtype=np.uint8) + i * 10, 0, 255).astype(
+                np.uint8
+            )
+            for i in range(num_frames)
+        ]
         mock_video = MagicMock()
         mock_video.metadata.extraction_fps = fps
         mock_video.metadata.path = "/fake/video.mp4"
@@ -342,7 +349,14 @@ class TestVideoIndexerStructuredAnnotations:
     """Tests for structured annotation support in captioning."""
 
     def _make_loaded_video(self, num_frames=10, fps=2.0):
-        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(num_frames)]
+        # Use random frames (not solid color) to avoid dead-frame detection
+        rng = np.random.RandomState(42 + num_frames)
+        frames = [
+            np.clip(rng.randint(50, 200, (48, 64, 3), dtype=np.uint8) + i * 10, 0, 255).astype(
+                np.uint8
+            )
+            for i in range(num_frames)
+        ]
         mock_video = MagicMock()
         mock_video.metadata.extraction_fps = fps
         mock_video.metadata.path = "/fake/video.mp4"
@@ -557,7 +571,14 @@ class TestVideoIndexerCache:
     """Test VideoIndexer cache_dir integration."""
 
     def _make_loaded_video(self, video_path="/fake/video.mp4", num_frames=10, fps=2.0):
-        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(num_frames)]
+        # Use random frames (not solid color) to avoid dead-frame detection
+        rng = np.random.RandomState(42 + num_frames)
+        frames = [
+            np.clip(rng.randint(50, 200, (48, 64, 3), dtype=np.uint8) + i * 10, 0, 255).astype(
+                np.uint8
+            )
+            for i in range(num_frames)
+        ]
         mock_video = MagicMock()
         mock_video.metadata.extraction_fps = fps
         mock_video.metadata.path = video_path
@@ -887,20 +908,22 @@ class TestMultiScaleSearch:
 class TestSelectiveDecode:
     """Tests for Feature 4: Selective decoding."""
 
-    def test_selective_decode_computes_variance(self):
-        """Segments with high pairwise similarity should have low _visual_variance but not be skipped."""
+    def test_selective_decode_3tier(self):
+        """3-tier selective decode: static → Tier 1 (1 keyframe), varied → Tier 2."""
         indexer = VideoIndexer()
         segments = [
-            {"start_time": 0.0, "end_time": 5.0, "caption": ""},
-            {"start_time": 5.0, "end_time": 10.0, "caption": ""},
+            {"start_time": 0.0, "end_time": 5.0, "caption": "", "_frames": [f"f{i}" for i in range(10)]},
+            {"start_time": 5.0, "end_time": 10.0, "caption": "", "_frames": [f"f{i}" for i in range(10)]},
         ]
-        frames = [np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(20)]
+        # Use textured frames (not solid) to avoid dead-frame detection
+        rng = np.random.RandomState(99)
+        frames = [rng.randint(50, 200, (48, 64, 3), dtype=np.uint8) for _ in range(20)]
         timestamps = [float(i) * 0.5 for i in range(20)]
 
-        # First segment: identical unit vectors → pairwise sim = 1.0
+        # First segment: identical unit vectors → pairwise sim = 1.0 → Tier 1
         uniform_embs = np.ones((10, 8), dtype=np.float32)
         uniform_embs = uniform_embs / np.linalg.norm(uniform_embs[0])
-        # Second segment: orthogonal unit vectors → pairwise sim ≈ 0
+        # Second segment: orthogonal unit vectors → pairwise sim ≈ 0 → Tier 2
         varied_embs = np.eye(8, dtype=np.float32)
         varied_embs = np.vstack([varied_embs, varied_embs[:2]])  # 10 rows
 
@@ -915,25 +938,27 @@ class TestSelectiveDecode:
             with patch.object(indexer, "_encode_frames", side_effect=mock_encode):
                 indexer._selective_decode(segments, frames, timestamps)
 
-        # Static segments should have low variance but NOT be skipped
-        assert segments[0]["_visual_variance"] < 0.01
+        # Static segment → Tier 1 (static-informative), NOT skipped
+        assert segments[0]["_selective_tier"] == 1
+        assert segments[0].get("_static_informative") is True
         assert segments[0].get("_skip_caption") is None
-        assert segments[0]["caption"] == ""  # not overwritten
-        # Varied segment should have higher variance
+        # Varied segment → Tier 2 (dynamic)
+        assert segments[1]["_selective_tier"] == 2
         assert segments[1]["_visual_variance"] > 0.5
 
     def test_selective_decode_keeps_varied(self):
-        """Segments with low pairwise similarity should not be skipped."""
+        """Segments with low pairwise similarity → Tier 2 (dynamic)."""
         indexer = VideoIndexer()
         segments = [
             {"start_time": 0.0, "end_time": 5.0, "caption": ""},
         ]
-        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(10)]
+        rng = np.random.RandomState(42)
+        frames = [rng.randint(50, 200, (48, 64, 3), dtype=np.uint8) for _ in range(10)]
         timestamps = [float(i) * 0.5 for i in range(10)]
 
         # Diverse L2-normalized embeddings (low pairwise similarity)
-        rng = np.random.default_rng(42)
-        varied_embs = rng.random((10, 8)).astype(np.float32)
+        rng2 = np.random.default_rng(42)
+        varied_embs = rng2.random((10, 8)).astype(np.float32)
         norms = np.linalg.norm(varied_embs, axis=1, keepdims=True)
         varied_embs = varied_embs / np.maximum(norms, 1e-10)
 
@@ -942,6 +967,26 @@ class TestSelectiveDecode:
                 indexer._selective_decode(segments, frames, timestamps)
 
         assert segments[0].get("_skip_caption") is not True
+        assert segments[0]["_selective_tier"] == 2
+
+    def test_selective_decode_dead_frame_detection(self):
+        """Solid black frames should be detected as Tier 0 (dead)."""
+        indexer = VideoIndexer()
+        segments = [
+            {"start_time": 0.0, "end_time": 5.0, "caption": ""},
+        ]
+        frames = [np.zeros((48, 64, 3), dtype=np.uint8)] * 10
+        timestamps = [float(i) * 0.5 for i in range(10)]
+
+        with patch.object(indexer, "_ensure_model"):
+            with patch.object(indexer, "_encode_frames") as mock_encode:
+                indexer._selective_decode(segments, frames, timestamps)
+
+        assert segments[0]["_selective_tier"] == 0
+        assert segments[0]["_skip_caption"] is True
+        assert "Dead frame" in segments[0]["caption"]
+        # Should not call _encode_frames since dead was detected first
+        mock_encode.assert_not_called()
 
     def test_selective_decode_skips_already_marked(self):
         """Segments already marked _skip_caption should not be re-processed."""
@@ -949,7 +994,8 @@ class TestSelectiveDecode:
         segments = [
             {"start_time": 0.0, "end_time": 5.0, "caption": "dup", "_skip_caption": True},
         ]
-        frames = [np.full((48, 64, 3), 128, dtype=np.uint8)] * 10
+        rng = np.random.RandomState(77)
+        frames = [rng.randint(50, 200, (48, 64, 3), dtype=np.uint8) for _ in range(10)]
         timestamps = [float(i) * 0.5 for i in range(10)]
 
         with patch.object(indexer, "_ensure_model"):
@@ -960,12 +1006,13 @@ class TestSelectiveDecode:
         mock_encode.assert_not_called()
 
     def test_selective_decode_few_frames_skipped(self):
-        """Segments with fewer than 3 frames should not be processed."""
+        """Segments with fewer than 3 frames → Tier 2 (no SigLIP encoding needed)."""
         indexer = VideoIndexer()
         segments = [
             {"start_time": 0.0, "end_time": 0.5, "caption": ""},
         ]
-        frames = [np.full((48, 64, 3), 128, dtype=np.uint8)]
+        rng = np.random.RandomState(88)
+        frames = [rng.randint(50, 200, (48, 64, 3), dtype=np.uint8)]
         timestamps = [0.0]
 
         with patch.object(indexer, "_ensure_model"):
@@ -1091,7 +1138,8 @@ class TestEmbeddingGemmaIntegration:
         mock_detect_scenes.return_value = [(0.0, 2.5)]
 
         indexer = VideoIndexer(text_embedding_model="test-model")
-        frames = [np.full((48, 64, 3), i * 25, dtype=np.uint8) for i in range(5)]
+        rng = np.random.RandomState(33)
+        frames = [rng.randint(50, 200, (48, 64, 3), dtype=np.uint8) for _ in range(5)]
         mock_video = MagicMock()
         mock_video.metadata.extraction_fps = 2.0
         mock_video.metadata.path = "/fake/video.mp4"
@@ -1118,8 +1166,8 @@ class TestEmbeddingGemmaIntegration:
 class TestSelectiveDecodeEfficiency:
     """Tests proving selective decoding saves caption calls."""
 
-    def test_uniform_segments_variance_computed(self):
-        """Create 20 segments where ~70% are uniform; verify variance is computed for all."""
+    def test_uniform_segments_tier_classification(self):
+        """Create 20 segments where ~70% are uniform; verify tier classification."""
         indexer = VideoIndexer()
 
         num_segments = 20
@@ -1133,11 +1181,15 @@ class TestSelectiveDecodeEfficiency:
                 "start_time": i * seg_duration,
                 "end_time": (i + 1) * seg_duration,
                 "caption": "",
+                "_frames": [f"f{j}" for j in range(frames_per_seg)],
             }
             for i in range(num_segments)
         ]
+        # Use textured frames to avoid dead-frame detection
+        test_rng = np.random.RandomState(55)
         frames = [
-            np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(total_frames)
+            test_rng.randint(50, 200, (48, 64, 3), dtype=np.uint8)
+            for _ in range(total_frames)
         ]
         timestamps = [i / fps for i in range(total_frames)]
 
@@ -1165,17 +1217,14 @@ class TestSelectiveDecodeEfficiency:
             with patch.object(indexer, "_encode_frames", side_effect=mock_encode_frames):
                 indexer._selective_decode(segments, frames, timestamps)
 
-        # All segments should have variance computed, none should be skipped
-        for seg in segments:
-            assert "_visual_variance" in seg
-            assert seg.get("_skip_caption") is None
+        # Uniform segments → Tier 1 (static-informative), dynamic → Tier 2
+        tier_1_count = sum(1 for s in segments if s.get("_selective_tier") == 1)
+        tier_2_count = sum(1 for s in segments if s.get("_selective_tier") == 2)
+        assert tier_1_count >= num_uniform
+        assert tier_2_count >= num_segments - num_uniform
 
-        # Uniform segments should have low variance
-        low_variance = sum(1 for s in segments if s["_visual_variance"] < 0.02)
-        assert low_variance >= num_uniform
-
-    def test_mixed_video_variance_classification(self):
-        """10 segments: even=static, odd=dynamic. Verify variance distinguishes them."""
+    def test_mixed_video_tier_classification(self):
+        """10 segments: even=static, odd=dynamic. Verify tier classification."""
         indexer = VideoIndexer()
 
         num_segments = 10
@@ -1189,11 +1238,15 @@ class TestSelectiveDecodeEfficiency:
                 "start_time": i * seg_duration,
                 "end_time": (i + 1) * seg_duration,
                 "caption": "",
+                "_frames": [f"f{j}" for j in range(frames_per_seg)],
             }
             for i in range(num_segments)
         ]
+        # Use textured frames to avoid dead-frame detection
+        test_rng = np.random.RandomState(66)
         frames = [
-            np.full((48, 64, 3), 128, dtype=np.uint8) for _ in range(total_frames)
+            test_rng.randint(50, 200, (48, 64, 3), dtype=np.uint8)
+            for _ in range(total_frames)
         ]
         timestamps = [i / fps for i in range(total_frames)]
 
@@ -1215,13 +1268,16 @@ class TestSelectiveDecodeEfficiency:
                 indexer._selective_decode(segments, frames, timestamps)
 
         for i, seg in enumerate(segments):
-            # No segments should be skipped — all get captioned
-            assert seg.get("_skip_caption") is None
             if i % 2 == 0:
-                assert seg["_visual_variance"] < 0.02, (
-                    f"Segment {i} (static) should have low variance"
+                # Static → Tier 1 (static-informative)
+                assert seg["_selective_tier"] == 1, (
+                    f"Segment {i} (static) should be Tier 1"
                 )
             else:
+                # Dynamic → Tier 2
+                assert seg["_selective_tier"] == 2, (
+                    f"Segment {i} (dynamic) should be Tier 2"
+                )
                 assert seg["_visual_variance"] > 0.5, (
                     f"Segment {i} (dynamic) should have high variance"
                 )
