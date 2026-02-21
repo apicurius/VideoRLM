@@ -963,7 +963,31 @@ def run_kuavi(
         scene_model="facebook/vjepa2-vitl-fpc64-256",
         cache_dir=cache_dir,
     )
-    index = indexer.index_video(loaded, whisper_model="base")
+
+    # Build captioning functions using shared factories
+    caption_fn = None
+    frame_caption_fn = None
+    refine_fn = None
+    try:
+        from kuavi.captioning import (
+            make_gemini_caption_fn,
+            make_gemini_frame_caption_fn,
+            make_gemini_refine_fn,
+        )
+
+        caption_fn = make_gemini_caption_fn()
+        frame_caption_fn = make_gemini_frame_caption_fn()
+        refine_fn = make_gemini_refine_fn()
+    except Exception:
+        printer.print_step("Warning: Gemini captioning unavailable, indexing without captions")
+
+    index = indexer.index_video(
+        loaded,
+        caption_fn=caption_fn,
+        frame_caption_fn=frame_caption_fn,
+        refine_fn=refine_fn,
+        whisper_model="base",
+    )
     index_time = time.monotonic() - t0
     printer.print_step_done(
         "Index built",
