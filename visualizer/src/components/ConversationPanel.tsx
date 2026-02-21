@@ -54,7 +54,7 @@ function SystemPromptCard({ text }: { text: string }) {
       </div>
       {/* Content */}
       <div className="bg-background/60 rounded-lg p-3 border border-violet-500/20">
-        <pre className="whitespace-pre-wrap font-mono text-foreground/90 text-xs leading-relaxed overflow-x-auto">
+        <pre className="whitespace-pre-wrap font-mono text-foreground/90 text-[12px] leading-relaxed overflow-x-auto">
           {expanded ? text : preview}
         </pre>
       </div>
@@ -182,24 +182,24 @@ export function ConversationPanel({
           </div>
           <div>
             <h2 className="font-semibold text-sm">Conversation</h2>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-[11px] text-muted-foreground">
               Turn {selectedTurn + 1} of {turns.length}
             </p>
           </div>
         </div>
         <div className="flex gap-2">
           {turn && turn.toolCalls.length > 0 && (
-            <Badge variant="secondary" className="text-xs">
+            <Badge variant="secondary" className="text-[10px]">
               {turn.toolCalls.length} tool{turn.toolCalls.length !== 1 ? 's' : ''}
             </Badge>
           )}
           {turn?.tokenUsage && (
-            <Badge variant="outline" className="text-xs border-sky-500/30 text-sky-600 dark:text-sky-400">
+            <Badge variant="outline" className="text-[10px] border-sky-500/30 text-sky-600 dark:text-sky-400">
               {turn.tokenUsage.total_tokens.toLocaleString()} tok
             </Badge>
           )}
           {isLastTurn && finalAnswer && (
-            <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 text-xs">
+            <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 text-[10px]">
               ✓ Answer
             </Badge>
           )}
@@ -228,16 +228,16 @@ export function ConversationPanel({
                     <span className="font-semibold text-sm text-sky-600 dark:text-sky-400">
                       Model Response
                     </span>
-                    <p className="text-xs text-muted-foreground mt-0.5">
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
                       Turn {selectedTurn + 1} reasoning
                     </p>
                   </div>
-                  <Badge variant="outline" className="text-xs border-sky-500/30 text-sky-600 dark:text-sky-400 flex-shrink-0">
+                  <Badge variant="outline" className="text-[10px] border-sky-500/30 text-sky-600 dark:text-sky-400 flex-shrink-0">
                     {turn.reasoning.text.length.toLocaleString()} chars
                   </Badge>
                 </div>
                 <div className="bg-background/80 rounded-lg p-3 border border-sky-500/20">
-                  <pre className="whitespace-pre-wrap font-mono text-foreground text-sm leading-relaxed overflow-x-auto">
+                  <pre className="whitespace-pre-wrap font-mono text-foreground text-[12px] leading-relaxed overflow-x-auto">
                     {turn.reasoning.text}
                   </pre>
                 </div>
@@ -279,7 +279,7 @@ export function ConversationPanel({
                     <span className="font-bold text-emerald-600 dark:text-emerald-400 text-base">
                       Final Answer
                     </span>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-[10px] text-muted-foreground">
                       Task completed successfully
                     </p>
                   </div>

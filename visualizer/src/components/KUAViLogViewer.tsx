@@ -48,9 +48,9 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowLeft') {
+      if (e.key === 'ArrowLeft' || e.key === 'k') {
         goToPrevious();
-      } else if (e.key === 'ArrowRight') {
+      } else if (e.key === 'ArrowRight' || e.key === 'j') {
         goToNext();
       } else if (e.key === 'Escape') {
         onBack();
@@ -130,7 +130,7 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
               </Button>
               <div className="h-5 w-px bg-border" />
               <div>
-                <h1 className="font-semibold flex items-center gap-2 text-base">
+                <h1 className="font-semibold flex items-center gap-2 text-sm">
                   <span className="text-primary">◈</span>
                   {fileName}
                   <Badge className="bg-cyan-500/20 text-cyan-600 dark:text-cyan-400 border-cyan-500/30 text-xs px-1.5 py-0 h-4 ml-1">
@@ -178,7 +178,7 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
             <CardContent className="p-4">
               <div className="grid md:grid-cols-2 gap-4">
                 <div>
-                  <p className="text-xs uppercase tracking-wider text-muted-foreground font-medium mb-1">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
                     Context / Question
                   </p>
                   <p className="text-sm font-medium line-clamp-2">
@@ -186,7 +186,7 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs uppercase tracking-wider text-muted-foreground font-medium mb-1">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
                     Final Answer
                   </p>
                   <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400 line-clamp-2">
@@ -263,33 +263,69 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
 
           <ResizableHandle withHandle className="bg-border hover:bg-primary/30 transition-colors" />
 
-          {/* Right panel: Tool Detail + Orchestration tabs */}
+          {/* Right panel: Tool Detail + Summary & Agents tabs */}
           <ResizablePanel defaultSize={50} minSize={25} maxSize={75}>
-            <div className="h-full flex flex-col">
+            <div className="h-full flex flex-col overflow-hidden bg-background">
+              {/* Right panel header (mirrors ExecutionPanel) */}
+              <div className="flex-shrink-0 px-4 py-3 border-b border-border bg-muted/30">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center">
+                      <span className="text-emerald-500 text-sm">⟨⟩</span>
+                    </div>
+                    <div>
+                      <h2 className="font-semibold text-sm">Tool Calls &amp; Agents</h2>
+                      <p className="text-[11px] text-muted-foreground">
+                        Turn {selectedTurnIndex + 1} • {turns[selectedTurnIndex]?.toolCalls.length ?? 0} tool call{(turns[selectedTurnIndex]?.toolCalls.length ?? 0) !== 1 ? 's' : ''}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  {(turns[selectedTurnIndex]?.toolCalls.length ?? 0) > 0 && (
+                    <Badge variant="outline" className="text-[10px]">
+                      {turns[selectedTurnIndex]?.toolCalls.length} tool call{(turns[selectedTurnIndex]?.toolCalls.length ?? 0) !== 1 ? 's' : ''}
+                    </Badge>
+                  )}
+                  {turns[selectedTurnIndex]?.toolCalls.some(tc => tc.has_error) && (
+                    <Badge className="bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/30 text-[10px]">
+                      Has Errors
+                    </Badge>
+                  )}
+                  {selectedTurnIndex === turns.length - 1 && metadata.finalAnswer && (
+                    <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30 text-[10px]">
+                      Has Final Answer
+                    </Badge>
+                  )}
+                </div>
+              </div>
+
               <Tabs
                 value={rightTab}
                 onValueChange={(v) => setRightTab(v as 'tool' | 'orchestration')}
-                className="h-full flex flex-col"
+                className="flex-1 flex flex-col overflow-hidden"
               >
-                <div className="px-4 py-2 border-b border-border bg-card/60 flex-shrink-0">
-                  <TabsList className="h-7">
-                    <TabsTrigger value="tool" className="text-xs px-3 py-1">Tool Detail</TabsTrigger>
-                    <TabsTrigger value="orchestration" className="text-xs px-3 py-1">Orchestration</TabsTrigger>
+                <div className="flex-shrink-0 px-4 pt-3">
+                  <TabsList className="w-full grid grid-cols-2">
+                    <TabsTrigger value="tool" className="text-xs">Tool Detail</TabsTrigger>
+                    <TabsTrigger value="orchestration" className="text-xs">Summary &amp; Agents</TabsTrigger>
                   </TabsList>
                 </div>
-                <TabsContent value="tool" className="flex-1 min-h-0 mt-0">
-                  <div className="h-full">
-                    <ToolCallPanel toolCall={selectedToolCall} logStem={logStem} />
-                  </div>
-                </TabsContent>
-                <TabsContent value="orchestration" className="flex-1 min-h-0 mt-0">
-                  <div className="h-full">
-                    <AgentOrchestrationPanel
-                      events={events}
-                      toolBreakdown={metadata.toolBreakdown}
-                    />
-                  </div>
-                </TabsContent>
+                <div className="flex-1 overflow-hidden">
+                  <TabsContent value="tool" className="h-full m-0 data-[state=active]:flex data-[state=active]:flex-col">
+                    <div className="flex-1 h-full">
+                      <ToolCallPanel toolCall={selectedToolCall} logStem={logStem} />
+                    </div>
+                  </TabsContent>
+                  <TabsContent value="orchestration" className="h-full m-0 data-[state=active]:flex data-[state=active]:flex-col">
+                    <div className="flex-1 h-full">
+                      <AgentOrchestrationPanel
+                        events={events}
+                        toolBreakdown={metadata.toolBreakdown}
+                      />
+                    </div>
+                  </TabsContent>
+                </div>
               </Tabs>
             </div>
           </ResizablePanel>
@@ -298,14 +334,14 @@ export function KUAViLogViewer({ logFile, onBack }: KUAViLogViewerProps) {
 
       {/* Keyboard hint footer */}
       <div className="border-t border-border bg-muted/30 px-6 py-1.5 flex-shrink-0">
-        <div className="flex items-center justify-center gap-6 text-xs text-muted-foreground">
+        <div className="flex items-center justify-center gap-6 text-[10px] text-muted-foreground">
           <span className="flex items-center gap-1">
-            <kbd className="px-1 py-0.5 bg-muted rounded text-[10px]">←</kbd>
-            <kbd className="px-1 py-0.5 bg-muted rounded text-[10px]">→</kbd>
-            Navigate turns
+            <kbd className="px-1 py-0.5 bg-muted rounded text-[9px]">←</kbd>
+            <kbd className="px-1 py-0.5 bg-muted rounded text-[9px]">→</kbd>
+            Navigate
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="px-1 py-0.5 bg-muted rounded text-[10px]">Esc</kbd>
+            <kbd className="px-1 py-0.5 bg-muted rounded text-[9px]">Esc</kbd>
             Back
           </span>
         </div>

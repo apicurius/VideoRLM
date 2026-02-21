@@ -379,10 +379,10 @@ export function TurnTimeline({ turns, selectedTurnIndex, onSelectTurnIndex }: Tu
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
           </svg>
         </div>
-        <span className="text-xs font-semibold text-foreground">Turn Timeline</span>
-        <span className="text-xs text-muted-foreground">({turns.length} turn{turns.length !== 1 ? 's' : ''})</span>
+        <span className="text-xs font-semibold text-foreground">Agent Tool Trajectory</span>
+        <span className="text-[10px] text-muted-foreground">({turns.length} turn{turns.length !== 1 ? 's' : ''})</span>
         <div className="flex-1" />
-        <span className="text-xs text-muted-foreground">← scroll →</span>
+        <span className="text-[10px] text-muted-foreground">← scroll →</span>
       </div>
 
       <ScrollArea className="w-full">
@@ -465,7 +465,7 @@ export function TurnTimeline({ turns, selectedTurnIndex, onSelectTurnIndex }: Tu
                     </div>
 
                     {/* Reasoning preview */}
-                    <p className="text-xs text-muted-foreground truncate leading-relaxed">
+                    <p className="text-[10px] text-muted-foreground truncate leading-relaxed">
                       {reasoningSnippet
                         ? `${reasoningSnippet}${(turn.reasoning?.text.length ?? 0) > 60 ? '...' : ''}`
                         : toolCount > 0
@@ -475,7 +475,7 @@ export function TurnTimeline({ turns, selectedTurnIndex, onSelectTurnIndex }: Tu
 
                     {/* Token usage */}
                     {totalTokens !== null && (
-                      <div className="flex items-center gap-2 mt-1 text-[10px] font-mono text-muted-foreground/70">
+                      <div className="flex items-center gap-2 mt-1 text-[9px] font-mono text-muted-foreground/70">
                         {turn.tokenUsage && (
                           <span>
                             <span className="text-sky-600 dark:text-sky-400">
