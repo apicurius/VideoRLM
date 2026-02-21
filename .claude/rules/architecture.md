@@ -26,8 +26,17 @@ kuavi/                  # Main package
 ## Claude Code Integration
 
 - **MCP Server**: `.mcp.json` registers `kuavi` MCP server (stdio)
-- **Skills**: `.claude/skills/kuavi-{index,search,analyze,compare,deep-analyze}/SKILL.md`
-- **Agent**: `.claude/agents/video-analyst.md` (Sonnet, 30 turns, KUAVi tools)
+- **Skills**: `.claude/skills/kuavi-{index,search,analyze,compare,deep-analyze,pixel-analysis,deep-search}/SKILL.md`
+- **Agents**:
+  - `video-analyst.md` — Orchestrator (Sonnet, 30 turns, can spawn sub-agents)
+  - `video-decomposer.md` — Question decomposition (Haiku, 8 turns, search-only tools)
+  - `video-segment-analyst.md` — Parallel temporal analysis (Sonnet, 12 turns, background)
+  - `video-synthesizer.md` — Result aggregation (Sonnet, 8 turns)
+- **Hooks**:
+  - `validate_transcript_claims.sh` — Anti-hallucination enforcement on transcript searches
+  - `validate_visual_confirmation.sh` — Validates final output cites frame evidence
+  - `validate_analysis.sh` — Checks for timestamps, evidence, confidence markers
+  - `kuavi_trace_logger.sh` — JSONL trajectory logging
 
 ## MCP Tools
 

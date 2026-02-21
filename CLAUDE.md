@@ -20,6 +20,37 @@ uv run python -m kuavi.cli index <video> # Index a video
 
 IMPORTANT: Never modify MCP tool signatures without updating both `mcp_server.py` and `search.py`.
 
+## Multi-Agent Architecture
+
+KUAVi uses a decompose-analyze-synthesize pattern for complex video questions:
+
+| Agent | Role | Model |
+|-------|------|-------|
+| `video-analyst` | Orchestrator — decides simple vs complex, dispatches sub-agents | Sonnet |
+| `video-decomposer` | Breaks complex questions into sub-questions with time ranges | Haiku |
+| `video-segment-analyst` | Analyzes one temporal region (runs in background for parallelism) | Sonnet |
+| `video-synthesizer` | Aggregates per-segment results into a final answer | Sonnet |
+
+For simple questions, `video-analyst` answers directly using SEARCH-FIRST.
+For complex questions, it orchestrates: decompose → parallel segment analysis → synthesize.
+
+## Skills
+
+| Skill | When to use |
+|-------|-------------|
+| `kuavi-pixel-analysis` | Counting, motion detection, brightness tracking via `kuavi_eval` |
+| `kuavi-deep-search` | Iterative query refinement when initial search fails |
+| `kuavi-search` | Standard multi-field search |
+| `kuavi-analyze` | End-to-end analysis |
+| `kuavi-deep-analyze` | Multi-pass with shard analysis |
+
+## Hooks
+
+- **Anti-hallucination**: `validate_transcript_claims.sh` warns when transcript results contain names/numbers that need visual confirmation
+- **Visual confirmation**: `validate_visual_confirmation.sh` checks that final output cites frame evidence for numeric claims
+- **Trace logging**: `kuavi_trace_logger.sh` logs all tool calls to JSONL for trajectory visualization
+- **Compile check**: `py_compile_check.sh` validates Python files after edits
+
 ## Compaction
 
-When compacting, always preserve: the list of modified files, current task context, and KUAVi MCP tool names (`kuavi_index_video`, `kuavi_search_video`, `kuavi_search_transcript`, `kuavi_get_transcript`, `kuavi_get_scene_list`, `kuavi_discriminative_vqa`, `kuavi_extract_frames`, `kuavi_get_index_info`).
+When compacting, always preserve: the list of modified files, current task context, active video path and index info, sub-agent dispatch state, and KUAVi MCP tool names (`kuavi_index_video`, `kuavi_search_video`, `kuavi_search_transcript`, `kuavi_get_transcript`, `kuavi_get_scene_list`, `kuavi_discriminative_vqa`, `kuavi_extract_frames`, `kuavi_get_index_info`).
