@@ -22,7 +22,8 @@
   },
   "enableAllProjectMcpServers": true,
   "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "ENABLE_TOOL_SEARCH": "auto:5"
   },
   "hooks": {
     "PostToolUse": [
@@ -38,6 +39,10 @@
       {
         "matcher": "mcp__kuavi__.*",
         "hooks": [{ "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/kuavi_trace_logger.sh", "async": true }]
+      },
+      {
+        "matcher": "mcp__kuavi__kuavi_search_transcript",
+        "hooks": [{ "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/validate_transcript_claims.sh" }]
       }
     ],
     "SessionStart": [
@@ -69,6 +74,10 @@
           {
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/hooks/validate_analysis.sh"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/hooks/validate_visual_confirmation.sh"
           },
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/kuavi_trace_logger.sh", "async": true }
         ]
