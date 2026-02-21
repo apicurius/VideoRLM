@@ -90,27 +90,27 @@ RLMs replace the single-shot `llm.completion(prompt)` pattern with a **REPL-augm
 ### Completion Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        RLM Completion Loop                      │
-│                                                                 │
-│  prompt + context                                               │
-│       │                                                         │
-│       ▼                                                         │
-│  ┌──────────┐    ```repl         ┌──────────────┐               │
-│  │   LLM    │──── code ────────▶│     REPL     │               │
-│  │ Response  │    blocks         │  Environment │               │
-│  └──────────┘◀──── results ─────└──────────────┘               │
-│       │                                │                        │
-│       │ (loop up to 30 iterations)     │ llm_query()            │
-│       │                                ▼                        │
-│       │                         ┌──────────────┐               │
-│       │                         │   Sub-LLM    │  depth=1      │
-│       │                         │    (via TCP)  │               │
-│       │                         └──────────────┘               │
-│       │                                                         │
-│       ▼                                                         │
-│  FINAL(answer) or FINAL_VAR(var_name)                          │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                      RLM Completion Loop                      │
+│                                                               │
+│  prompt + context                                             │
+│       │                                                       │
+│       ▼                                                       │
+│  ┌──────────┐    ```repl       ┌──────────────┐              │
+│  │   LLM    │──── code ──────▶│     REPL     │              │
+│  │ Response  │    blocks       │  Environment │              │
+│  └──────────┘◀──── results ───└──────────────┘              │
+│       │                              │                        │
+│       │ (loop up to 30 iterations)   │ llm_query()            │
+│       │                              ▼                        │
+│       │                       ┌──────────────┐               │
+│       │                       │   Sub-LLM    │  depth=1      │
+│       │                       │   (via TCP)  │               │
+│       │                       └──────────────┘               │
+│       │                                                       │
+│       ▼                                                       │
+│  FINAL(answer) or FINAL_VAR(var_name)                        │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ```python
@@ -200,38 +200,38 @@ All providers support multimodal content (base64 images), usage tracking, and as
 VideoRLM extends the RLM paradigm to video understanding by **injecting video analysis tools directly into the REPL environment**. The LM can search, extract frames, and reason about video content using the same code-execution loop.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                          VideoRLM Flow                           │
-│                                                                  │
-│  Video File                                                      │
-│     │                                                            │
-│     ├──▶ VideoLoader ──▶ frames + metadata                      │
-│     │                                                            │
-│     ├──▶ VideoIndexer ──▶ VideoIndex                            │
-│     │       │  V-JEPA 2 scene detection                         │
-│     │       │  SigLIP2 frame/text embeddings                    │
-│     │       │  Whisper ASR transcription                        │
-│     │       │  Tree-of-Captions + Self-Refine                   │
-│     │                                                            │
-│     └──▶ Build extra_tools:                                     │
-│            search_video()         ─┐                             │
-│            search_transcript()     │                             │
-│            get_transcript()        │  injected into              │
-│            get_scene_list()        ├─ REPL namespace             │
-│            discriminative_vqa()    │  as callable functions      │
-│            extract_frames()        │                             │
-│            crop_frame()            │                             │
-│            diff_frames()          ─┘                             │
-│                    │                                             │
-│                    ▼                                             │
-│            rlm.completion(video_context, extra_tools=tools)      │
-│                    │                                             │
-│                    ▼                                             │
-│            Standard RLM loop with video tools available          │
-│            LM writes: results = search_video("person walking")  │
-│            LM writes: frames = extract_frames(10.0, 20.0)       │
-│            LM writes: analysis = llm_query_batched(shard_prompts)│
-└──────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                        VideoRLM Flow                           │
+│                                                                │
+│  Video File                                                    │
+│     │                                                          │
+│     ├──▶ VideoLoader ──▶ frames + metadata                    │
+│     │                                                          │
+│     ├──▶ VideoIndexer ──▶ VideoIndex                          │
+│     │       │  V-JEPA 2 scene detection                       │
+│     │       │  SigLIP2 frame/text embeddings                  │
+│     │       │  Whisper ASR transcription                      │
+│     │       │  Tree-of-Captions + Self-Refine                 │
+│     │                                                          │
+│     └──▶ Build extra_tools:                                   │
+│            search_video()         ─┐                           │
+│            search_transcript()     │                           │
+│            get_transcript()        │  injected into            │
+│            get_scene_list()        ├─ REPL namespace           │
+│            discriminative_vqa()    │  as callable functions    │
+│            extract_frames()        │                           │
+│            crop_frame()            │                           │
+│            diff_frames()          ─┘                           │
+│                    │                                           │
+│                    ▼                                           │
+│     rlm.completion(video_context, extra_tools=tools)           │
+│                    │                                           │
+│                    ▼                                           │
+│     Standard RLM loop with video tools available               │
+│     LM: results = search_video("person walking")              │
+│     LM: frames = extract_frames(10.0, 20.0)                   │
+│     LM: analysis = llm_query_batched(shard_prompts)            │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 **Sharded analysis for long videos**: VideoRLM divides long videos into temporal shards, encodes each shard's frames as multimodal content, and runs `llm_query_batched()` for parallel analysis across all shards simultaneously.
@@ -249,34 +249,34 @@ uv run python run_video.py --video path/to/video.mp4 \
 KUAVi re-exposes the VideoRLM tool set as an **MCP (Model Context Protocol) server**, enabling Claude Code agents to call the same video analysis tools via structured tool calls rather than REPL code injection. On top of this, KUAVi adds a **multi-agent orchestration layer** for complex video questions.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                    KUAVi Architecture Overview                   │
-│                                                                  │
-│  ┌──────────────────────────────────────────────────────┐       │
-│  │                  Claude Code Agent                    │       │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │       │
-│  │  │  video-  │  │  video-  │  │   video-segment- │   │       │
-│  │  │ analyst  │──│decomposer│  │    analyst (x N)  │   │       │
-│  │  │(orchestr)│  │  (plan)  │  │   (parallel BG)   │   │       │
-│  │  └────┬─────┘  └──────────┘  └──────────────────┘   │       │
-│  │       │         ┌──────────┐                         │       │
-│  │       └─────────│  video-  │                         │       │
-│  │                 │synthesizer│                         │       │
-│  │                 └──────────┘                         │       │
-│  └────────────────────────┬─────────────────────────────┘       │
-│                           │ MCP Protocol (stdio)                 │
-│  ┌────────────────────────▼─────────────────────────────┐       │
-│  │              KUAVi MCP Tool Server                    │       │
-│  │  18 tools: search, extract, pixel analysis, eval     │       │
-│  │  Multi-video state, budget gates, trace logging      │       │
-│  └────────────────────────┬─────────────────────────────┘       │
-│                           │                                      │
-│  ┌────────────────────────▼─────────────────────────────┐       │
-│  │                    VideoIndex                         │       │
-│  │  Segments + 4 embedding spaces + ASR transcript      │       │
-│  │  Built by VideoIndexer (3-model pipeline)            │       │
-│  └──────────────────────────────────────────────────────┘       │
-└──────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                  KUAVi Architecture Overview                │
+│                                                            │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │                  Claude Code Agent                    │  │
+│  │  ┌────────────┐ ┌────────────┐ ┌──────────────────┐ │  │
+│  │  │   video-   │ │   video-   │ │  video-segment-  │ │  │
+│  │  │  analyst   │─│ decomposer │ │  analyst (x N)   │ │  │
+│  │  │(orchestr.) │ │   (plan)   │ │  (parallel BG)   │ │  │
+│  │  └─────┬──────┘ └────────────┘ └──────────────────┘ │  │
+│  │        │        ┌────────────┐                       │  │
+│  │        └────────│   video-   │                       │  │
+│  │                 │ synthesizer│                       │  │
+│  │                 └────────────┘                       │  │
+│  └────────────────────────┬─────────────────────────────┘  │
+│                           │ MCP Protocol (stdio)            │
+│  ┌────────────────────────▼─────────────────────────────┐  │
+│  │              KUAVi MCP Tool Server                    │  │
+│  │  18 tools: search, extract, pixel analysis, eval     │  │
+│  │  Multi-video state, budget gates, trace logging      │  │
+│  └────────────────────────┬─────────────────────────────┘  │
+│                           │                                 │
+│  ┌────────────────────────▼─────────────────────────────┐  │
+│  │                    VideoIndex                         │  │
+│  │  Segments + 4 embedding spaces + ASR transcript      │  │
+│  │  Built by VideoIndexer (3-model pipeline)            │  │
+│  └──────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────┘
 ```
 
 ### Three-Model Architecture
@@ -315,74 +315,73 @@ The indexing pipeline converts raw video into a searchable `VideoIndex` through 
 Raw Video
   │
   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Stage 1: Frame Extraction                                    │
-│   VideoLoader → decode at fixed/auto FPS → BGR numpy arrays │
-│   Auto-FPS: target_frames / duration, clamped [0.1, 5.0]   │
-└──────────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Stage 1: Frame Extraction                                 │
+│   VideoLoader → decode at fixed/auto FPS → numpy arrays   │
+│   Auto-FPS: target_frames / duration, clamped [0.1, 5.0] │
+└──────────────────────────┬────────────────────────────────┘
                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Stage 2: Scene Detection                                     │
-│   V-JEPA 2: group into 16-frame clips → encode →            │
-│     agglomerative clustering (Ward, adjacency constraint)    │
-│   Fallback: SigLIP2 frame embeddings → same clustering      │
-│   Hierarchical option: multiple thresholds → multi-level     │
-└──────────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Stage 2: Scene Detection                                  │
+│   V-JEPA 2: 16-frame clips → encode → Ward clustering    │
+│   Fallback: SigLIP2 frame embeddings → same clustering    │
+│   Hierarchical: multiple thresholds → multi-level scenes  │
+└──────────────────────────┬────────────────────────────────┘
                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Stage 3: Transcript Extraction                               │
-│   ffmpeg → PCM audio → faster-whisper (int8) → segments     │
-│   Or load pre-computed transcript from JSON file             │
-└──────────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Stage 3: Transcript Extraction                            │
+│   ffmpeg → PCM audio → faster-whisper (int8) → segments   │
+│   Or load pre-computed transcript from JSON file          │
+└──────────────────────────┬────────────────────────────────┘
                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Stage 4: Deduplication & Selective Decoding                   │
-│   4a. Pre-caption dedup: SigLIP2 cosine sim > 0.90          │
-│       → skip captioning, propagate from representative       │
-│   4b. 3-tier selective decode:                               │
-│       Tier 0 (DEAD): pixel_std < 5 or edge_density < 0.01  │
-│       Tier 1 (STATIC): SigLIP2 sim > 0.98 + low V-JEPA var │
-│       Tier 2 (DYNAMIC): full captioning                      │
-│       V-JEPA can promote Tier 1 → Tier 2 on subtle motion   │
-└──────────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Stage 4: Deduplication & Selective Decoding                │
+│   4a. Pre-caption dedup: SigLIP2 cosine sim > 0.90       │
+│       → skip captioning, propagate from representative    │
+│   4b. 3-tier selective decode:                            │
+│       Tier 0 (DEAD): pixel_std < 5 or edge_density < 0.01│
+│       Tier 1 (STATIC): SigLIP2 sim > 0.98 + low VJEPA   │
+│       Tier 2 (DYNAMIC): full captioning                   │
+│       V-JEPA can promote Tier 1 → 2 on subtle motion     │
+└──────────────────────────┬────────────────────────────────┘
                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Stage 5: Tree-of-Captions                                    │
-│   5a. Frame-level: midpoint keyframe caption (leaf)          │
-│   5b. Segment-level: structured annotation (node)            │
-│       → {summary: {brief, detailed},                         │
-│          action: {brief, detailed, actor}}                   │
-│   Edge frame filtering (cosine sim < 0.5 to central cluster)│
-│   Parallel: ThreadPoolExecutor(max_workers=8)               │
-└──────────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Stage 5: Tree-of-Captions                                 │
+│   5a. Frame-level: midpoint keyframe caption (leaf)       │
+│   5b. Segment-level: structured annotation (node)         │
+│       → {summary: {brief, detailed},                      │
+│          action: {brief, detailed, actor}}                │
+│   Edge frame filter (cosine sim < 0.5 to central cluster) │
+│   Parallel: ThreadPoolExecutor(max_workers=8)             │
+└──────────────────────────┬────────────────────────────────┘
                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Stage 6: Self-Refine                                         │
-│   3 rounds of iterative annotation refinement:               │
-│   Round 0: "Analyze and produce refined version"             │
-│   Round 1+: "Verify and revise previous draft"               │
-│   Context: video metadata + neighbor captions + ASR          │
-│   Anti-hallucination rules enforced per round                │
-│   Post-refine dedup: adjacent (>0.95) + global (>0.90)      │
-│   Quality scoring: re-caption if sim < 0.3 (up to 3 tries)  │
-└──────────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Stage 6: Self-Refine                                      │
+│   3 rounds of iterative annotation refinement:            │
+│   Round 0: "Analyze and produce refined version"          │
+│   Round 1+: "Verify and revise previous draft"            │
+│   Context: video metadata + neighbor captions + ASR       │
+│   Anti-hallucination rules enforced per round             │
+│   Post-refine dedup: adjacent (>0.95) + global (>0.90)   │
+│   Quality scoring: re-caption if sim < 0.3 (3 retries)   │
+└──────────────────────────┬────────────────────────────────┘
                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Stage 7: Embedding                                           │
-│   Summary captions → embeddings (SigLIP2 text or Gemma)     │
-│   Action briefs → action_embeddings                          │
-│   Representative frames → frame_embeddings (SigLIP2 vision) │
-│   V-JEPA clips → temporal_embeddings (per-segment average)   │
-│   All smoothed with moving average (window=3), L2-normalized │
-│   Quality check: mean pairwise sim > 0.99 = DEGENERATE      │
-└──────────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Stage 7: Embedding                                        │
+│   Summary captions → embeddings (SigLIP2 text or Gemma)   │
+│   Action briefs → action_embeddings                       │
+│   Representative frames → frame_embeddings (SigLIP2)      │
+│   V-JEPA clips → temporal_embeddings (per-segment avg)    │
+│   All smoothed: moving average (window=3), L2-normalized  │
+│   Quality check: mean pairwise sim > 0.99 = DEGENERATE   │
+└──────────────────────────┬────────────────────────────────┘
                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Stage 8: Hierarchy                                           │
-│   Optional multi-level from hierarchical scene detection     │
-│   Always builds coarse level (~30s chunks) for level=1 search│
-│   Saved to disk: embeddings (.npz) + metadata (JSON)        │
-└──────────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Stage 8: Hierarchy                                        │
+│   Optional multi-level from hierarchical scene detection  │
+│   Always builds coarse level (~30s) for level=1 search    │
+│   Saved to disk: embeddings (.npz) + metadata (JSON)      │
+└──────────────────────────┬────────────────────────────────┘
                            ▼
                       VideoIndex
    {segments, embeddings, action_embeddings, frame_embeddings,
@@ -457,13 +456,13 @@ All pixel tools accept frame references by **integer index** into the last `extr
 KUAVi uses a **decompose-analyze-synthesize** pattern for complex video questions, coordinated by four specialized agents:
 
 ```
-                        User Question
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │  video-analyst   │  Sonnet, 20 turns
-                    │  (orchestrator)  │
-                    └────────┬────────┘
+                         User Question
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │  video-analyst    │  Sonnet, 20 turns
+                    │  (orchestrator)   │
+                    └────────┬─────────┘
                              │
                     Is this complex?
                     (multi-part, causal,
@@ -474,33 +473,33 @@ KUAVi uses a **decompose-analyze-synthesize** pattern for complex video question
             SIMPLE                    COMPLEX
                 │                         │
                 ▼                         ▼
-        SEARCH-FIRST              ┌──────────────┐
-        (direct answer)           │   Phase 1:    │
-        ┌──────────────┐         │  DECOMPOSE    │
-        │ get_index_info│         └──────┬───────┘
-        │ get_scene_list│                │
-        │ search_video  │         ┌──────▼───────┐
-        │ search_transc.│         │video-decomposer│  Haiku, 8 turns
-        │ extract_frames│         │  search-only   │
-        │ get_transcript│         └──────┬───────┘
-        │ verify + cite │                │
-        └──────────────┘         JSON plan with
+        SEARCH-FIRST             ┌───────────────┐
+        (direct answer)          │   Phase 1:    │
+        ┌───────────────┐        │  DECOMPOSE    │
+        │ get_index_info │        └───────┬───────┘
+        │ get_scene_list │                │
+        │ search_video   │        ┌───────▼────────┐
+        │ search_transc. │        │video-decomposer│ Haiku, 8 turns
+        │ extract_frames │        │  search-only   │
+        │ get_transcript │        └───────┬────────┘
+        │ verify + cite  │               │
+        └───────────────┘         JSON plan with
                                   sub-questions,
                                   time ranges,
                                   dependencies
                                          │
-                                  ┌──────▼───────┐
-                                  │   Phase 2:    │
-                                  │   ANALYZE     │
-                                  └──────┬───────┘
+                                  ┌──────▼──────┐
+                                  │  Phase 2:   │
+                                  │  ANALYZE    │
+                                  └──────┬──────┘
                                          │
                           ┌──────────────┼──────────────┐
                           ▼              ▼              ▼
                    ┌────────────┐ ┌────────────┐ ┌────────────┐
-                   │ segment-   │ │ segment-   │ │ segment-   │
+                   │  segment-  │ │  segment-  │ │  segment-  │
                    │ analyst #1 │ │ analyst #2 │ │ analyst #3 │
-                   │ (background│ │ (background│ │ (background│
-                   │  parallel) │ │  parallel) │ │  parallel) │
+                   │(background)│ │(background)│ │(background)│
+                   │ (parallel) │ │ (parallel) │ │ (parallel) │
                    └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
                          │              │              │
                    Sonnet, 12 turns each, 10-call budget
@@ -508,16 +507,16 @@ KUAVi uses a **decompose-analyze-synthesize** pattern for complex video question
                          │              │              │
                          └──────────────┼──────────────┘
                                         │
-                                 ┌──────▼───────┐
-                                 │   Phase 3:    │
-                                 │  SYNTHESIZE   │
-                                 └──────┬───────┘
+                                 ┌──────▼──────┐
+                                 │  Phase 3:   │
+                                 │ SYNTHESIZE  │
+                                 └──────┬──────┘
                                         │
-                                 ┌──────▼───────┐
-                                 │video-synthesizer│  Sonnet, 8 turns
-                                 │  search-only    │
-                                 │  max 5 calls    │
-                                 └──────┬───────┘
+                                 ┌──────▼──────────┐
+                                 │video-synthesizer │ Sonnet, 8 turns
+                                 │  search-only     │
+                                 │  max 5 calls     │
+                                 └──────┬───────────┘
                                         │
                                  Final answer with
                                  timestamps, evidence,
