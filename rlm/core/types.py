@@ -150,10 +150,17 @@ class REPLResult:
         return f"REPLResult(stdout={self.stdout}, stderr={self.stderr}, locals={self.locals}, execution_time={self.execution_time}, rlm_calls={len(self.rlm_calls)})"
 
     def to_dict(self):
+        # Serialize locals lazily — only called when logging, not on every iteration.
+        serialized_locals = {}
+        for k, v in self.locals.items():
+            try:
+                serialized_locals[k] = _serialize_value(v)
+            except Exception:
+                serialized_locals[k] = f"<unserializable {type(v).__name__}>"
         return {
             "stdout": self.stdout,
             "stderr": self.stderr,
-            "locals": {k: _serialize_value(v) for k, v in self.locals.items()},
+            "locals": serialized_locals,
             "execution_time": self.execution_time,
             "rlm_calls": [call.to_dict() for call in self.rlm_calls],
         }

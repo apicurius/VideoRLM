@@ -32,6 +32,10 @@ class AnthropicClient(BaseLM):
         self.model_total_tokens: dict[str, int] = defaultdict(int)
 
     def completion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
+        cached, cache_key = self.cached_completion(prompt)
+        if cached is not None:
+            return cached
+
         messages, system = self._prepare_messages(prompt)
 
         model = model or self.model_name
@@ -44,7 +48,9 @@ class AnthropicClient(BaseLM):
 
         response = self.client.messages.create(**kwargs)
         self._track_cost(response, model)
-        return response.content[0].text
+        content = response.content[0].text
+        self.cache_store(cache_key, content)
+        return content
 
     async def acompletion(
         self, prompt: str | list[dict[str, Any]], model: str | None = None

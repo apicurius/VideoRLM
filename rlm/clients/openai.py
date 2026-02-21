@@ -80,6 +80,11 @@ class OpenAIClient(BaseLM):
         return normalized
 
     def completion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
+        # Check cache first
+        cached, cache_key = self.cached_completion(prompt)
+        if cached is not None:
+            return cached
+
         if isinstance(prompt, str):
             messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
         elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
@@ -99,7 +104,9 @@ class OpenAIClient(BaseLM):
             model=model, messages=messages, extra_body=extra_body
         )
         self._track_cost(response, model)
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        self.cache_store(cache_key, content)
+        return content
 
     async def acompletion(
         self, prompt: str | list[dict[str, Any]], model: str | None = None

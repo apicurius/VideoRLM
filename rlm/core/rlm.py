@@ -55,6 +55,7 @@ class RLM:
         persistent: bool = False,
         custom_tools: dict[str, Any] | None = None,
         custom_sub_tools: dict[str, Any] | None = None,
+        max_history_messages: int | None = None,
     ):
         """
         Args:
@@ -77,6 +78,10 @@ class RLM:
                 values are callable functions. These are injected into the REPL globals.
             custom_sub_tools: Dict of custom tools for sub-agents (llm_query calls). If None, inherits
                 from custom_tools. Pass an empty dict {} to disable tools for sub-agents.
+            max_history_messages: Maximum number of conversation messages (excluding the
+                system prompt) to keep in the sliding window.  Older iterations are
+                summarized into a compact digest to prevent quadratic token growth.
+                None means no limit (default, backward compatible).
         """
         # Store config for spawning per-completion
         self.backend = backend
@@ -105,6 +110,7 @@ class RLM:
         self.max_depth = max_depth
         self.max_iterations = max_iterations
         self.token_budget = token_budget
+        self.max_history_messages = max_history_messages
         self.system_prompt = custom_system_prompt if custom_system_prompt else RLM_SYSTEM_PROMPT
         self.logger = logger
         self.verbose = VerbosePrinter(enabled=verbose)
@@ -361,6 +367,10 @@ class RLM:
                 # Update message history with the new messages.
                 message_history.extend(new_messages)
 
+                # Apply sliding window to prevent quadratic context growth.
+                if self.max_history_messages is not None:
+                    message_history = self._apply_history_window(message_history)
+
             # Default behavior: we run out of iterations, provide one final answer
             time_end = time.perf_counter()
             final_answer = self._default_answer(message_history, lm_handler)
@@ -382,6 +392,42 @@ class RLM:
                 execution_time=time_end - time_start,
                 metadata=self.logger.get_trajectory() if self.logger else None,
             )
+
+    def _apply_history_window(
+        self, message_history: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Trim message history to keep it within the sliding window.
+
+        Preserves the system prompt (first message) and the most recent
+        ``max_history_messages`` conversation messages.  Evicted messages
+        are collapsed into a single summary message so the model retains
+        awareness of earlier iterations.
+        """
+        limit = self.max_history_messages
+        if limit is None or len(message_history) <= limit + 1:
+            return message_history
+
+        # Split: system prompt + conversation tail
+        system_msgs = [message_history[0]]
+        conversation = message_history[1:]
+
+        if len(conversation) <= limit:
+            return message_history
+
+        evicted = conversation[: len(conversation) - limit]
+        kept = conversation[len(conversation) - limit :]
+
+        # Build a compact summary of evicted iterations
+        n_evicted = len(evicted)
+        summary = (
+            f"[{n_evicted} earlier messages summarized] "
+            f"Previous iterations explored the context and executed code. "
+            f"Key variables are preserved in the REPL environment. "
+            f"Consult SHOW_VARS() if you need to recall earlier results."
+        )
+        digest = {"role": "user", "content": summary}
+
+        return system_msgs + [digest] + kept
 
     def _completion_turn(
         self,

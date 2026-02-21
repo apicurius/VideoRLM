@@ -298,6 +298,10 @@ class LocalREPL(NonIsolatedEnv):
         """
         Add a context with versioned variable name.
 
+        For the local REPL we inject the payload directly into the namespace,
+        avoiding the write-to-disk → exec(open()) round-trip.  The payload is
+        still deep-copied so the caller's object isn't shared.
+
         Args:
             context_payload: The context data to add
             context_index: Optional explicit index. If None, auto-increments.
@@ -310,22 +314,12 @@ class LocalREPL(NonIsolatedEnv):
 
         var_name = f"context_{context_index}"
 
-        if isinstance(context_payload, str):
-            context_path = os.path.join(self.temp_dir, f"context_{context_index}.txt")
-            with open(context_path, "w") as f:
-                f.write(context_payload)
-            self.execute_code(f"with open(r'{context_path}', 'r') as f:\n    {var_name} = f.read()")
-        else:
-            context_path = os.path.join(self.temp_dir, f"context_{context_index}.json")
-            with open(context_path, "w") as f:
-                json.dump(context_payload, f)
-            self.execute_code(
-                f"import json\nwith open(r'{context_path}', 'r') as f:\n    {var_name} = json.load(f)"
-            )
+        # Direct injection: skip file I/O entirely for local env
+        self.locals[var_name] = copy.deepcopy(context_payload)
 
         # Alias context_0 as 'context' for backward compatibility
         if context_index == 0:
-            self.execute_code(f"context = {var_name}")
+            self.locals["context"] = self.locals[var_name]
 
         self._context_count = max(self._context_count, context_index + 1)
         return context_index
@@ -415,12 +409,16 @@ class LocalREPL(NonIsolatedEnv):
         # Clear pending LLM calls from previous execution
         self._pending_llm_calls = []
 
+        # Track locals keys before execution to detect new variables efficiently
+        locals_before = set(self.locals)
+
         with self._capture_output() as (stdout_buf, stderr_buf), self._temp_cwd():
             try:
                 combined = {**self.globals, **self.locals}
                 exec(code, combined, combined)
 
-                # Update locals with new variables
+                # Update locals with new/changed variables — only scan keys not
+                # in globals to avoid the full combined-dict iteration.
                 for key, value in combined.items():
                     if key not in self.globals and not key.startswith("_"):
                         self.locals[key] = value

@@ -144,6 +144,10 @@ class GeminiClient(BaseLM):
         return "\n".join(text_parts) if text_parts else ""
 
     def completion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
+        cached, cache_key = self.cached_completion(prompt)
+        if cached is not None:
+            return cached
+
         contents, system_instruction = self._prepare_contents(prompt)
 
         model = model or self.model_name
@@ -160,7 +164,9 @@ class GeminiClient(BaseLM):
         )
 
         self._track_cost(response, model)
-        return self._extract_text(response)
+        content = self._extract_text(response)
+        self.cache_store(cache_key, content)
+        return content
 
     async def _async_retry_call(self, fn, *args, **kwargs):
         """Async retry for Gemini API calls on transient 500/504 server errors."""
