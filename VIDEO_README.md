@@ -1,12 +1,15 @@
-# VideoRLM: Long-Form Video Understanding
+# Video Understanding: RLM & KUAVi
 
 **Agentic video analysis that indexes, searches, and reasons over arbitrarily long videos.**
 
 ## Overview
 
-VideoRLM builds a searchable multi-scale index from any video — segmenting by scene, captioning with a VLM, embedding across dual spaces, and injecting ASR transcripts — then hands an LLM agent a toolkit to iteratively search, zoom, and reason until it can answer the question.
+This project provides two complementary pipelines for agentic video analysis:
 
-Unlike systems that sample random frames or cram everything into one context window, VideoRLM uses three specialized models (V-JEPA 2 for temporal scene detection, SigLIP2 for visual embeddings, EmbeddingGemma for semantic embeddings) and a recursive tool-use loop that lets the agent decide what to look at, at what granularity, and through which modality.
+- **VideoRLM** — REPL-based recursive reasoning. The agent writes Python code that calls tools, makes sub-LLM calls, and recursively decomposes problems. Best for complex multi-step reasoning and custom logic.
+- **KUAVi** — MCP-based structured tool calling. The agent uses standard LLM function calling (OpenAI/Gemini native) with hard budget enforcement and search-first guidance. Best for production use and Claude Code integration.
+
+Both pipelines share the same indexing backend — V-JEPA 2 for scene detection, SigLIP2 for visual embeddings, EmbeddingGemma for semantic embeddings, and Whisper for ASR — but differ in how the agent interacts with the tools.
 
 Videos of any length are supported. Long videos are automatically segmented via V-JEPA 2 scene boundaries and can optionally be sharded across parallel sub-agent calls.
 
@@ -345,9 +348,123 @@ The agent starts broad (coarse level=1, ~30s chunks) to localize relevant region
 - **Dual embedding spaces** — Visual (SigLIP2) and semantic (EmbeddingGemma) kept separate to avoid cross-modal contamination.
 - **Embedding smoothing** — Moving average (window=3) enforces temporal coherence across adjacent segments.
 
+## Two Pipelines: RLM vs KUAVi
+
+### RLM Pipeline (REPL-Based)
+
+The RLM pipeline operates through a Python REPL environment. The agent writes code that calls tools directly:
+
+```
+Video → Context (frames as dicts) → REPL Environment
+     ↓
+   LLM generates Python code
+     ↓
+   Code executes: search_video() → extract_frames() → llm_query_batched([...])
+     ↓
+   Sub-LLM calls execute in parallel (per shard)
+     ↓
+   Results flow back → LLM aggregates and responds
+```
+
+- **Entry point**: `run_video.py` or `rlm.video.VideoRLM`
+- **Agent loop**: Code execution with optional recursive sub-calls via `llm_query()` / `llm_query_batched()`
+- **Frame handling**: Base64-tagged dicts (`{"__image__": True, "data": "..."}`) as Python variables in REPL
+- **Sharding**: Pre-built `shard_prompts` list, explicit `llm_query_batched()` for parallel analysis
+
+### KUAVi Pipeline (MCP Tool-Calling)
+
+The KUAVi pipeline uses standard LLM function calling through an MCP server:
+
+```
+Video → Build Index → MCP Server (18 tools)
+     ↓
+   Agent declares tool calls: search_video() → extract_frames() → crop_frame()
+     ↓
+   Tools execute, results returned as structured responses
+     ↓
+   Budget checked: if exceeded, block further calls
+     ↓
+   Agent synthesizes from collected evidence
+```
+
+- **Entry point**: `run_experiment.py --pipeline kuavi` or `kuavi.mcp_server` (MCP stdio)
+- **Agent loop**: Iterative tool-calling with escalating nudges (3 no-tool iterations before termination)
+- **Frame handling**: Base64 images sent as separate multimodal messages after tool calls
+- **Sharding**: `kuavi_analyze_shards()` with ThreadPoolExecutor for transparent parallel analysis
+- **Budget**: Hard enforcement via `kuavi_set_budget()` — tools return errors once limits exceeded
+
+### KUAVi Package Structure
+
+```
+kuavi/
+├── __init__.py         # Public API exports (lazy imports)
+├── __main__.py         # python -m kuavi → MCP server
+├── types.py            # KUAViConfig dataclass
+├── loader.py           # VideoLoader, LoadedVideo, VideoSegment
+├── indexer.py          # VideoIndexer, VideoIndex (scene detection, embedding, ASR)
+├── search.py           # Search tool factories (make_search_video, etc.)
+├── scene_detection.py  # Scene boundary detection algorithms
+├── context.py          # VideoContext, frame encoding, make_extract_frames
+├── prompts.py          # VIDEO_ANALYSIS_PROMPT for Claude Code integration
+├── mcp_server.py       # FastMCP stdio server with 18 tools
+└── cli.py              # CLI: kuavi index/search/analyze
+```
+
+### KUAVi MCP Tools
+
+| Tool | Purpose |
+|---|---|
+| `kuavi_index_video` | Index a video file |
+| `kuavi_search_video` | Semantic search (fields: summary, action, visual, all) |
+| `kuavi_search_transcript` | Keyword search over ASR transcript |
+| `kuavi_get_transcript` | Get transcript for a time range |
+| `kuavi_get_scene_list` | List detected scenes with annotations |
+| `kuavi_discriminative_vqa` | Embedding-based multiple-choice VQA |
+| `kuavi_extract_frames` | Extract frames as base64 images |
+| `kuavi_zoom_frames` | Extract frames at preset zoom levels (1-3) |
+| `kuavi_crop_frame` | Crop image region using percentage coordinates |
+| `kuavi_diff_frames` | Absolute pixel difference between two frames |
+| `kuavi_blend_frames` | Average multiple frames into composite |
+| `kuavi_threshold_frame` | Binary mask with contour detection |
+| `kuavi_frame_info` | Image metadata and brightness/color stats |
+| `kuavi_eval` | Execute Python in persistent namespace with tools |
+| `kuavi_analyze_shards` | Parallel temporal shard analysis via LLM |
+| `kuavi_load_index` | Load a saved .kuavi index directory |
+| `kuavi_get_index_info` | Metadata about current index |
+| `kuavi_get_session_stats` | Usage statistics for current session |
+| `kuavi_set_budget` | Configure tool-call, time, and token limits |
+
+### Comparison
+
+| Aspect | RLM | KUAVi |
+|---|---|---|
+| **Tool protocol** | Python REPL callables | MCP / OpenAI function calling |
+| **Agent loop** | Code execution + recursive sub-calls | Iterative tool-calling with nudges |
+| **Code generation** | LLM writes Python | LLM declares structured tool calls |
+| **Sub-agent pattern** | Recursive `llm_query()` / `llm_query_batched()` | `kuavi_analyze_shards()` via ThreadPoolExecutor |
+| **Budget enforcement** | Soft (injected nudges) | Hard (gate blocks tools on limit) |
+| **Frame access** | Base64 dict variables in REPL | Tool results + multimodal messages |
+| **Logging** | RLMLogger trajectory (code blocks) | MCP trace logger (tool calls + events) |
+| **Integration** | Python API (`rlm.video.VideoRLM`) | MCP server, Claude Code, any OpenAI-compatible API |
+
+### When to Use Which
+
+**Use RLM when:**
+- You need complex per-frame logic (counting, filtering, custom aggregation)
+- The agent should write its own reasoning code
+- You need true recursive decomposition (hierarchical analysis)
+- You want maximum flexibility for research and experimentation
+
+**Use KUAVi when:**
+- You need a production-ready, auditable pipeline
+- Token/time budgets are critical (hard enforcement)
+- You want standard LLM tool-calling (works with any OpenAI-compatible API)
+- Integration with Claude Code / MCP ecosystem is desired
+- Search-first strategies with structured guidance are preferred
+
 ## Quick Start
 
-### CLI
+### RLM CLI
 
 ```bash
 # Comprehensive analysis (default prompt)
@@ -365,6 +482,30 @@ uv run python run_video.py --video path/to/long_video.mp4 --auto-fps
 
 # Use a different backend
 uv run python run_video.py --video path/to/video.mp4 --backend portkey --model "@openai/gpt-5-nano"
+```
+
+### KUAVi CLI
+
+```bash
+# Run with KUAVi pipeline
+uv run python run_experiment.py --video path/to/video.mp4 \
+    --question "What is the OOLONG score?" --pipeline kuavi
+
+# Run with RLM pipeline for comparison
+uv run python run_experiment.py --video path/to/video.mp4 \
+    --question "What is the OOLONG score?" --pipeline rlm
+
+# Run both pipelines side by side
+uv run python run_experiment.py --video path/to/video.mp4 \
+    --question "What is the OOLONG score?" --pipeline both
+
+# Start KUAVi MCP server (for Claude Code integration)
+uv run python -m kuavi.mcp_server
+
+# KUAVi standalone CLI
+uv run python -m kuavi.cli index path/to/video.mp4
+uv run python -m kuavi.cli search "OOLONG score" --index-dir ./cache/video_hash
+uv run python -m kuavi.cli analyze path/to/video.mp4 -q "What happens?"
 ```
 
 **All CLI flags:**
