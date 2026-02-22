@@ -263,7 +263,7 @@ export default function VideoRLMInterface() {
                     <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Backend Provider</Label>
                     <Select value={backend} onValueChange={(v) => {
                       setBackend(v);
-                      setModel(v === "openrouter" ? "openai/gpt-4o" : v === "openai" ? "gpt-4o" : v === "anthropic" ? "claude-3-5-sonnet-latest" : "gemini-2.5-flash");
+                      setModel(v === "openrouter" ? "openai/gpt-4o" : v === "openai" ? "gpt-4o" : v === "anthropic" ? "claude-3-5-sonnet-latest" : "gemini-3.1-pro-preview");
                     }}>
                       <SelectTrigger className="bg-white/5 border-white/10 h-11 text-sm rounded-xl focus:ring-amber-500/30 text-white"><SelectValue /></SelectTrigger>
                       <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white">

@@ -11,6 +11,7 @@ import threading
 import uuid
 from pathlib import Path
 
+import markdown
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
@@ -101,7 +102,12 @@ def _render_answer_html(text: str) -> str:
         )
 
     pattern = r"\[TS:\s*([\d:.]+)\s*(?:s)?\]"
-    return re.sub(pattern, replacer, text, flags=re.IGNORECASE)
+    processed_text = re.sub(pattern, replacer, text, flags=re.IGNORECASE)
+    
+    # Render the markdown into HTML *after* inserting the HTML buttons.
+    # markdown natively supports embedded raw HTML, so this is safe.
+    html_text = markdown.markdown(processed_text, extensions=['fenced_code', 'tables'])
+    return html_text
 
 
 SCENE_MODEL = "facebook/vjepa2-vitl-fpc64-256"
@@ -267,7 +273,7 @@ def _kuavi_pipeline(
                     make_gemini_frame_caption_fn,
                     make_gemini_refine_fn,
                 )
-                caption_model = "gemini-2.5-flash"
+                caption_model = "gemini-3.1-pro-preview"
                 caption_fn = make_gemini_caption_fn(model=caption_model, api_key=gemini_key)
                 frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model, api_key=gemini_key)
                 refine_fn = make_gemini_refine_fn(model=caption_model, api_key=gemini_key)
@@ -743,7 +749,7 @@ def _full_pipeline(
                 make_gemini_frame_caption_fn,
                 make_gemini_refine_fn,
             )
-            caption_model_name = "gemini-2.5-flash"
+            caption_model_name = "gemini-3.1-pro-preview"
             caption_fn = make_gemini_caption_fn(model=caption_model_name, api_key=gemini_key)
             frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model_name, api_key=gemini_key)
             refine_fn = make_gemini_refine_fn(model=caption_model_name, api_key=gemini_key)

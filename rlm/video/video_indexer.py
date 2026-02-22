@@ -279,6 +279,11 @@ class VideoIndexer:
     ) -> np.ndarray | None:
         """Predict future frame representation using V-JEPA 2 predictor.
 
+        The predictor uses a context/target masking scheme: context_mask selects
+        patches from the encoder output that serve as context, and target_mask
+        selects positions to predict. Both are index tensors of shape
+        ``[batch, num_selected]`` with int64 patch indices.
+
         Args:
             context_features: (num_patches, D) spatial feature map from a segment.
             n_future_tokens: Number of future token positions to predict.
@@ -291,22 +296,31 @@ class VideoIndexer:
 
         import torch
 
-        # Convert to tensor and add batch dimension
-        context_tensor = torch.from_numpy(context_features).unsqueeze(0).to(
+        num_patches = context_features.shape[0]
+        if n_future_tokens >= num_patches:
+            n_future_tokens = max(1, num_patches // 4)
+
+        n_context = num_patches - n_future_tokens
+
+        # Convert to tensor and add batch dimension: (1, num_patches, D)
+        encoder_hidden_states = torch.from_numpy(context_features).unsqueeze(0).to(
             self._scene_torch_device, dtype=torch.float16
         )
 
-        # Create mask tokens for future positions
-        D = context_features.shape[-1]
-        mask_tokens = torch.zeros(
-            1, n_future_tokens, D,
-            device=self._scene_torch_device, dtype=torch.float16,
-        )
+        # Index masks: context = first n_context patches, target = last n_future_tokens
+        context_mask = [torch.arange(n_context, dtype=torch.int64).unsqueeze(0).to(
+            self._scene_torch_device
+        )]
+        target_mask = [torch.arange(n_context, num_patches, dtype=torch.int64).unsqueeze(0).to(
+            self._scene_torch_device
+        )]
 
         with torch.no_grad():
             try:
-                predicted = self._scene_predictor(context_tensor, mask_tokens)
-                return predicted.squeeze(0).cpu().float().numpy()
+                output = self._scene_predictor(
+                    encoder_hidden_states, context_mask, target_mask
+                )
+                return output.last_hidden_state.squeeze(0).cpu().float().numpy()
             except Exception as e:
                 logger.warning("Predictor forward pass failed: %s", e)
                 return None
@@ -445,12 +459,28 @@ class VideoIndexer:
                 "[pipeline] V-JEPA 2: detecting scenes (overlapping windows, stride=%d)",
                 self._scene_stride,
             )
-            per_frame_embs, _ = self._encode_frames_overlapping_vjepa(
+            ovl_result = self._encode_frames_overlapping_vjepa(
                 frames,
                 timestamps,
                 clip_size=self._scene_clip_size,
                 stride=self._scene_stride,
+                store_feature_maps=store_feature_maps,
             )
+            if store_feature_maps and len(ovl_result) == 3:
+                per_frame_embs, _, ovl_feature_maps = ovl_result
+                # Feature maps are per-window; compute window midpoint timestamps
+                ovl_window_ts: list[float] = []
+                for start in range(0, len(frames), self._scene_stride):
+                    end = min(start + self._scene_clip_size, len(frames))
+                    if end - start < 2:
+                        continue
+                    mid = min(start + (end - start) // 2, len(frames) - 1)
+                    ovl_window_ts.append(timestamps[mid])
+                vjepa_clip_feature_maps = ovl_feature_maps
+                _fmap_timestamps = ovl_window_ts
+            else:
+                per_frame_embs = ovl_result[0]
+                _fmap_timestamps = None
 
             if self._hierarchical:
                 levels = []
@@ -750,6 +780,9 @@ class VideoIndexer:
         # 7d. Aggregate V-JEPA 2 temporal embeddings per segment
         temporal_embeddings: np.ndarray | None = None
         temporal_feature_maps: np.ndarray | None = None
+        # Feature maps may use different timestamps than clip embeddings
+        # (e.g. overlapping path: embeddings are per-frame, feature maps per-window).
+        fmap_ts = locals().get("_fmap_timestamps") or vjepa_clip_timestamps
         if vjepa_clip_embeddings is not None and vjepa_clip_timestamps is not None:
             temporal_per_seg: list[np.ndarray] = []
             feature_maps_per_seg: list[np.ndarray] = []
@@ -766,8 +799,34 @@ class VideoIndexer:
                         seg_emb = seg_emb / norm
                     temporal_per_seg.append(seg_emb)
                     if vjepa_clip_feature_maps is not None:
-                        seg_maps = np.stack([vjepa_clip_feature_maps[i] for i in clip_indices])
-                        feature_maps_per_seg.append(seg_maps.mean(axis=0))
+                        fmap_indices = [
+                            i
+                            for i, ct in enumerate(fmap_ts)
+                            if seg["start_time"] <= ct <= seg["end_time"]
+                        ]
+                        if fmap_indices:
+                            maps = [vjepa_clip_feature_maps[i] for i in fmap_indices]
+                            shapes = {m.shape for m in maps}
+                            if len(shapes) == 1:
+                                # All same shape — average across clips
+                                feature_maps_per_seg.append(
+                                    np.stack(maps).mean(axis=0)
+                                )
+                            else:
+                                # Variable shapes (different clip lengths) —
+                                # pick the clip closest to segment midpoint
+                                seg_mid = (seg["start_time"] + seg["end_time"]) / 2
+                                best_idx = min(
+                                    fmap_indices,
+                                    key=lambda i: abs(fmap_ts[i] - seg_mid),
+                                )
+                                feature_maps_per_seg.append(
+                                    vjepa_clip_feature_maps[best_idx]
+                                )
+                        else:
+                            num_patches = vjepa_clip_feature_maps[0].shape[0]
+                            patch_dim = vjepa_clip_feature_maps[0].shape[1]
+                            feature_maps_per_seg.append(np.zeros((num_patches, patch_dim)))
                 else:
                     temporal_per_seg.append(np.zeros(vjepa_clip_embeddings.shape[1]))
                     if vjepa_clip_feature_maps is not None:
@@ -776,7 +835,16 @@ class VideoIndexer:
                         feature_maps_per_seg.append(np.zeros((num_patches, patch_dim)))
             temporal_embeddings = np.stack(temporal_per_seg)
             if vjepa_clip_feature_maps is not None and feature_maps_per_seg:
-                temporal_feature_maps = np.stack(feature_maps_per_seg)
+                shapes = {m.shape for m in feature_maps_per_seg}
+                if len(shapes) == 1:
+                    temporal_feature_maps = np.stack(feature_maps_per_seg)
+                else:
+                    # Variable patch counts across segments — store as object array
+                    temporal_feature_maps = np.empty(
+                        len(feature_maps_per_seg), dtype=object
+                    )
+                    for i, m in enumerate(feature_maps_per_seg):
+                        temporal_feature_maps[i] = m
             temporal_embeddings = self._smooth_embeddings(temporal_embeddings, window=3)
             self._check_embedding_quality(temporal_embeddings, label="temporal")
 
@@ -842,6 +910,39 @@ class VideoIndexer:
             "[pipeline] search index: %d segments, %d transcript entries",
             len(segment_infos), len(transcript),
         )
+
+        # --- Attach predictor closures so search tools can use them ---
+        if self._scene_predictor is not None:
+            indexer_ref = self
+
+            def _predict_fn(time_point: float) -> np.ndarray | None:
+                """Predict future embedding from a time point using V-JEPA 2 predictor."""
+                seg_idx = None
+                for i, seg in enumerate(index.segments):
+                    if seg["start_time"] <= time_point <= seg["end_time"]:
+                        seg_idx = i
+                        break
+                    if seg["end_time"] <= time_point:
+                        seg_idx = i
+                if seg_idx is None:
+                    return None
+                if index.temporal_feature_maps is None or seg_idx >= len(
+                    index.temporal_feature_maps
+                ):
+                    return None
+                feature_map = index.temporal_feature_maps[seg_idx]
+                predicted = indexer_ref._predict_future_embedding(feature_map, 16)
+                if predicted is None:
+                    return None
+                return predicted.mean(axis=0)
+
+            def _predict_future_fn(
+                feature_map: np.ndarray, n_future_tokens: int = 16
+            ) -> np.ndarray | None:
+                return indexer_ref._predict_future_embedding(feature_map, n_future_tokens)
+
+            index._predict_fn = _predict_fn
+            index._predict_future_fn = _predict_future_fn
 
         # --- Cache save ---
         if cache_path is not None:
@@ -2371,7 +2472,8 @@ class VideoIndexer:
         timestamps: list[float],
         clip_size: int = 64,
         stride: int = 8,
-    ) -> tuple[np.ndarray, list[float]]:
+        store_feature_maps: bool = False,
+    ) -> tuple[np.ndarray, list[float]] | tuple[np.ndarray, list[float], list[np.ndarray]]:
         """Encode frames using overlapping V-JEPA 2 windows with per-frame averaging.
 
         Each frame appears in up to clip_size/stride windows. The final per-frame
@@ -2383,13 +2485,17 @@ class VideoIndexer:
             timestamps: Per-frame timestamps in seconds.
             clip_size: Number of frames per V-JEPA 2 window (default 64).
             stride: Window stride in frames (default 8).
+            store_feature_maps: If True, also return per-window spatial feature maps.
 
         Returns:
-            Tuple of (per_frame_embeddings, timestamps) where per_frame_embeddings
-            has shape (N_frames, D) — one embedding per frame.
+            Tuple of (per_frame_embeddings, timestamps) — or
+            (per_frame_embeddings, timestamps, per_window_feature_maps) when
+            store_feature_maps is True.
         """
         n = len(frames)
         if n == 0:
+            if store_feature_maps:
+                return np.empty((0, self._scene_embed_dim), dtype=np.float32), [], []
             return np.empty((0, self._scene_embed_dim), dtype=np.float32), []
 
         # Build overlapping windows
@@ -2408,7 +2514,13 @@ class VideoIndexer:
             window_frame_ranges = [(0, n)]
 
         # Encode all windows via _encode_clips_vjepa
-        clip_embeddings = self._encode_clips_vjepa(windows)  # (N_windows, D)
+        feature_maps: list[np.ndarray] | None = None
+        if store_feature_maps:
+            clip_embeddings, feature_maps = self._encode_clips_vjepa(
+                windows, return_full=True
+            )
+        else:
+            clip_embeddings = self._encode_clips_vjepa(windows)  # (N_windows, D)
 
         # Per-frame averaging: accumulate embeddings for each frame
         D = clip_embeddings.shape[1]
@@ -2431,6 +2543,8 @@ class VideoIndexer:
         norms = np.maximum(norms, 1e-10)
         per_frame = per_frame / norms
 
+        if store_feature_maps and feature_maps is not None:
+            return per_frame, timestamps, feature_maps
         return per_frame, timestamps
 
     def _get_transcript(
@@ -2490,7 +2604,7 @@ class VideoIndexer:
     def _run_asr(self, video_path: str, model_name: str) -> list[dict]:
         """Transcribe audio using Qwen3-ASR with word-level timestamps."""
         try:
-            from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
+            from qwen_asr import Qwen3ASRModel
         except ImportError:
             logger.info("qwen_asr not installed; skipping ASR.")
             return []
@@ -2505,16 +2619,30 @@ class VideoIndexer:
                 import torch
 
                 device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
-                
-                forced_aligner = Qwen3ForcedAligner.from_pretrained(
-                    "Qwen/Qwen3-ASR-ForcedAligner",
-                    dtype=torch.float16,
-                ).to(device)
-                model = Qwen3ASRModel.from_pretrained(
-                    model_name,
-                    forced_aligner=forced_aligner,
-                    dtype=torch.float16,
-                ).to(device)
+
+                # Pass ForcedAligner as a string; Qwen3ASRModel loads it internally.
+                # If loading fails (e.g. 404, missing class), fall back to no aligner.
+                try:
+                    model = Qwen3ASRModel.from_pretrained(
+                        model_name,
+                        dtype=torch.float16,
+                        device_map=device,
+                        forced_aligner="Qwen/Qwen3-ForcedAligner-0.6B",
+                        forced_aligner_kwargs=dict(
+                            dtype=torch.float16,
+                            device_map=device,
+                        ),
+                    )
+                except Exception:
+                    logger.info(
+                        "Qwen3-ForcedAligner-0.6B unavailable; "
+                        "proceeding without word-level alignment."
+                    )
+                    model = Qwen3ASRModel.from_pretrained(
+                        model_name,
+                        dtype=torch.float16,
+                        device_map=device,
+                    )
                 results = model.transcribe(audio=wav_path, return_time_stamps=True)
 
                 if not results:

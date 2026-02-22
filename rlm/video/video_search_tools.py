@@ -802,7 +802,7 @@ def make_anticipate_action(index: VideoIndex) -> dict[str, Any]:
         # Full predictor path (when V-JEPA 2 predictor is available)
         predicted_emb = predict_fn(time_point)
         if predicted_emb is None:
-            return {"error": "Prediction failed", "predicted_segments": []}
+            return {"error": "Prediction failed", "predicted_segments": [], "method": "vjepa2_predictor"}
 
         predicted_emb = predicted_emb.reshape(1, -1)
         if index.temporal_embeddings is not None:

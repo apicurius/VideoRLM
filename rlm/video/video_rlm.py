@@ -117,7 +117,9 @@ class VideoRLM:
         caption_resize: tuple[int, int] | None = None,
         text_embedding_model: str | None = None,
         scene_model: str | None = None,
+        store_feature_maps: bool = False,
     ):
+        self.store_feature_maps = store_feature_maps
         self.scene_model = scene_model
         self.caption_resize = caption_resize
         self.auto_fps = auto_fps
@@ -249,6 +251,7 @@ class VideoRLM:
                 refine_fn=self.refine_fn,
                 asr_model=self.asr_model,
                 transcript_path=self.transcript_path,
+                store_feature_maps=self.store_feature_maps,
             )
 
             for factory in [

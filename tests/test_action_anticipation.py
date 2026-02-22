@@ -125,31 +125,38 @@ class TestPredictFutureEmbedding:
         import sys
 
         indexer = VideoIndexer()
+        num_patches = 32
         n_future = 8
         D = 1024
         expected_output = np.ones((n_future, D), dtype=np.float32)
 
-        mock_pred = MagicMock()
-        mock_pred.squeeze.return_value.cpu.return_value.float.return_value.numpy.return_value = (
+        # The predictor returns an object with .last_hidden_state
+        mock_output = MagicMock()
+        mock_output.last_hidden_state.squeeze.return_value.cpu.return_value.float.return_value.numpy.return_value = (
             expected_output
         )
-        mock_predictor = MagicMock(return_value=mock_pred)
+        mock_predictor = MagicMock(return_value=mock_output)
         indexer._scene_predictor = mock_predictor
         indexer._scene_torch_device = "cpu"
 
         mock_tensor = MagicMock()
+        mock_arange_result = MagicMock()
+        mock_arange_result.unsqueeze.return_value = mock_arange_result
+        mock_arange_result.to.return_value = mock_arange_result
+
         mock_torch = MagicMock()
         mock_torch.from_numpy.return_value = mock_tensor
         mock_tensor.unsqueeze.return_value = mock_tensor
         mock_tensor.to.return_value = mock_tensor
-        mock_torch.zeros.return_value = mock_tensor
+        mock_torch.arange.return_value = mock_arange_result
         mock_torch.no_grad.return_value.__enter__ = lambda s: None
         mock_torch.no_grad.return_value.__exit__ = lambda s, *a: False
         mock_torch.float16 = "float16"
+        mock_torch.int64 = "int64"
 
         with patch.dict(sys.modules, {"torch": mock_torch}):
             result = indexer._predict_future_embedding(
-                np.zeros((8, D), dtype=np.float32), n_future_tokens=n_future
+                np.zeros((num_patches, D), dtype=np.float32), n_future_tokens=n_future
             )
 
         assert result is not None
@@ -163,18 +170,23 @@ class TestPredictFutureEmbedding:
         indexer._scene_torch_device = "cpu"
 
         mock_tensor = MagicMock()
+        mock_arange_result = MagicMock()
+        mock_arange_result.unsqueeze.return_value = mock_arange_result
+        mock_arange_result.to.return_value = mock_arange_result
+
         mock_torch = MagicMock()
         mock_torch.from_numpy.return_value = mock_tensor
         mock_tensor.unsqueeze.return_value = mock_tensor
         mock_tensor.to.return_value = mock_tensor
-        mock_torch.zeros.return_value = mock_tensor
+        mock_torch.arange.return_value = mock_arange_result
         mock_torch.no_grad.return_value.__enter__ = lambda s: None
         mock_torch.no_grad.return_value.__exit__ = lambda s, *a: False
         mock_torch.float16 = "float16"
+        mock_torch.int64 = "int64"
 
         with patch.dict(sys.modules, {"torch": mock_torch}):
             result = indexer._predict_future_embedding(
-                np.zeros((8, 1024), dtype=np.float32)
+                np.zeros((32, 1024), dtype=np.float32)
             )
         assert result is None
 
