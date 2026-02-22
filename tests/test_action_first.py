@@ -213,7 +213,8 @@ class TestFullModePreservation:
     @patch("kuavi.indexer.detect_scenes")
     def test_full_mode_calls_refine_fn(self, mock_detect_scenes):
         """mode='full' must call refine_fn when provided."""
-        mock_detect_scenes.return_value = [(0.0, 2.5), (2.5, 4.5)]
+        # Segments must be >= 4s so the Self-Refine v2 minimum-duration skip doesn't filter them.
+        mock_detect_scenes.return_value = [(0.0, 5.0), (5.0, 10.0)]
 
         indexer = VideoIndexer()
         loaded = _make_loaded_video(num_frames=10, fps=2.0)

@@ -1032,22 +1032,36 @@ class VideoIndexer:
             duration = float(getattr(video_metadata, "duration", 0) or 0)
             metadata_text = f"Video: {Path(path).name}, Duration: {duration:.1f}s"
 
+        _JSON_SCHEMA = (
+            "### Output Format (strict JSON)\n"
+            "{\n"
+            '  "summary": {"brief": "<single sentence, ~20 words>", "detailed": "<~95 words>"},\n'
+            '  "action": {"brief": "<imperative verb phrase, 2-5 words>", '
+            '"detailed": "<imperative sentence>", "actor": "<noun phrase or null>"}\n'
+            "}"
+        )
+
         def _build_tree_text(segs: list[dict]) -> str:
-            lines = []
+            lines = ["## Tree of Captions"]
             for j, s in enumerate(segs):
                 fc = s.get("frame_caption", "")
                 sc = s.get("caption", "")
-                lines.append(f"  Seg {j} [{s['start_time']:.1f}s-{s['end_time']:.1f}s]:")
+                lines.append(f"### Seg {j} [{s['start_time']:.1f}s-{s['end_time']:.1f}s]")
                 if fc:
-                    lines.append(f"    Frame: {fc}")
+                    lines.append(f"- **Frame**: {fc}")
                 if sc:
-                    lines.append(f"    Segment: {sc}")
+                    lines.append(f"- **Segment**: {sc}")
             return "\n".join(lines)
 
         for _round in range(rounds):
             tree_text = _build_tree_text(segments)
             refine_tasks = []
+            skipped = 0
             for i, seg in enumerate(segments):
+                seg_duration = seg["end_time"] - seg["start_time"]
+                if seg_duration < 4.0:
+                    skipped += 1
+                    continue
                 neighbors = segments[max(0, i - 1) : i + 2]
                 neighbor_text = " | ".join(n.get("caption", "") for n in neighbors if n is not seg)
                 transcript_text = self._transcript_for_range(
@@ -1061,7 +1075,6 @@ class VideoIndexer:
 # Global Video Context
 {global_context}
 
-# Tree of Captions
 {tree_text}
 
 # Neighbor Segments
@@ -1080,6 +1093,7 @@ class VideoIndexer:
                         "- Remove names, speech content, or internal states unless directly visible\n"
                         "- Ensure chronological ordering without timestamps\n"
                         "- Verify action.brief is an imperative verb phrase (2-5 words)\n\n"
+                        f"{_JSON_SCHEMA}\n\n"
                         f"Previous draft:\n{annotation_json}"
                     )
                 else:
@@ -1097,9 +1111,12 @@ class VideoIndexer:
                         "- Do not add visually unobservable information (speech content, names, internal states).\n"
                         "- Use global context and metadata only for disambiguation, not for adding new claims.\n"
                         "- If frame captions conflict, describe only what is consistently observed.\n\n"
+                        f"{_JSON_SCHEMA}\n\n"
                         f"Current annotation:\n{annotation_json}"
                     )
                 refine_tasks.append((i, seg, draft, context))
+            if skipped:
+                logger.debug("Self-Refine round %d: skipped %d short segments (< 4s)", _round, skipped)
 
             effort = "high" if _round == 0 else "low"
 
@@ -1133,6 +1150,79 @@ class VideoIndexer:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+    @staticmethod
+    def _score_format_compliance(seg: dict) -> float:
+        """Score annotation format compliance (0.0-1.0, pure string checks)."""
+        import re
+
+        annotation = seg.get("annotation", {})
+        summary = annotation.get("summary", {}) if isinstance(annotation, dict) else {}
+        action = annotation.get("action", {}) if isinstance(annotation, dict) else {}
+
+        score = 0.0
+
+        # summary.brief exists and is non-empty (0.25)
+        summary_brief = summary.get("brief", "") if isinstance(summary, dict) else ""
+        if summary_brief and isinstance(summary_brief, str) and summary_brief.strip():
+            score += 0.25
+
+        # action.brief is 2-5 words starting with imperative verb (0.25)
+        action_brief = action.get("brief", "") if isinstance(action, dict) else ""
+        if action_brief and isinstance(action_brief, str) and action_brief.strip():
+            words = action_brief.strip().split()
+            if 2 <= len(words) <= 5 and words[0][0].isupper():
+                score += 0.25
+
+        # No timestamps in summary text (0.25)
+        if summary_brief and not re.search(r"\bat\s+\d+(?:\.\d+)?s\b", summary_brief):
+            score += 0.25
+
+        # action.actor is present when action.brief is not "N/A" (0.25)
+        if isinstance(action, dict):
+            ab = action.get("brief", "")
+            if ab and ab != "N/A":
+                actor = action.get("actor")
+                if actor is not None and str(actor).strip():
+                    score += 0.25
+            else:
+                # action is N/A — actor field not required
+                score += 0.25
+
+        return round(score, 4)
+
+    @staticmethod
+    def _score_action_frequency(segments: list[dict]) -> None:
+        """Score each segment's action.brief frequency across all segments (in-place)."""
+        action_counts: dict[str, int] = {}
+        total = len(segments)
+        if total == 0:
+            return
+
+        for seg in segments:
+            annotation = seg.get("annotation", {})
+            action = annotation.get("action", {}) if isinstance(annotation, dict) else {}
+            ab = action.get("brief", "") if isinstance(action, dict) else ""
+            if ab and ab != "N/A":
+                action_counts[ab] = action_counts.get(ab, 0) + 1
+
+        for seg in segments:
+            annotation = seg.get("annotation", {})
+            action = annotation.get("action", {}) if isinstance(annotation, dict) else {}
+            ab = action.get("brief", "") if isinstance(action, dict) else ""
+            if not ab or ab == "N/A":
+                seg["action_frequency_score"] = 1.0
+                continue
+
+            freq = action_counts.get(ab, 0) / total
+            if freq <= 0.30:
+                freq_score = 1.0
+            elif freq >= 0.50:
+                freq_score = 0.0
+            else:
+                freq_score = 1.0 - (freq - 0.30) / 0.20
+
+            seg["action_frequency_score"] = round(freq_score, 4)
+
     def _score_annotations(
         self,
         segments: list[dict],
@@ -1145,12 +1235,23 @@ class VideoIndexer:
         """Score and optionally re-caption segments with low embedding consistency."""
         self._ensure_model()
 
+        # Signal 2: Format compliance — no model needed
         for seg in segments:
+            seg["format_compliance_score"] = self._score_format_compliance(seg)
+
+        # Signal 5: Action frequency — no model needed, needs all segments
+        self._score_action_frequency(segments)
+
+        # Collect caption embeddings for signals 3 and 4 (text model required)
+        caption_embeddings: dict[int, np.ndarray] = {}
+
+        for idx, seg in enumerate(segments):
             caption = seg.get("caption", "")
             if not caption:
                 continue
 
             if self._text_embedding_model_name is not None:
+                # Skip signal 1 and signal 3 when using separate text embedding model
                 continue
 
             seg_frames = [
@@ -1172,6 +1273,25 @@ class VideoIndexer:
 
             similarity = float(np.dot(caption_emb[0], mean_frame_emb[0]))
             seg["caption_quality_score"] = round(similarity, 4)
+
+            # Store caption embedding for signals 3 and 4
+            caption_embeddings[idx] = caption_emb[0]
+
+            # Signal 3: Summary-Action Coherence
+            annotation = seg.get("annotation", {})
+            action = annotation.get("action", {}) if isinstance(annotation, dict) else {}
+            action_brief = action.get("brief", "") if isinstance(action, dict) else ""
+            if action_brief and action_brief != "N/A":
+                summary = annotation.get("summary", {}) if isinstance(annotation, dict) else {}
+                summary_brief = summary.get("brief", "") if isinstance(summary, dict) else ""
+                if summary_brief:
+                    try:
+                        action_emb = self._encode_texts([action_brief])
+                        summary_emb = self._encode_texts([summary_brief])
+                        coherence = float(np.dot(action_emb[0], summary_emb[0]))
+                        seg["coherence_score"] = round(coherence, 4)
+                    except AttributeError:
+                        pass
 
             if similarity < min_similarity and caption_fn is not None:
                 best_score = similarity
@@ -1212,6 +1332,102 @@ class VideoIndexer:
                         similarity,
                         best_score,
                     )
+
+        # Signal 4: Temporal consistency (needs all caption embeddings)
+        for idx, seg in enumerate(segments):
+            if idx not in caption_embeddings:
+                continue
+            emb = caption_embeddings[idx]
+            sims = []
+            if idx - 1 in caption_embeddings:
+                sims.append(float(np.dot(emb, caption_embeddings[idx - 1])))
+            if idx + 1 in caption_embeddings:
+                sims.append(float(np.dot(emb, caption_embeddings[idx + 1])))
+            if sims:
+                max_sim = max(sims)
+                seg["temporal_consistency_score"] = round(max(0.0, min(1.0, 1.0 - max_sim)), 4)
+
+        # Aggregate quality_score: average of all available signals
+        signal_keys = [
+            "caption_quality_score",
+            "format_compliance_score",
+            "coherence_score",
+            "temporal_consistency_score",
+            "action_frequency_score",
+        ]
+        for seg in segments:
+            values = [seg[k] for k in signal_keys if k in seg]
+            if values:
+                seg["quality_score"] = round(sum(values) / len(values), 4)
+
+    def _fix_low_quality_annotations(
+        self,
+        segments: list[dict],
+        loaded_video_frames: list[np.ndarray],
+        timestamps: list[float],
+        caption_fn: Callable | None = None,
+        threshold: float = 0.3,
+        num_retries: int = 3,
+    ) -> None:
+        """Re-caption segments where any quality signal is below *threshold*."""
+        if caption_fn is None:
+            return
+
+        signal_keys = [
+            "caption_quality_score",
+            "format_compliance_score",
+            "coherence_score",
+            "temporal_consistency_score",
+            "action_frequency_score",
+        ]
+
+        for seg in segments:
+            low_quality = any(
+                seg.get(k, 1.0) < threshold for k in signal_keys if k in seg
+            )
+            if not low_quality:
+                continue
+
+            seg_frames = [
+                f
+                for f, t in zip(loaded_video_frames, timestamps, strict=False)
+                if seg["start_time"] <= t <= seg["end_time"]
+            ]
+            if not seg_frames:
+                continue
+
+            best_annotation = seg.get("annotation", {})
+            best_caption = seg.get("caption", "")
+            best_score = seg.get("quality_score", 0.0)
+
+            for _ in range(num_retries):
+                try:
+                    result = caption_fn(seg_frames)
+                    if isinstance(result, str):
+                        new_annotation = {
+                            "summary": {"brief": result, "detailed": result},
+                            "action": {"brief": "", "detailed": "", "actor": None},
+                        }
+                        new_caption = result
+                    else:
+                        new_annotation = result
+                        new_caption = result.get("summary", {}).get("brief", "")
+
+                    if new_caption and new_caption != best_caption:
+                        best_annotation = new_annotation
+                        best_caption = new_caption
+                        break
+                except Exception:
+                    logger.warning("_fix_low_quality_annotations re-caption failed", exc_info=True)
+
+            if best_caption and best_caption != seg.get("caption", ""):
+                seg["annotation"] = best_annotation
+                seg["caption"] = best_caption
+                logger.info(
+                    "Fixed low-quality segment %.1f-%.1fs",
+                    seg["start_time"],
+                    seg["end_time"],
+                )
 
     def _encode_frames(
         self, frames: list[np.ndarray], temporal_window: int = 1, stride: int | None = None
