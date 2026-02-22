@@ -1734,6 +1734,9 @@ def kuavi_eval(code: str) -> dict[str, Any]:
             "corpus_stats": kuavi_corpus_stats,
             "analyze_shards": kuavi_analyze_shards,
             "set_llm_config": kuavi_set_llm_config,
+            "orient": kuavi_orient,
+            "search_all": kuavi_search_all,
+            "inspect_segment": kuavi_inspect_segment,
             "llm_query": lambda prompt, backend="gemini", model="gemini-2.5-flash": _call_llm(
                 prompt, backend, model, role="secondary", _log_context="kuavi_eval:llm_query"
             ),
@@ -2524,6 +2527,174 @@ def kuavi_corpus_stats() -> dict[str, Any]:
     from kuavi.corpus import corpus_stats
 
     return corpus_stats(corpus_entry["index"])
+
+
+# ---------------------------------------------------------------------------
+# Compound tools — reduce agent round-trips by batching common patterns
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def kuavi_orient(video_id: str | None = None) -> dict[str, Any]:
+    """Get video overview: metadata + scene list in one call.
+
+    Combines kuavi_get_index_info + kuavi_get_scene_list into a single response.
+    Use this as the first call when starting video analysis.
+    """
+    index = _get_active_index(video_id)
+    if index is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("orient")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    # Reuse existing tool logic
+    index_info = kuavi_get_index_info(video_id=video_id)
+    scene_list = kuavi_get_scene_list(video_id=video_id)
+
+    result: dict[str, Any] = {
+        "index_info": index_info,
+        "scenes": scene_list,
+    }
+    if warning:
+        result["_budget_warning"] = warning
+    return result
+
+
+@mcp.tool()
+def kuavi_search_all(
+    query: str,
+    fields: list[str] | None = None,
+    transcript_query: str | None = None,
+    top_k: int = 5,
+    level: int = 0,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Search video across multiple fields and transcript in one call.
+
+    Runs all field searches in parallel via ThreadPoolExecutor.
+    Returns results grouped by field name.
+
+    Args:
+        query: Semantic search query for video fields.
+        fields: List of fields to search. Default: ["summary", "action", "visual"].
+        transcript_query: If set, also runs transcript keyword search with this query.
+        top_k: Number of results per field.
+        level: Hierarchy level (0=fine, 1+=coarse).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    index = _get_active_index(video_id)
+    if index is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("search_all")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    if fields is None:
+        fields = ["summary", "action", "visual"]
+
+    results: dict[str, Any] = {}
+    futures = {}
+
+    with ThreadPoolExecutor(max_workers=len(fields) + (1 if transcript_query else 0)) as executor:
+        for field in fields:
+            futures[executor.submit(
+                kuavi_search_video,
+                query=query,
+                field=field,
+                top_k=top_k,
+                level=level,
+                video_id=video_id,
+            )] = field
+
+        if transcript_query:
+            futures[executor.submit(
+                kuavi_search_transcript,
+                query=transcript_query,
+                video_id=video_id,
+            )] = "transcript"
+
+        for future in as_completed(futures):
+            field_name = futures[future]
+            try:
+                results[field_name] = future.result()
+            except Exception as e:
+                results[field_name] = [{"error": str(e)}]
+
+    _track_response_tokens(results)
+    if warning:
+        results["_budget_warning"] = warning
+    return results
+
+
+@mcp.tool()
+def kuavi_inspect_segment(
+    start_time: float,
+    end_time: float,
+    include_transcript: bool = True,
+    include_frames: bool = True,
+    zoom_level: int = 2,
+    max_frames: int = 5,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Inspect a video segment: extract frames and transcript in one call.
+
+    Combines frame extraction + transcript retrieval for a time range.
+
+    Args:
+        start_time: Start of time range in seconds.
+        end_time: End of time range in seconds.
+        include_transcript: Whether to include transcript text.
+        include_frames: Whether to extract frames.
+        zoom_level: Frame zoom preset (1=overview 480x360, 2=detail 720x540, 3=high-res 1280x960).
+        max_frames: Maximum number of frames to extract.
+    """
+    index = _get_active_index(video_id)
+    if index is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("inspect_segment")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    result: dict[str, Any] = {
+        "time_range": {"start": start_time, "end": end_time},
+    }
+
+    if include_frames:
+        zoom_presets = {
+            1: {"fps": 1.0, "width": 480, "height": 360},
+            2: {"fps": 2.0, "width": 720, "height": 540},
+            3: {"fps": 4.0, "width": 1280, "height": 960},
+        }
+        params = zoom_presets.get(zoom_level, zoom_presets[2])
+        result["frames"] = kuavi_extract_frames(
+            start_time=start_time,
+            end_time=end_time,
+            fps=params["fps"],
+            width=params["width"],
+            height=params["height"],
+            max_frames=max_frames,
+            video_id=video_id,
+        )
+
+    if include_transcript:
+        result["transcript"] = kuavi_get_transcript(
+            start_time=start_time,
+            end_time=end_time,
+            video_id=video_id,
+        )
+
+    _track_response_tokens(result)
+    if warning:
+        result["_budget_warning"] = warning
+    return result
 
 
 # ---------------------------------------------------------------------------

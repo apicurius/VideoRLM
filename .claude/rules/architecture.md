@@ -72,3 +72,6 @@ kuavi/                  # Main package
 | `kuavi_corpus_stats` | Statistics for the current corpus (video count, segment count, action vocabulary) |
 | `kuavi_set_budget` | Configure tool-call, time, and token limits for the session |
 | `kuavi_set_llm_config` | Route primary and secondary LLM calls to specific backends/models |
+| `kuavi_orient` | Compound: get_index_info + get_scene_list in one call |
+| `kuavi_search_all` | Compound: multi-field search + transcript search in parallel |
+| `kuavi_inspect_segment` | Compound: extract_frames + get_transcript for a time range |

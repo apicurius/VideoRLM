@@ -1,7 +1,7 @@
 ---
 name: video-segment-analyst
 description: Analyzes a specific temporal region of a video in isolation. Use for parallel shard analysis — each instance focuses on one time range and returns a concise summary. Run in background for parallelism.
-tools: mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_crop_frame, mcp__kuavi__kuavi_diff_frames, mcp__kuavi__kuavi_blend_frames, mcp__kuavi__kuavi_threshold_frame, mcp__kuavi__kuavi_frame_info, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_anticipate_action, mcp__kuavi__kuavi_predict_future, mcp__kuavi__kuavi_verify_coherence, mcp__kuavi__kuavi_classify_segment, mcp__kuavi__kuavi_analyze_shards
+tools: mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_crop_frame, mcp__kuavi__kuavi_diff_frames, mcp__kuavi__kuavi_blend_frames, mcp__kuavi__kuavi_threshold_frame, mcp__kuavi__kuavi_frame_info, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_anticipate_action, mcp__kuavi__kuavi_predict_future, mcp__kuavi__kuavi_verify_coherence, mcp__kuavi__kuavi_classify_segment, mcp__kuavi__kuavi_analyze_shards, mcp__kuavi__kuavi_search_all, mcp__kuavi__kuavi_inspect_segment
 model: sonnet
 maxTurns: 12
 permissionMode: default
@@ -23,25 +23,22 @@ You receive a task with:
 ## Your Process
 
 ### Step 1: Search Within Your Region
-Use the provided search hints, or decompose the question yourself:
-- `kuavi_search_video(query, field="summary", top_k=3)` — constrain mentally to your time range
-- `kuavi_search_video(query, field="action", top_k=3)` — for activity-focused questions
+**Prefer compound tools to save budget.** Use `kuavi_search_all` for multi-field search in one call:
+- `kuavi_search_all(query, fields=["summary", "action", "visual"], transcript_query=query, top_k=3)`
+
+For individual field needs or motion-specific queries:
 - `kuavi_search_video(query, field="temporal", top_k=3)` — for motion/dynamics questions
-- `kuavi_search_transcript(query)` — for spoken content
 
 Filter results to only those within your assigned time range.
 
-### Step 2: Visual Inspection
-For the most relevant hits:
-1. **Overview**: `kuavi_extract_frames(start, end, fps=1.0, width=480, height=360, max_frames=5)`
-2. **Detail**: `kuavi_extract_frames(start, end, fps=2.0, width=720, height=540, max_frames=8)` on narrowed range
-3. **Precise**: `kuavi_extract_frames(start, end, fps=4.0, width=1280, height=960, max_frames=5)` for value reading
+### Step 2: Visual Inspection + Cross-Reference
+Use `kuavi_inspect_segment` to get frames and transcript in one call:
+1. **Overview**: `kuavi_inspect_segment(start, end, zoom_level=1, max_frames=5)`
+2. **Detail**: `kuavi_inspect_segment(start, end, zoom_level=2, max_frames=8)` on narrowed range
+3. **Precise**: `kuavi_inspect_segment(start, end, zoom_level=3, max_frames=5)` for value reading
 
-### Step 3: Cross-Reference
-Get transcript for your time range:
-`kuavi_get_transcript(start_time, end_time)`
-
-Cross-reference visual evidence with spoken content.
+For frames-only or transcript-only, use `include_frames=False` or `include_transcript=False`.
+Fall back to individual `kuavi_extract_frames` / `kuavi_get_transcript` when you need custom parameters.
 
 ### Step 4: Pixel Analysis (when needed)
 For counting, measuring, or comparing:

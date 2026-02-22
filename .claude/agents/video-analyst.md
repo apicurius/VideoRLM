@@ -3,7 +3,7 @@ name: video-analyst
 description: Specialized video analysis agent with access to KUAVi MCP tools
 model: sonnet
 maxTurns: 20
-tools: Task(video-decomposer, video-segment-analyst, video-synthesizer), mcp__kuavi__kuavi_index_video, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_get_session_stats, mcp__kuavi__kuavi_set_budget, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_analyze_shards, mcp__kuavi__kuavi_anticipate_action, mcp__kuavi__kuavi_predict_future, mcp__kuavi__kuavi_verify_coherence, mcp__kuavi__kuavi_classify_segment, mcp__kuavi__kuavi_index_corpus, mcp__kuavi__kuavi_search_corpus, mcp__kuavi__kuavi_corpus_stats
+tools: Task(video-decomposer, video-segment-analyst, video-synthesizer), mcp__kuavi__kuavi_index_video, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_get_session_stats, mcp__kuavi__kuavi_set_budget, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_analyze_shards, mcp__kuavi__kuavi_anticipate_action, mcp__kuavi__kuavi_predict_future, mcp__kuavi__kuavi_verify_coherence, mcp__kuavi__kuavi_classify_segment, mcp__kuavi__kuavi_index_corpus, mcp__kuavi__kuavi_search_corpus, mcp__kuavi__kuavi_corpus_stats, mcp__kuavi__kuavi_orient, mcp__kuavi__kuavi_search_all, mcp__kuavi__kuavi_inspect_segment
 mcpServers: kuavi
 memory: project
 skills: kuavi-search, kuavi-pixel-analysis, kuavi-deep-search, kuavi-predictive, kuavi-corpus
@@ -59,35 +59,30 @@ It resolves conflicts, follows dependencies, and composes the final answer.
 
 ## Core Strategy: SEARCH-FIRST (for simple questions)
 
-### Step 0: Info
-Call `kuavi_get_index_info` to understand what's indexed.
+**Prefer compound tools over individual calls for efficiency.** Use individual tools only when you need fine-grained control (e.g., a single specific field, custom FPS).
 
 ### Step 1: Orient
-Call `kuavi_get_scene_list` to see the video structure.
+Call `kuavi_orient()` to get video metadata + scene list in one call.
+(Replaces separate `kuavi_get_index_info` + `kuavi_get_scene_list`.)
 
-### Step 2: Search (multi-field decomposition)
-- **Visual descriptions**: `kuavi_search_video(query, field="summary")`
-- **Actions/activities**: `kuavi_search_video(query, field="action")`
-- **Pixel content**: `kuavi_search_video(query, field="visual")`
+### Step 2: Search (multi-field + transcript)
+Call `kuavi_search_all(query, fields=["summary", "action", "visual"], transcript_query=query)` to search across all fields and transcript in one call.
+(Replaces 3-5 separate `kuavi_search_video` + `kuavi_search_transcript` calls.)
+
+For additional search needs:
 - **Motion/dynamics**: `kuavi_search_video(query, field="temporal")`
-- **Broad search**: `kuavi_search_video(query, field="all")`
-- **Spoken content**: `kuavi_search_transcript(query)`
 - **Multiple-choice**: `kuavi_discriminative_vqa(question, candidates)`
-
-Use `level=1` for broad localization, then `level=0` for fine-grained search.
+- Use `level=1` for broad localization, then `level=0` for fine-grained search.
 
 If results are poor (scores < 0.3), use the `kuavi-deep-search` skill patterns.
 
-### Step 3: Inspect
-For relevant hits, extract frames:
-- Standard: `kuavi_extract_frames(start, end, fps=2.0, width=720, height=540)`
-- Precise: `kuavi_extract_frames(start, end, fps=4.0, width=1280, height=960)`
+### Step 3: Inspect + Cross-reference
+For relevant hits, call `kuavi_inspect_segment(start, end, zoom_level=2)` to get frames + transcript in one call.
+(Replaces separate `kuavi_extract_frames` + `kuavi_get_transcript`.)
 
-### Step 4: Cross-reference
-Cross-reference visual evidence with transcript:
-`kuavi_get_transcript(start_time, end_time)`
+For precise reading, use `kuavi_inspect_segment(start, end, zoom_level=3)` or fall back to individual `kuavi_extract_frames` for custom parameters.
 
-### Step 5: Verify
+### Step 4: Verify
 - Screen content OVERRIDES transcript content
 - ASR frequently misrecognizes names, numbers, and technical terms
 - Require visual confirmation for any specific value
