@@ -748,7 +748,7 @@ class TestHierarchicalIndexingRoundTrip:
 
         assert loaded_idx.segment_hierarchy == result.segment_hierarchy
         assert len(loaded_idx.hierarchy_embeddings) == len(result.hierarchy_embeddings)
-        for orig, reloaded in zip(result.hierarchy_embeddings, loaded_idx.hierarchy_embeddings):
+        for orig, reloaded in zip(result.hierarchy_embeddings, loaded_idx.hierarchy_embeddings, strict=False):
             if orig is not None:
                 np.testing.assert_array_almost_equal(reloaded, orig)
 

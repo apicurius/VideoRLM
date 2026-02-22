@@ -264,7 +264,7 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
 
                 # Group valid indices by cluster label
                 clusters: dict[int, list[int]] = {}
-                for vi, label in zip(valid_indices, labels):
+                for vi, label in zip(valid_indices, labels, strict=False):
                     clusters.setdefault(int(label), []).append(int(vi))
 
                 # Sort each cluster's members by descending score
@@ -274,9 +274,9 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                 # Round-robin pick from clusters
                 top_indices: list[int] = []
                 cluster_keys = sorted(
-                    clusters.keys(), key=lambda l: scores[clusters[l][0]], reverse=True
+                    clusters.keys(), key=lambda k: scores[clusters[k][0]], reverse=True
                 )
-                cluster_ptrs = {l: 0 for l in cluster_keys}
+                cluster_ptrs = {k: 0 for k in cluster_keys}
                 while len(top_indices) < top_k:
                     added_any = False
                     for label in cluster_keys:

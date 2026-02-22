@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from rich.console import Console, Group
+from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.style import Style
@@ -127,7 +127,7 @@ class KUAViPrinter:
 
         title = Text()
         title.append("◇ ", style=STYLE_ACCENT)
-        title.append(f"Search Results ", style=STYLE_PRIMARY)
+        title.append("Search Results ", style=STYLE_PRIMARY)
         title.append(f"(field={field})", style=STYLE_MUTED)
 
         table = Table(

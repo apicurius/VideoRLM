@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from kuavi.mcp_server import (
     _get_active_index,
     _get_active_video_path,

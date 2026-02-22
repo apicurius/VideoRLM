@@ -16,8 +16,8 @@ from typing import Any
 
 import numpy as np
 
-from kuavi.scene_detection import detect_scenes, detect_scenes_hierarchical
 from kuavi.loader import LoadedVideo
+from kuavi.scene_detection import detect_scenes, detect_scenes_hierarchical
 
 logger = logging.getLogger(__name__)
 
@@ -547,7 +547,7 @@ class VideoIndexer:
         rep_frames = []
         for seg in segment_infos:
             seg_frames_list = [
-                f for f, t in zip(frames, timestamps)
+                f for f, t in zip(frames, timestamps, strict=False)
                 if seg["start_time"] <= t <= seg["end_time"]
             ]
             if seg_frames_list:
@@ -685,7 +685,7 @@ class VideoIndexer:
         """Create segment dicts from detected scene boundaries."""
         results: list[dict] = []
         for start, end in scenes:
-            seg_frames = [f for f, t in zip(frames, timestamps) if start <= t < end or t == end]
+            seg_frames = [f for f, t in zip(frames, timestamps, strict=False) if start <= t < end or t == end]
             # Cap frames per segment for memory/cost efficiency
             if self._max_frames_per_segment and len(seg_frames) > self._max_frames_per_segment:
                 step = len(seg_frames) / self._max_frames_per_segment
@@ -1111,7 +1111,7 @@ class VideoIndexer:
 
             seg_frames = [
                 f
-                for f, t in zip(loaded_video_frames, timestamps)
+                for f, t in zip(loaded_video_frames, timestamps, strict=False)
                 if seg["start_time"] <= t <= seg["end_time"]
             ]
             if not seg_frames:
@@ -1295,7 +1295,7 @@ class VideoIndexer:
             if seg.get("_skip_caption"):
                 continue
             seg_frames = [
-                f for f, t in zip(frames, timestamps)
+                f for f, t in zip(frames, timestamps, strict=False)
                 if seg["start_time"] <= t <= seg["end_time"]
             ]
             if not seg_frames:
@@ -1473,8 +1473,9 @@ class VideoIndexer:
 
     def _encode_clips_vjepa(self, clips: list[list[np.ndarray]]) -> np.ndarray:
         """Embed video clips using V-JEPA 2."""
-        import torch
         from itertools import groupby
+
+        import torch
 
         indexed_clips = list(enumerate(clips))
         indexed_clips.sort(key=lambda x: len(x[1]))

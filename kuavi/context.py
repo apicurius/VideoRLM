@@ -208,7 +208,6 @@ def make_extract_frames(
         ``(start_time, end_time, fps=2.0, resize=(720,540), max_frames=10)``
         that returns a list of tagged image dicts.
     """
-    from typing import Any
 
     def extract_frames(
         start_time: float,

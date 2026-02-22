@@ -18,14 +18,14 @@ class TestCliImport:
         assert callable(main)
 
     def test_import_subcommands(self):
-        from kuavi.cli import cmd_index, cmd_search, cmd_analyze
+        from kuavi.cli import cmd_analyze, cmd_index, cmd_search
 
         assert callable(cmd_index)
         assert callable(cmd_search)
         assert callable(cmd_analyze)
 
     def test_import_helpers(self):
-        from kuavi.cli import _build_analyze_prompt, _analyze_single_video
+        from kuavi.cli import _analyze_single_video, _build_analyze_prompt
 
         assert callable(_build_analyze_prompt)
         assert callable(_analyze_single_video)

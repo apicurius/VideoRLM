@@ -128,7 +128,7 @@ def detect_scenes_hierarchical(
         return {"levels": [single for _ in thresholds]}
 
     levels: list[list[tuple[float, float]]] = []
-    for thresh, min_dur in zip(thresholds, min_durations):
+    for thresh, min_dur in zip(thresholds, min_durations, strict=False):
         scenes = _detect_scenes_embedding(frames, timestamps, embed_fn, thresh, min_dur)
         levels.append(scenes)
 

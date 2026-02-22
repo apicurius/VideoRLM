@@ -15,7 +15,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -170,7 +170,7 @@ class _TraceLogger:
         if not self._session_started:
             self._write_event({
                 "type": "session_start",
-                "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
                 "source": "mcp-server",
             })
             self._session_started = True
@@ -292,7 +292,7 @@ class _TraceLogger:
                 self._turn_counter += 1
                 self._write_event({
                     "type": "turn_start",
-                    "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                    "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
                     "turn": self._turn_counter,
                     "gap_seconds": round(gap, 1),
                 })
@@ -319,7 +319,7 @@ class _TraceLogger:
 
         self._write_event({
             "type": "tool_call",
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "tool_name": tool_name,
             "tool_input": self._strip_base64(tool_input),
             "tool_response": logged_response,
@@ -369,7 +369,7 @@ class _TraceLogger:
         """Log a metadata event after video indexing (matches RLM's metadata format style)."""
         self._write_event({
             "type": "metadata",
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "video_path": video_path,
             "fps": fps,
             "duration": duration,
@@ -400,7 +400,7 @@ class _TraceLogger:
 
         event: dict[str, Any] = {
             "type": "llm_call",
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "model": model,
             "backend": backend,
             "prompt_summary": prompt_summary,
@@ -436,7 +436,7 @@ class _TraceLogger:
 
         event: dict[str, Any] = {
             "type": "eval_execution",
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "code": code,
             "stdout": stdout,
             "execution_time_ms": execution_time_ms,
@@ -452,7 +452,7 @@ class _TraceLogger:
         if self._log_file is not None and self._session_started:
             self._write_event({
                 "type": "session_end",
-                "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
                 "reason": reason,
             })
 
@@ -733,10 +733,10 @@ def kuavi_index_video(
     When num_segments is set, the video is split into that many equal-duration
     temporal segments instead of using V-JEPA 2 scene detection.
     """
+    import cv2
+
     from kuavi.indexer import VideoIndexer
     from kuavi.loader import VideoLoader
-
-    import cv2
 
     if no_scene_model:
         scene_model_resolved = None
@@ -1841,7 +1841,6 @@ def _call_llm(
                     thinking_config=types.ThinkingConfig(thinking_level="LOW"),
                 )
             # Retry on transient server errors
-            last_exc = None
             for attempt in range(_LLM_MAX_RETRIES):
                 try:
                     response = client.models.generate_content(
@@ -1850,7 +1849,6 @@ def _call_llm(
                     response_text = response.text
                     break
                 except Exception as e:
-                    last_exc = e
                     status = getattr(e, "status_code", None) or getattr(e, "code", 0)
                     if status not in (500, 504) or attempt == _LLM_MAX_RETRIES - 1:
                         raise

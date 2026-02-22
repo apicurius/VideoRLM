@@ -5,8 +5,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
-
 from kuavi.mcp_server import _state, kuavi_analyze_shards
 
 

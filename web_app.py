@@ -14,12 +14,11 @@ from pathlib import Path
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv(Path(__file__).parent / ".env")
-
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="VideoRLM Web")
 
@@ -235,9 +234,9 @@ def _kuavi_pipeline(
 ) -> None:
     """KUAVi pipeline: VideoIndexer + search tools + tool-calling agent."""
     try:
-        from kuavi.loader import VideoLoader
-        from kuavi.indexer import VideoIndexer
         from kuavi.context import make_extract_frames
+        from kuavi.indexer import VideoIndexer
+        from kuavi.loader import VideoLoader
         from kuavi.search import (
             make_discriminative_vqa,
             make_get_scene_list,
@@ -841,7 +840,7 @@ def _full_pipeline(
 
 @app.post("/api/analyze")
 async def analyze(
-    video: UploadFile = File(...),
+    video: UploadFile = File(...),  # noqa: B008
     question: str = Form(...),
     backend: str = Form(default="openrouter"),
     model: str = Form(default="openai/gpt-4o"),
@@ -861,7 +860,7 @@ async def analyze(
         "anthropic": os.getenv("ANTHROPIC_API_KEY"),
         "gemini": os.getenv("GEMINI_API_KEY"),
     }.get(backend) or os.getenv("OPENROUTER_API_KEY", "")
-    
+
     api_key = custom_api_key.strip() or env_key
 
     event_q: queue.Queue = queue.Queue()

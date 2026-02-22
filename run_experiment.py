@@ -12,10 +12,9 @@ import base64
 import json
 import os
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
-
-import uuid
 
 try:
     from dotenv import load_dotenv
@@ -783,7 +782,7 @@ def _kuavi_agent_loop_openai(
     if tracer:
         tracer.log_system_prompt(system)
 
-    for i in range(max_iterations):
+    for _i in range(max_iterations):
         response = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -1008,6 +1007,7 @@ def run_kuavi(
 
     # Pixel tools (matching RLM's _make_pixel_tools)
     import base64 as _b64
+
     import cv2 as _cv2
     import numpy as _np
 
@@ -1143,6 +1143,12 @@ def run_kuavi(
 # ---------------------------------------------------------------------------
 
 def print_summary(results: list[dict]) -> None:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.style import Style
+    from rich.table import Table
+    from rich.text import Text
+
     from kuavi.verbose import (
         COLORS,
         STYLE_ACCENT,
@@ -1151,12 +1157,6 @@ def print_summary(results: list[dict]) -> None:
         STYLE_TEXT,
         STYLE_WARNING,
     )
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.rule import Rule
-    from rich.style import Style
-    from rich.table import Table
-    from rich.text import Text
 
     console = Console()
 
@@ -1246,10 +1246,11 @@ def main() -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     pipelines = ["rlm", "kuavi"] if args.pipeline == "both" else [args.pipeline]
 
-    from kuavi.verbose import COLORS, STYLE_PRIMARY
     from rich.console import Console
     from rich.rule import Rule
     from rich.text import Text
+
+    from kuavi.verbose import COLORS, STYLE_PRIMARY
 
     exp_console = Console()
 
@@ -1305,7 +1306,7 @@ def main() -> None:
         # Save per-pipeline result
         out_path = output_dir / f"{video_stem}_{pipeline}_{timestamp}.json"
         out_path.write_text(json.dumps(result, indent=2))
-        from kuavi.verbose import STYLE_MUTED, STYLE_SUCCESS
+        from kuavi.verbose import STYLE_MUTED
         exp_console.print(Text(f"  Result saved to: {out_path}", style=STYLE_MUTED))
 
     if args.pipeline == "both":
