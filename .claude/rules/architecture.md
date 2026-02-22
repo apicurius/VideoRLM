@@ -12,15 +12,18 @@ kuavi/                  # Main package
 ├── search.py           # Search tool factories (make_search_video, etc.)
 ├── scene_detection.py  # Scene boundary detection algorithms
 ├── context.py          # VideoContext, frame encoding, make_extract_frames
+├── captioners.py       # Pluggable captioner backends (Gemini, OpenAI, local)
+├── probes.py           # AttentiveProbe, ProbeRegistry (cross-attention classifiers)
+├── corpus.py           # CorpusIndex, CorpusIndexer (multi-video indexing)
 ├── prompts.py          # VIDEO_ANALYSIS_PROMPT for Claude Code integration
-├── mcp_server.py       # FastMCP stdio server with 18 tools
-└── cli.py              # CLI: kuavi index/search/analyze
+├── mcp_server.py       # FastMCP stdio server with 24 tools
+└── cli.py              # CLI: kuavi index/search/analyze/corpus
 ```
 
 ## 3 Models
 
-- **V-JEPA 2** (`facebook/vjepa2-vitl-fpc64-256`): Scene boundary detection ONLY
-- **SigLIP2** (`google/siglip2-base-patch16-256`): Vision-language embeddings for `field="visual"` search + default text encoder
+- **V-JEPA 2** (`facebook/vjepa2-vitl-fpc64-256`): Scene boundary detection, temporal embeddings, action anticipation predictor, coherence verification. Supports overlapping windows (configurable stride) and 3 presets (fast/balanced/quality)
+- **SigLIP2** (`google/siglip2-base-patch16-256`): Vision-language embeddings for `field="visual"` search + default text encoder + semantic dedup clustering
 - **EmbeddingGemma** (`google/embeddinggemma-300m`): Optional separate text encoder
 
 ## Claude Code Integration
@@ -60,3 +63,9 @@ kuavi/                  # Main package
 | `kuavi_frame_info` | Image metadata and brightness/color stats |
 | `kuavi_eval` | Execute Python in persistent namespace with tools |
 | `kuavi_analyze_shards` | Parallel temporal shard analysis via LLM |
+| `kuavi_anticipate_action` | Predict next action using V-JEPA 2 predictor or embedding similarity |
+| `kuavi_predict_future` | Predict future video content with temporal continuation fallback |
+| `kuavi_verify_coherence` | Score temporal coherence; detect anomalies and surprising transitions |
+| `kuavi_classify_segment` | Classify segment via attentive probes (SSv2, K400, Diving48, etc.) |
+| `kuavi_index_corpus` | Index multiple videos in parallel for cross-video search |
+| `kuavi_search_corpus` | Semantic search across all videos in a corpus index |

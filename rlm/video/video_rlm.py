@@ -261,10 +261,23 @@ class VideoRLM:
                 tool_name = result["tool"].__name__
                 extra_tools[tool_name] = result
 
-            from rlm.video.video_search_tools import make_discriminative_vqa
+            from rlm.video.video_search_tools import (
+                make_anticipate_action,
+                make_classify_segment,
+                make_discriminative_vqa,
+                make_predict_future,
+                make_verify_coherence,
+            )
 
-            vqa_result = make_discriminative_vqa(video_index)
-            extra_tools[vqa_result["tool"].__name__] = vqa_result
+            for extra_factory in [
+                make_discriminative_vqa,
+                make_anticipate_action,
+                make_classify_segment,
+                make_predict_future,
+                make_verify_coherence,
+            ]:
+                extra_result = extra_factory(video_index)
+                extra_tools[extra_result["tool"].__name__] = extra_result
 
         # Add pixel manipulation tools
         extra_tools.update(self._make_pixel_tools())

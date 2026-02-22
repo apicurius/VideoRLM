@@ -268,7 +268,7 @@ KUAVi re-exposes the VideoRLM tool set as an **MCP (Model Context Protocol) serv
 │                        │ MCP Protocol (stdio)       │
 │  ┌───────────────────────▼───────────────────────┐  │
 │  │             KUAVi MCP Tool Server             │  │
-│  │  18 tools: search, extract, pixel, eval       │  │
+│  │  24 tools: search, extract, pixel, eval       │  │
 │  │  Multi-video state, budget gates, tracing     │  │
 │  └───────────────────────┬───────────────────────┘  │
 │                        │                            │
@@ -393,7 +393,7 @@ Indexes are cached by content hash (`MD5(path|size|mtime)`) — repeated queries
 
 ### MCP Tool Server
 
-KUAVi exposes 18 MCP tools via a FastMCP stdio server, organized into four categories:
+KUAVi exposes 24 MCP tools via a FastMCP stdio server, organized into five categories:
 
 #### Search Tools
 
@@ -404,6 +404,10 @@ KUAVi exposes 18 MCP tools via a FastMCP stdio server, organized into four categ
 | `kuavi_get_transcript` | Retrieve transcript text for a specific time range. |
 | `kuavi_get_scene_list` | List all detected scenes with structured annotations. |
 | `kuavi_discriminative_vqa` | Embedding-based multiple-choice VQA. Ranks candidates by cosine similarity — no LLM generation needed. |
+| `kuavi_anticipate_action` | Predict what happens next after a given time point using V-JEPA 2 predictor or embedding similarity fallback. |
+| `kuavi_predict_future` | Predict future video content from a time range using V-JEPA 2 predictor with temporal continuation fallback. |
+| `kuavi_verify_coherence` | Score temporal coherence across segments; detect anomalies and surprising transitions. |
+| `kuavi_classify_segment` | Classify a segment using attentive probes trained on benchmark tasks (SSv2, K400, etc.). |
 
 **Search field routing:**
 
@@ -451,6 +455,9 @@ All pixel tools accept frame references by **integer index** into the last `extr
 | `kuavi_get_session_stats` | Tool calls, frames extracted, searches performed, budget status. |
 | `kuavi_set_budget` | Configure tool-call, time, and token limits. Hard limits block all gated tools. |
 | `kuavi_set_llm_config` | Route primary (shard analysis) and secondary (eval's `llm_query`) to specific backends. |
+| `kuavi_index_corpus` | Index multiple videos in parallel for cross-video search. |
+| `kuavi_search_corpus` | Semantic search across all videos in a corpus index. |
+| `kuavi_corpus_stats` | Statistics for the current corpus (video count, segment count, action vocabulary). |
 
 ### Multi-Agent Orchestration
 
@@ -746,20 +753,24 @@ rlm/                            # RLM core package
 ├── logger/                     # Trajectory capture
 ├── video/
 │   ├── video_rlm.py            # VideoRLM — tool injection + sharding
-│   ├── video_indexer.py         # Indexing pipeline
-│   └── video_search_tools.py   # Tool factories
+│   ├── video_indexer.py         # Indexing pipeline (mirrors kuavi/indexer.py)
+│   ├── video_search_tools.py   # Tool factories (mirrors kuavi/search.py)
+│   └── probes.py               # AttentiveProbe (mirrors kuavi/probes.py)
 └── utils/                      # Prompts, parsing
 
 kuavi/                          # KUAVi package (standalone)
 ├── indexer.py                  # VideoIndexer, VideoIndex (8-stage pipeline)
-├── search.py                   # Search tool factories (MMR, VQA, transcript)
+├── search.py                   # Search tool factories (MMR, VQA, transcript, prediction)
 ├── loader.py                   # VideoLoader, LoadedVideo, VideoSegment
 ├── scene_detection.py          # V-JEPA 2 / SigLIP2 scene boundary detection
 ├── context.py                  # VideoContext, frame encoding
-├── mcp_server.py               # FastMCP stdio server (18 tools)
+├── mcp_server.py               # FastMCP stdio server (24 tools)
+├── captioners.py               # Pluggable captioner backends (Gemini, OpenAI, local)
+├── probes.py                   # AttentiveProbe, ProbeRegistry (cross-attention classifiers)
+├── corpus.py                   # CorpusIndex, CorpusIndexer (multi-video indexing)
 ├── prompts.py                  # VIDEO_ANALYSIS_PROMPT
 ├── types.py                    # KUAViConfig
-└── cli.py                      # CLI: index, search, analyze
+└── cli.py                      # CLI: index, search, analyze, corpus
 
 .claude/                        # Claude Code integration
 ├── agents/                     # 4 agent definitions
@@ -771,6 +782,34 @@ kuavi/                          # KUAVi package (standalone)
 run_video.py                    # VideoRLM entry point
 visualizer/                     # Next.js trajectory viewer
 ```
+
+---
+
+## V-JEPA 2 + Action100M Integration
+
+The unified integration plan merged insights from three research papers — [V-JEPA 2](https://arxiv.org/abs/2506.09985), [VL-JEPA](https://arxiv.org/abs/2410.07538), and [Action100M](https://arxiv.org/abs/2506.15686) — into KUAVi's indexing and search pipeline across 13 work items:
+
+| Commit | Work Items | Description |
+|--------|-----------|-------------|
+| `3bfb9b3` | WI-0 | Fix temporal search dimension mismatch |
+| `b9d3ba7` | WI-1, WI-2 | V-JEPA 2 model presets (fast/balanced/quality) + action-first indexing mode |
+| `8f7bc5e` | WI-3, WI-4 | Self-Refine v2 (iterative annotation refinement) + multi-signal quality scoring |
+| `f6d8c41` | WI-5, WI-7 | Pluggable captioner abstraction + spatial feature map storage |
+| `5724cc6` | WI-6, WI-8 | Overlapping V-JEPA 2 windows (per-frame averaging) + semantic deduplication (K-means) |
+| `2bfcc2e` | WI-9, WI-10 | Action anticipation (V-JEPA 2 predictor) + attentive probe classification (4-layer cross-attention) |
+| `25e31b1` | WI-12 | Corpus-level multi-video indexing with cross-video search and action vocabulary |
+| `a3b4595` | WI-11 | Predictive video understanding — temporal coherence verification and anomaly detection |
+
+**Key capabilities added:**
+
+- **Overlapping V-JEPA 2 windows** (WI-6): Configurable stride produces per-frame averaged embeddings for smoother, more accurate scene detection
+- **Semantic deduplication** (WI-8): K-means clustering on caption embeddings to detect and filter near-duplicate segments
+- **Action anticipation** (WI-9): Predict what happens next using V-JEPA 2's predictor or embedding similarity fallback
+- **Attentive probes** (WI-10): 4-layer cross-attention classifiers on frozen V-JEPA 2 features for benchmark tasks (SSv2, K400, Diving48, etc.)
+- **World model** (WI-11): Temporal coherence scoring and anomaly detection — segments where predicted ≠ actual are flagged as surprising
+- **Corpus indexing** (WI-12): Parallel multi-video indexing with cross-video search via stacked embeddings
+
+Test suite: 755 tests passing across 28 test files.
 
 ---
 

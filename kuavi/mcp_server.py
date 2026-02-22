@@ -498,6 +498,7 @@ _install_trace_logging()
 _state: dict[str, Any] = {
     "videos": {},  # video_id -> {"index", "indexer", "loaded_video", "video_path"}
     "active_video": None,  # current active video_id
+    "corpus": None,  # {"index": CorpusIndex} or None
     "eval_namespace": None,  # reserved for eval tool
     "llm_config": None,  # dict with primary/secondary backend+model routing, or None
     "stats": {
@@ -724,6 +725,12 @@ def kuavi_index_video(
     transcript_path: str | None = None,
     auto_shard_segments: int | None = None,
     num_segments: int | None = None,
+    scene_model_preset: str | None = None,
+    mode: str = "full",
+    caption_preset: str | None = None,
+    store_feature_maps: bool = False,
+    overlapping_vjepa: bool = False,
+    semantic_dedup: bool = False,
 ) -> dict[str, Any]:
     """Index a video file for search and analysis.
 
@@ -732,6 +739,10 @@ def kuavi_index_video(
 
     When num_segments is set, the video is split into that many equal-duration
     temporal segments instead of using V-JEPA 2 scene detection.
+
+    When mode is set to "fast", the indexer skips Tree-of-Captions and
+    Self-Refine to produce a quickly searchable index using only midpoint
+    frame captions. Use mode="full" (default) for the richest annotations.
     """
     import cv2
 
@@ -740,6 +751,8 @@ def kuavi_index_video(
 
     if no_scene_model:
         scene_model_resolved = None
+    elif scene_model_preset is not None:
+        scene_model_resolved = None  # preset overrides scene_model directly in VideoIndexer
     else:
         scene_model_resolved = scene_model
 
@@ -779,6 +792,7 @@ def kuavi_index_video(
         text_embedding_model=text_embedding_model_resolved,
         scene_model=scene_model_resolved,
         caption_resize=caption_resize,
+        scene_model_preset=scene_model_preset,
     )
 
     # Build captioning functions when captioning is enabled
@@ -787,18 +801,27 @@ def kuavi_index_video(
     refine_fn = None
     if not no_caption:
         try:
-            from kuavi.captioning import (
-                make_gemini_caption_fn,
-                make_gemini_frame_caption_fn,
-                make_gemini_refine_fn,
-            )
-
             gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-            caption_fn = make_gemini_caption_fn(api_key=gemini_key)
-            frame_caption_fn = make_gemini_frame_caption_fn(api_key=gemini_key)
-            refine_fn = make_gemini_refine_fn(api_key=gemini_key)
+            if caption_preset is not None:
+                from kuavi.captioners import create_captioner
+
+                captioner, aggregator = create_captioner(caption_preset, api_key=gemini_key)
+                caption_fn = captioner.caption_segment
+                frame_caption_fn = captioner.caption_frame
+                if aggregator is not None:
+                    refine_fn = aggregator.refine
+            else:
+                from kuavi.captioning import (
+                    make_gemini_caption_fn,
+                    make_gemini_frame_caption_fn,
+                    make_gemini_refine_fn,
+                )
+
+                caption_fn = make_gemini_caption_fn(api_key=gemini_key)
+                frame_caption_fn = make_gemini_frame_caption_fn(api_key=gemini_key)
+                refine_fn = make_gemini_refine_fn(api_key=gemini_key)
         except Exception:
-            logger.warning("Failed to initialize Gemini captioning; indexing without captions.")
+            logger.warning("Failed to initialize captioning; indexing without captions.")
 
     index = indexer.index_video(
         loaded_video,
@@ -807,6 +830,10 @@ def kuavi_index_video(
         refine_fn=refine_fn,
         asr_model=asr_model,
         transcript_path=transcript_path,
+        mode=mode,
+        store_feature_maps=store_feature_maps,
+        overlapping_vjepa=overlapping_vjepa,
+        semantic_dedup=semantic_dedup,
     )
 
     video_id = Path(video_path).stem
@@ -1000,6 +1027,175 @@ def kuavi_discriminative_vqa(
     if warning and results:
         results[-1]["_budget_warning"] = warning
     return results
+
+
+@mcp.tool()
+def kuavi_anticipate_action(
+    time_point: float,
+    top_k: int = 3,
+    candidates: list[str] | None = None,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Predict what happens next after a given time point.
+
+    Uses V-JEPA 2 predictor when available, falls back to embedding
+    similarity for anticipation.
+    """
+    entry = _get_video_entry(video_id)
+    if entry is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("anticipate")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    idx = entry["index"]
+    tools = entry.get("tools", {})
+
+    if "anticipate_action" not in tools:
+        from kuavi.search import make_anticipate_action
+
+        tools["anticipate_action"] = make_anticipate_action(idx)
+        entry["tools"] = tools
+
+    result = tools["anticipate_action"]["tool"](
+        time_point=time_point,
+        top_k=top_k,
+        candidates=candidates,
+    )
+    _track_response_tokens(result)
+    if warning and isinstance(result, dict):
+        result["_budget_warning"] = warning
+    return result
+
+
+@mcp.tool()
+def kuavi_classify_segment(
+    task: str = "k400",
+    start_time: float | None = None,
+    end_time: float | None = None,
+    segment_index: int | None = None,
+    top_k: int = 5,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Classify a video segment using attentive probes on V-JEPA 2 features.
+
+    Requires store_feature_maps=True during indexing.
+    task options: ssv2, k400, diving48, jester, coin, imagenet.
+    Provide either segment_index or (start_time, end_time).
+    """
+    entry = _get_video_entry(video_id)
+    if entry is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("classify")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    idx = entry["index"]
+    tools = entry.get("tools", {})
+
+    if "classify_segment" not in tools:
+        from kuavi.search import make_classify_segment
+
+        tools["classify_segment"] = make_classify_segment(idx)
+        entry["tools"] = tools
+
+    result = tools["classify_segment"]["tool"](
+        start_time=start_time,
+        end_time=end_time,
+        segment_index=segment_index,
+        task=task,
+        top_k=top_k,
+    )
+    _track_response_tokens(result)
+    if warning and isinstance(result, dict):
+        result["_budget_warning"] = warning
+    return result
+
+
+@mcp.tool()
+def kuavi_predict_future(
+    start_time: float,
+    end_time: float,
+    n_future_tokens: int = 16,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Predict what content is likely to follow a given time range.
+
+    Uses V-JEPA 2 predictor when feature maps are available, falls back to
+    temporal continuation heuristic (cosine similarity + temporal proximity).
+    """
+    entry = _get_video_entry(video_id)
+    if entry is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("predict_future")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    idx = entry["index"]
+    tools = entry.get("tools", {})
+
+    if "predict_future" not in tools:
+        from kuavi.search import make_predict_future
+
+        tools["predict_future"] = make_predict_future(idx)
+        entry["tools"] = tools
+
+    result = tools["predict_future"]["tool"](
+        start_time=start_time,
+        end_time=end_time,
+        n_future_tokens=n_future_tokens,
+    )
+    _track_response_tokens(result)
+    if warning and isinstance(result, dict):
+        result["_budget_warning"] = warning
+    return result
+
+
+@mcp.tool()
+def kuavi_verify_coherence(
+    start_time: float,
+    end_time: float,
+    threshold: float = 0.3,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Verify temporal coherence between segments and detect anomalies.
+
+    For each consecutive segment pair in the range, computes a coherence score.
+    Uses V-JEPA 2 predictor if available, else pairwise cosine similarity.
+    """
+    entry = _get_video_entry(video_id)
+    if entry is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("verify_coherence")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    idx = entry["index"]
+    tools = entry.get("tools", {})
+
+    if "verify_coherence" not in tools:
+        from kuavi.search import make_verify_coherence
+
+        tools["verify_coherence"] = make_verify_coherence(idx)
+        entry["tools"] = tools
+
+    result = tools["verify_coherence"]["tool"](
+        start_time=start_time,
+        end_time=end_time,
+        threshold=threshold,
+    )
+    _track_response_tokens(result)
+    if warning and isinstance(result, dict):
+        result["_budget_warning"] = warning
+    return result
 
 
 @mcp.tool()
@@ -2112,6 +2308,140 @@ def kuavi_analyze_shards(
     if warning:
         result["_budget_warning"] = warning
     return result
+
+
+# ---------------------------------------------------------------------------
+# Corpus tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def kuavi_index_corpus(
+    video_dir: str | None = None,
+    video_paths: list[str] | None = None,
+    mode: str = "fast",
+    max_workers: int = 4,
+    output_dir: str | None = None,
+) -> dict[str, Any]:
+    """Index multiple videos into a unified searchable corpus.
+
+    Provide either video_dir (discovers .mp4/.avi/.mov/.mkv/.webm files) or
+    explicit video_paths list. Uses parallel indexing with max_workers threads.
+    Results are stored in server state and optionally saved to output_dir.
+    """
+    from kuavi.corpus import CorpusIndex, CorpusIndexer, corpus_stats, discover_videos
+
+    _track_tool_call("index")
+
+    if video_dir is None and not video_paths:
+        return {"error": "Provide video_dir or video_paths."}
+
+    # Discover or validate paths
+    if video_dir is not None:
+        discovered = discover_videos(video_dir)
+        if not discovered:
+            return {"error": f"No video files found in {video_dir}"}
+        paths: list[str] = [str(p) for p in discovered]
+    else:
+        paths = list(video_paths)  # type: ignore[arg-type]
+        missing = [p for p in paths if not Path(p).exists()]
+        if missing:
+            return {"error": f"Video files not found: {missing}"}
+
+    indexer = CorpusIndexer(max_workers=max_workers)
+
+    # Optionally set up Gemini captioning
+    caption_fn = None
+    frame_caption_fn = None
+    refine_fn = None
+    if mode == "full":
+        try:
+            gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            from kuavi.captioning import (
+                make_gemini_caption_fn,
+                make_gemini_frame_caption_fn,
+                make_gemini_refine_fn,
+            )
+
+            caption_fn = make_gemini_caption_fn(api_key=gemini_key)
+            frame_caption_fn = make_gemini_frame_caption_fn(api_key=gemini_key)
+            refine_fn = make_gemini_refine_fn(api_key=gemini_key)
+        except Exception:
+            logger.warning("Failed to initialize captioning for corpus; using fast mode.")
+
+    corpus = indexer.index_corpus(
+        paths,
+        mode=mode,
+        caption_fn=caption_fn,
+        frame_caption_fn=frame_caption_fn,
+        refine_fn=refine_fn,
+    )
+
+    _state["corpus"] = {"index": corpus}
+
+    if output_dir:
+        corpus.save(output_dir)
+
+    stats = corpus_stats(corpus)
+    result: dict[str, Any] = {
+        "status": "indexed",
+        "num_videos": stats["num_videos"],
+        "total_segments": stats["total_segments"],
+        "total_duration_seconds": stats["total_duration_seconds"],
+        "action_vocabulary_size": stats["action_vocabulary_size"],
+        "videos": list(corpus.video_indices.keys()),
+    }
+    if output_dir:
+        result["saved_to"] = output_dir
+    return result
+
+
+@mcp.tool()
+def kuavi_search_corpus(
+    query: str,
+    top_k: int = 10,
+    video_filter: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Search across all videos in the corpus.
+
+    Returns ranked results with video_id, timestamps, score, and caption.
+    Use video_filter to restrict results to specific video IDs.
+    """
+    corpus_entry = _state.get("corpus")
+    if corpus_entry is None:
+        return [{"error": "No corpus indexed. Call kuavi_index_corpus first."}]
+
+    _track_tool_call("search")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return [gate]
+
+    from kuavi.corpus import search_corpus
+
+    corpus = corpus_entry["index"]
+    results = search_corpus(corpus, query, top_k=top_k, video_filter=video_filter)
+    _track_response_tokens(results)
+
+    if warning and results:
+        results[-1]["_budget_warning"] = warning
+    return results
+
+
+@mcp.tool()
+def kuavi_corpus_stats() -> dict[str, Any]:
+    """Get statistics about the indexed corpus.
+
+    Returns video count, segment count, total duration, action vocabulary size,
+    top actions, and per-video metadata.
+    """
+    corpus_entry = _state.get("corpus")
+    if corpus_entry is None:
+        return {"error": "No corpus indexed. Call kuavi_index_corpus first."}
+
+    _track_tool_call("index")
+    from kuavi.corpus import corpus_stats
+
+    return corpus_stats(corpus_entry["index"])
 
 
 # ---------------------------------------------------------------------------

@@ -311,6 +311,115 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_corpus_index(args: argparse.Namespace) -> None:
+    """Index a directory of videos into a corpus."""
+    from kuavi.corpus import CorpusIndexer, corpus_stats, discover_videos
+
+    printer = KUAViPrinter()
+    directory = Path(args.directory)
+
+    if not directory.is_dir():
+        printer.print_error(f"Directory not found: {args.directory}")
+        sys.exit(1)
+
+    video_paths = discover_videos(directory)
+    if not video_paths:
+        printer.print_error(f"No video files found in {args.directory}")
+        sys.exit(1)
+
+    printer.print_header("Index Corpus", {
+        "Directory": str(directory),
+        "Videos found": len(video_paths),
+        "Mode": args.mode,
+        "Max workers": args.max_workers,
+        "Output": args.output or "(none)",
+    })
+
+    indexer = CorpusIndexer(max_workers=args.max_workers)
+
+    completed = []
+
+    def _progress(path: str, status: str, elapsed: float) -> None:
+        completed.append(path)
+        printer.print_step_done(
+            f"[{len(completed)}/{len(video_paths)}] {Path(path).name}",
+            status,
+            elapsed=elapsed,
+        )
+
+    t0 = time.time()
+    corpus = indexer.index_corpus(
+        video_paths,
+        mode=args.mode,
+        progress_callback=_progress,
+    )
+    total_time = time.time() - t0
+
+    if args.output:
+        printer.print_step("Saving corpus index", args.output)
+        corpus.save(args.output)
+        printer.print_step_done("Saved", args.output)
+
+    stats = corpus_stats(corpus)
+    printer.print_final_summary({
+        "Videos indexed": stats["num_videos"],
+        "Total segments": stats["total_segments"],
+        "Total duration": f"{stats['total_duration_seconds']:.1f}s",
+        "Action vocabulary": stats["action_vocabulary_size"],
+        "Index time": f"{total_time:.2f}s",
+    })
+
+
+def cmd_corpus_search(args: argparse.Namespace) -> None:
+    """Search a saved corpus index."""
+    from kuavi.corpus import CorpusIndex, search_corpus
+
+    printer = KUAViPrinter()
+    index_dir = args.index_dir
+
+    if not Path(index_dir).exists():
+        printer.print_error(f"Corpus index not found: {index_dir}\nRun 'kuavi corpus index' first.")
+        sys.exit(1)
+
+    printer.print_header("Search Corpus", {
+        "Query": args.query,
+        "Index": index_dir,
+        "Top-K": args.top_k,
+    })
+
+    printer.print_step("Loading corpus index")
+    t0 = time.time()
+    corpus = CorpusIndex.load(index_dir)
+    printer.print_step_done(
+        "Loaded",
+        f"{corpus.num_videos} videos, {corpus.total_segments} segments",
+        elapsed=time.time() - t0,
+    )
+
+    # Re-attach embed_fn to each video index (not serialized)
+    from kuavi.indexer import VideoIndexer
+
+    embedding_model = getattr(args, "embedding_model", "google/siglip2-base-patch16-256")
+    reindexer = VideoIndexer(embedding_model=embedding_model)
+    reindexer._ensure_model()
+    for idx in corpus.video_indices.values():
+        if idx.embed_fn is None:
+            idx.embed_fn = reindexer._encode_query
+
+    printer.print_step("Searching corpus", f'"{args.query}"')
+    t0 = time.time()
+    results = search_corpus(corpus, args.query, top_k=args.top_k)
+    printer.print_step_done("Search complete", f"{len(results)} results", elapsed=time.time() - t0)
+
+    for i, r in enumerate(results, 1):
+        vid = r.get("video_id", "?")
+        start = r.get("start_time", 0)
+        end = r.get("end_time", 0)
+        score = r.get("score", 0)
+        caption = r.get("caption", "")[:80]
+        print(f"  {i:2}. [{vid}] {start:.1f}s-{end:.1f}s  score={score:.3f}  {caption}")
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -369,6 +478,33 @@ def main() -> None:
         help="Max parallel analyses (default: 1)"
     )
 
+    # --- corpus ---
+    p_corpus = subparsers.add_parser("corpus", help="Multi-video corpus operations")
+    corpus_sub = p_corpus.add_subparsers(dest="corpus_command", help="Corpus subcommands")
+
+    p_corpus_index = corpus_sub.add_parser("index", help="Index a directory of videos")
+    p_corpus_index.add_argument("directory", help="Directory containing video files")
+    p_corpus_index.add_argument("--output", "-o", help="Output directory for corpus index")
+    p_corpus_index.add_argument(
+        "--mode", default="fast", choices=["fast", "full"],
+        help="Indexing mode (default: fast)"
+    )
+    p_corpus_index.add_argument(
+        "--max-workers", type=int, default=4, metavar="N",
+        help="Max parallel indexing workers (default: 4)"
+    )
+
+    p_corpus_search = corpus_sub.add_parser("search", help="Search a corpus index")
+    p_corpus_search.add_argument("query", help="Search query")
+    p_corpus_search.add_argument(
+        "--index-dir", required=True, help="Path to corpus index directory"
+    )
+    p_corpus_search.add_argument("--top-k", type=int, default=10, help="Number of results")
+    p_corpus_search.add_argument(
+        "--embedding-model", default="google/siglip2-base-patch16-256",
+        help="Embedding model for query encoding"
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -381,6 +517,14 @@ def main() -> None:
         cmd_search(args)
     elif args.command == "analyze":
         cmd_analyze(args)
+    elif args.command == "corpus":
+        if not hasattr(args, "corpus_command") or args.corpus_command is None:
+            p_corpus.print_help()
+            sys.exit(1)
+        if args.corpus_command == "index":
+            cmd_corpus_index(args)
+        elif args.corpus_command == "search":
+            cmd_corpus_search(args)
 
 
 if __name__ == "__main__":

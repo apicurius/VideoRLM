@@ -15,6 +15,31 @@ if TYPE_CHECKING:
     from rlm.video.video_indexer import VideoIndex
 
 
+def _align_query_dim(query_emb: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    """Align query embedding dimension to match the target matrix's column dimension.
+
+    V-JEPA 2 temporal embeddings are 1024-d while SigLIP2 text queries are 768-d.
+    Zero-pad the query to match so cosine_similarity doesn't raise a ValueError.
+    """
+    d_q = query_emb.shape[1]
+    d_m = matrix.shape[1]
+    if d_q == d_m:
+        return query_emb
+    if d_q < d_m:
+        # Zero-pad query and re-normalize to unit length
+        padded = np.zeros((1, d_m), dtype=query_emb.dtype)
+        padded[0, :d_q] = query_emb[0]
+        norm = np.linalg.norm(padded)
+        return padded / norm if norm > 0 else padded
+    # d_q > d_m: truncate (shouldn't happen in practice)
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "Query dim %d > matrix dim %d; truncating query embedding.", d_q, d_m
+    )
+    return query_emb[:, :d_m]
+
+
 def _mmr_rerank(
     query_emb: np.ndarray,
     candidate_embs: np.ndarray,
@@ -165,6 +190,48 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                     )
                 return results
 
+        # Temporal field (V-JEPA 2 embeddings)
+        if field == "temporal":
+            if (
+                hasattr(index, "temporal_embeddings")
+                and index.temporal_embeddings is not None
+                and len(index.temporal_embeddings) > 0
+            ):
+                # V-JEPA is vision-only; use SigLIP2 text encoder for query.
+                # Align dims: SigLIP2 produces 768-d but V-JEPA 2 embeddings are 1024-d.
+                visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
+                query_emb = visual_fn(query)
+                query_emb = np.asarray(query_emb).reshape(1, -1)
+                query_emb = _align_query_dim(query_emb, index.temporal_embeddings)
+                scores = _search_matrix(query_emb, index.temporal_embeddings)
+
+                scores = scores.copy()
+                for i, seg in enumerate(index.segments):
+                    if seg.get("is_duplicate"):
+                        scores[i] = -np.inf
+
+                top_indices = list(np.argsort(scores)[::-1][:top_k])
+                results = []
+                for idx in top_indices:
+                    seg = index.segments[idx]
+                    results.append(
+                        {
+                            "start_time": seg["start_time"],
+                            "end_time": seg["end_time"],
+                            "score": round(float(scores[idx]), 4),
+                            "caption": seg.get("caption", ""),
+                            "annotation": seg.get("annotation", {}),
+                            "quality_score": seg.get("caption_quality_score"),
+                        }
+                    )
+                return results
+            import logging
+            logging.getLogger(__name__).warning(
+                "No temporal embeddings available — field='temporal' falling back to 'summary'. "
+                "Temporal search requires V-JEPA 2 embeddings from indexing."
+            )
+            field = "summary"
+
         # Visual field: search frame embeddings using SigLIP2 text encoder
         if field == "visual":
             if (
@@ -211,13 +278,127 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
         action_emb = (
             index.action_embeddings if index.action_embeddings is not None else index.embeddings
         )
+        temporal_emb = getattr(index, "temporal_embeddings", None)
+        frame_emb = getattr(index, "frame_embeddings", None)
 
         if field == "summary":
             matrices = [summary_emb]
         elif field == "action":
             matrices = [action_emb]
-        else:  # "all"
-            matrices = [summary_emb, action_emb]
+        elif field == "all":
+            # Weighted composite: summary 0.4, action 0.2, visual 0.2, temporal 0.2
+            query_emb = index.embed_fn(query)
+            query_emb = np.asarray(query_emb).reshape(1, -1)
+
+            # SigLIP2 query for visual/temporal (different embedding space)
+            visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
+            query_emb_visual = visual_fn(query)
+            query_emb_visual = np.asarray(query_emb_visual).reshape(1, -1)
+
+            weighted_scores = np.zeros(len(index.segments))
+            total_weight = 0.0
+
+            if summary_emb is not None and len(summary_emb) > 0:
+                weighted_scores += 0.4 * _search_matrix(query_emb, summary_emb)
+                total_weight += 0.4
+            if action_emb is not None and len(action_emb) > 0:
+                weighted_scores += 0.2 * _search_matrix(query_emb, action_emb)
+                total_weight += 0.2
+            if frame_emb is not None and len(frame_emb) > 0:
+                weighted_scores += 0.2 * _search_matrix(query_emb_visual, frame_emb)
+                total_weight += 0.2
+            if temporal_emb is not None and len(temporal_emb) > 0:
+                # Align dims: SigLIP2 visual query (768-d) vs V-JEPA 2 temporal (1024-d).
+                query_emb_temporal = _align_query_dim(query_emb_visual, temporal_emb)
+                weighted_scores += 0.2 * _search_matrix(query_emb_temporal, temporal_emb)
+                total_weight += 0.2
+
+            if total_weight > 0:
+                scores = weighted_scores / total_weight
+            else:
+                return []
+
+            # Skip directly to filtering (bypass the max-over-matrices logic below)
+            scores = scores.copy()
+            for i, seg in enumerate(index.segments):
+                if seg.get("is_duplicate"):
+                    scores[i] = -np.inf
+
+            if cluster_diverse and top_k > 2:
+                from sklearn.cluster import KMeans
+
+                active_matrix = summary_emb if summary_emb is not None else frame_emb
+                valid_mask = scores > -np.inf
+                valid_indices_arr = np.where(valid_mask)[0]
+                n_valid = len(valid_indices_arr)
+
+                if n_valid <= top_k:
+                    top_indices = list(
+                        valid_indices_arr[np.argsort(scores[valid_indices_arr])[::-1]]
+                    )
+                else:
+                    k = min(top_k, n_valid)
+                    valid_embs = active_matrix[valid_indices_arr]
+                    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                    labels = kmeans.fit_predict(valid_embs)
+
+                    clusters: dict[int, list[int]] = {}
+                    for vi, label in zip(valid_indices_arr, labels, strict=False):
+                        clusters.setdefault(int(label), []).append(int(vi))
+                    for label in clusters:
+                        clusters[label].sort(key=lambda idx: scores[idx], reverse=True)
+                    top_indices: list[int] = []
+                    cluster_keys = sorted(
+                        clusters.keys(), key=lambda k: scores[clusters[k][0]], reverse=True
+                    )
+                    cluster_ptrs = {k: 0 for k in cluster_keys}
+                    while len(top_indices) < top_k:
+                        added_any = False
+                        for label in cluster_keys:
+                            if len(top_indices) >= top_k:
+                                break
+                            ptr = cluster_ptrs[label]
+                            if ptr < len(clusters[label]):
+                                top_indices.append(clusters[label][ptr])
+                                cluster_ptrs[label] = ptr + 1
+                                added_any = True
+                        if not added_any:
+                            break
+            elif diverse and top_k > 1:
+                n_candidates = min(top_k * 3, len(scores))
+                candidate_indices = np.argsort(scores)[::-1][:n_candidates]
+                candidate_scores = scores[candidate_indices]
+                active_matrix = summary_emb if summary_emb is not None else frame_emb
+                candidate_embs = (
+                    active_matrix[candidate_indices] if active_matrix is not None else None
+                )
+                top_indices = _mmr_rerank(
+                    query_emb,
+                    candidate_embs,
+                    candidate_indices,
+                    candidate_scores,
+                    top_k=top_k,
+                    lambda_param=0.7,
+                )
+            else:
+                top_indices = list(np.argsort(scores)[::-1][:top_k])
+
+            results = []
+            for idx in top_indices:
+                seg = index.segments[idx]
+                results.append(
+                    {
+                        "start_time": seg["start_time"],
+                        "end_time": seg["end_time"],
+                        "score": round(float(scores[idx]), 4),
+                        "caption": seg.get("caption", ""),
+                        "annotation": seg.get("annotation", {}),
+                        "quality_score": seg.get("caption_quality_score"),
+                    }
+                )
+            return results
+        else:
+            matrices = [summary_emb]
 
         # Filter out None matrices
         matrices = [m for m in matrices if m is not None and len(m) > 0]
@@ -330,7 +511,7 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
         "description": (
             "Semantic search over pre-indexed video segments. "
             "Parameters: query (str), top_k (int, default 5), "
-            'field (str, default "summary" — can be "summary", "action", "visual", or "all"), '
+            'field (str, default "summary" — can be "summary", "action", "visual", "temporal", or "all"), '
             "exclude_non_action (bool, default True — filters non-action segments when field is action), "
             "diverse (bool, default True — MMR reranking for varied results), "
             "cluster_diverse (bool, default False — KMeans clustering alternative to MMR), "
@@ -516,5 +697,507 @@ def make_get_scene_list(index: VideoIndex) -> dict[str, Any]:
             "List all detected scene boundaries. Takes no parameters. "
             "Returns list of dicts with scene_index, start_time, end_time, "
             "caption, and annotation. Use this to understand the video structure."
+        ),
+    }
+
+
+def make_anticipate_action(index: VideoIndex) -> dict[str, Any]:
+    """Predict what happens next after a given time point."""
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    def anticipate_action(
+        time_point: float,
+        top_k: int = 3,
+        candidates: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Predict what happens after the given time point.
+
+        Args:
+            time_point: Time in seconds to predict from.
+            top_k: Number of candidate future segments to return.
+            candidates: Optional list of action descriptions to rank.
+
+        Returns:
+            Dict with 'predicted_segments' (nearest future segments by embedding)
+            and optionally 'candidate_ranking' (if candidates provided).
+        """
+        predict_fn = getattr(index, "_predict_fn", None)
+        if predict_fn is None:
+            # Fallback: use embedding similarity restricted to future segments
+            context_seg_idx = None
+            for i, seg in enumerate(index.segments):
+                if seg["start_time"] <= time_point <= seg["end_time"]:
+                    context_seg_idx = i
+                    break
+                if seg["end_time"] <= time_point:
+                    context_seg_idx = i
+
+            if context_seg_idx is None:
+                return {"error": "No segment found at the given time point", "predicted_segments": []}
+
+            if index.embeddings is None:
+                return {"error": "No embeddings available", "predicted_segments": []}
+
+            context_emb = index.embeddings[context_seg_idx].reshape(1, -1)
+
+            future_mask = np.array([
+                seg["start_time"] > time_point for seg in index.segments
+            ])
+
+            if not future_mask.any():
+                return {"predicted_segments": [], "note": "No future segments available"}
+
+            scores = cosine_similarity(context_emb, index.embeddings)[0]
+            scores[~future_mask] = -np.inf
+            scores[context_seg_idx] = -np.inf
+
+            top_indices = np.argsort(scores)[::-1][:top_k]
+
+            predicted = []
+            for idx in top_indices:
+                if scores[idx] <= -np.inf:
+                    continue
+                seg = index.segments[idx]
+                predicted.append({
+                    "start_time": seg["start_time"],
+                    "end_time": seg["end_time"],
+                    "score": round(float(scores[idx]), 4),
+                    "caption": seg.get("caption", ""),
+                    "annotation": seg.get("annotation", {}),
+                })
+
+            result: dict[str, Any] = {
+                "context_segment": {
+                    "start_time": index.segments[context_seg_idx]["start_time"],
+                    "end_time": index.segments[context_seg_idx]["end_time"],
+                    "caption": index.segments[context_seg_idx].get("caption", ""),
+                },
+                "predicted_segments": predicted,
+                "method": "embedding_similarity",
+                "note": "V-JEPA 2 predictor not available; using embedding similarity fallback",
+            }
+
+            if candidates and index.embed_fn is not None:
+                candidate_embs = np.stack([
+                    np.asarray(index.embed_fn(c)).flatten() for c in candidates
+                ])
+                if predicted:
+                    pred_indices = [
+                        i for i in top_indices if scores[i] > -np.inf
+                    ][:top_k]
+                    pred_embs = index.embeddings[pred_indices]
+                    mean_pred = pred_embs.mean(axis=0).reshape(1, -1)
+                    cand_scores = cosine_similarity(candidate_embs, mean_pred).flatten()
+                    ranking = sorted(
+                        zip(candidates, cand_scores),
+                        key=lambda x: x[1], reverse=True,
+                    )
+                    result["candidate_ranking"] = [
+                        {"action": a, "confidence": round(float(s), 4)}
+                        for a, s in ranking
+                    ]
+
+            return result
+
+        # Full predictor path (when V-JEPA 2 predictor is available)
+        predicted_emb = predict_fn(time_point)
+        if predicted_emb is None:
+            return {"error": "Prediction failed", "predicted_segments": []}
+
+        predicted_emb = predicted_emb.reshape(1, -1)
+        if index.temporal_embeddings is not None:
+            scores = cosine_similarity(predicted_emb, index.temporal_embeddings)[0]
+        elif index.embeddings is not None:
+            scores = cosine_similarity(predicted_emb, index.embeddings)[0]
+        else:
+            return {"error": "No embeddings available", "predicted_segments": []}
+
+        top_indices = np.argsort(scores)[::-1][:top_k]
+        predicted_segs = []
+        for idx in top_indices:
+            seg = index.segments[idx]
+            predicted_segs.append({
+                "start_time": seg["start_time"],
+                "end_time": seg["end_time"],
+                "score": round(float(scores[idx]), 4),
+                "caption": seg.get("caption", ""),
+            })
+
+        return {
+            "predicted_segments": predicted_segs,
+            "method": "vjepa2_predictor",
+        }
+
+    return {
+        "tool": anticipate_action,
+        "description": (
+            "Predict what happens next after a given time point in the video. "
+            "Parameters: time_point (float, seconds), top_k (int, default 3), "
+            "candidates (optional list of action descriptions to rank). "
+            "Returns predicted future segments and optional candidate ranking."
+        ),
+    }
+
+
+def make_classify_segment(index: VideoIndex) -> dict[str, Any]:
+    """Classify video segments using attentive probes on V-JEPA 2 features."""
+
+    def classify_segment(
+        start_time: float | None = None,
+        end_time: float | None = None,
+        segment_index: int | None = None,
+        task: str = "k400",
+        top_k: int = 5,
+    ) -> dict[str, Any]:
+        """Classify a video segment using a pre-trained attentive probe.
+
+        Args:
+            start_time: Start time of segment (used with end_time).
+            end_time: End time of segment (used with start_time).
+            segment_index: Direct segment index (alternative to time range).
+            task: Classification task name (e.g., "k400", "ssv2").
+            top_k: Number of top predictions.
+
+        Returns:
+            Dict with predictions and segment info.
+        """
+        if index.temporal_feature_maps is None:
+            return {
+                "error": (
+                    "No temporal feature maps available. "
+                    "Re-index with store_feature_maps=True to enable classification."
+                )
+            }
+
+        if segment_index is not None:
+            if segment_index < 0 or segment_index >= len(index.segments):
+                return {"error": f"Invalid segment_index {segment_index}"}
+            seg_idx = segment_index
+        elif start_time is not None and end_time is not None:
+            seg_idx = None
+            best_overlap = 0.0
+            for i, seg in enumerate(index.segments):
+                overlap = min(seg["end_time"], end_time) - max(seg["start_time"], start_time)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    seg_idx = i
+            if seg_idx is None:
+                return {"error": "No segment found in the given time range"}
+        else:
+            return {"error": "Provide either segment_index or (start_time, end_time)"}
+
+        features = index.temporal_feature_maps[seg_idx]  # (num_patches, D)
+
+        registry = getattr(index, "_probe_registry", None)
+        if registry is None:
+            from kuavi.probes import ProbeRegistry
+
+            registry = ProbeRegistry.from_configs()
+            index._probe_registry = registry  # type: ignore[attr-defined]
+
+        probe = registry.get(task)
+        if probe is None:
+            available = registry.available_tasks()
+            return {"error": f"Unknown task '{task}'. Available: {available}"}
+
+        predictions = probe.classify(features, top_k=top_k)
+
+        seg = index.segments[seg_idx]
+        return {
+            "segment": {
+                "index": seg_idx,
+                "start_time": seg["start_time"],
+                "end_time": seg["end_time"],
+                "caption": seg.get("caption", ""),
+            },
+            "task": task,
+            "task_description": probe.config.description,
+            "predictions": predictions,
+            "weights_loaded": probe._model is not None and probe.config.weights_path is not None,
+        }
+
+    return {
+        "tool": classify_segment,
+        "description": (
+            "Classify a video segment using attentive probes on V-JEPA 2 features. "
+            "Parameters: start_time (float), end_time (float), OR segment_index (int); "
+            "task (str, default 'k400' — options: ssv2, k400, diving48, jester, coin, imagenet); "
+            "top_k (int, default 5). "
+            "Requires store_feature_maps=True during indexing."
+        ),
+    }
+
+
+def make_predict_future(index: VideoIndex) -> dict[str, Any]:
+    """Predict likely future content after a given time range (world model)."""
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    def predict_future(
+        start_time: float,
+        end_time: float,
+        n_future_tokens: int = 16,
+    ) -> dict[str, Any]:
+        """Predict what content is likely to follow a given time range.
+
+        Args:
+            start_time: Start of context window (seconds).
+            end_time: End of context window (seconds).
+            n_future_tokens: Number of future tokens for predictor (default 16).
+
+        Returns:
+            Dict with 'predicted_segments', 'method', and 'context'.
+        """
+        context_segs = [
+            (i, seg)
+            for i, seg in enumerate(index.segments)
+            if seg["end_time"] > start_time and seg["start_time"] < end_time
+        ]
+
+        if not context_segs:
+            return {
+                "error": "No segments found in the given time range",
+                "predicted_segments": [],
+            }
+
+        ctx_idx, ctx_seg = context_segs[-1]
+
+        predict_future_fn = getattr(index, "_predict_future_fn", None)
+        if (
+            predict_future_fn is not None
+            and index.temporal_feature_maps is not None
+            and ctx_idx < len(index.temporal_feature_maps)
+        ):
+            feature_map = index.temporal_feature_maps[ctx_idx]
+            predicted_features = predict_future_fn(feature_map, n_future_tokens)
+            if predicted_features is not None:
+                predicted_emb = predicted_features.mean(axis=0).reshape(1, -1)
+                emb_matrix = (
+                    index.temporal_embeddings
+                    if index.temporal_embeddings is not None
+                    else index.embeddings
+                )
+                if emb_matrix is None:
+                    return {"error": "No embeddings available", "predicted_segments": []}
+
+                future_mask = np.array([
+                    seg["start_time"] >= end_time for seg in index.segments
+                ])
+                if not future_mask.any():
+                    return {
+                        "predicted_segments": [],
+                        "method": "vjepa2_predictor",
+                        "context": {
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "caption": ctx_seg.get("caption", ""),
+                        },
+                        "note": "No future segments available",
+                    }
+
+                scores = cosine_similarity(predicted_emb, emb_matrix)[0]
+                scores[~future_mask] = -np.inf
+
+                top_indices = np.argsort(scores)[::-1][:5]
+                predicted = []
+                for idx in top_indices:
+                    if scores[idx] <= -np.inf:
+                        continue
+                    seg = index.segments[idx]
+                    predicted.append({
+                        "start_time": seg["start_time"],
+                        "end_time": seg["end_time"],
+                        "score": round(float(scores[idx]), 4),
+                        "caption": seg.get("caption", ""),
+                        "annotation": seg.get("annotation", {}),
+                    })
+
+                return {
+                    "predicted_segments": predicted,
+                    "method": "vjepa2_predictor",
+                    "context": {
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "caption": ctx_seg.get("caption", ""),
+                    },
+                }
+
+        # Fallback: temporal continuation heuristic
+        emb_matrix = (
+            index.temporal_embeddings
+            if index.temporal_embeddings is not None
+            else index.embeddings
+        )
+        if emb_matrix is None:
+            return {"error": "No embeddings available", "predicted_segments": []}
+
+        ctx_indices = [i for i, _ in context_segs]
+        ctx_emb = emb_matrix[ctx_indices].mean(axis=0).reshape(1, -1)
+
+        future_segs = [
+            (i, seg)
+            for i, seg in enumerate(index.segments)
+            if seg["start_time"] >= end_time
+        ]
+        if not future_segs:
+            return {
+                "predicted_segments": [],
+                "method": "temporal_continuation",
+                "context": {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "caption": ctx_seg.get("caption", ""),
+                },
+                "note": "No future segments available",
+            }
+
+        sim_scores = cosine_similarity(ctx_emb, emb_matrix)[0]
+
+        predicted = []
+        for i, seg in future_segs:
+            temporal_distance = seg["start_time"] - end_time
+            temporal_weight = float(np.exp(-temporal_distance / 30.0))
+            combined_score = float(sim_scores[i]) * 0.5 + temporal_weight * 0.5
+            predicted.append({
+                "start_time": seg["start_time"],
+                "end_time": seg["end_time"],
+                "score": round(combined_score, 4),
+                "caption": seg.get("caption", ""),
+                "annotation": seg.get("annotation", {}),
+            })
+
+        predicted.sort(key=lambda x: x["score"], reverse=True)
+        predicted = predicted[:5]
+
+        return {
+            "predicted_segments": predicted,
+            "method": "temporal_continuation",
+            "context": {
+                "start_time": start_time,
+                "end_time": end_time,
+                "caption": ctx_seg.get("caption", ""),
+            },
+        }
+
+    return {
+        "tool": predict_future,
+        "description": (
+            "Predict what content is likely to follow a given time range (world model). "
+            "Parameters: start_time (float, seconds), end_time (float, seconds), "
+            "n_future_tokens (int, default 16). "
+            "Returns predicted_segments, method, and context info."
+        ),
+    }
+
+
+def make_verify_coherence(index: VideoIndex) -> dict[str, Any]:
+    """Verify temporal coherence and detect anomalies in a video segment."""
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    def verify_coherence(
+        start_time: float,
+        end_time: float,
+        threshold: float = 0.3,
+    ) -> dict[str, Any]:
+        """Measure temporal coherence between consecutive segments and flag anomalies.
+
+        Args:
+            start_time: Start of analysis window (seconds).
+            end_time: End of analysis window (seconds).
+            threshold: Score below which a transition is anomalous (default 0.3).
+
+        Returns:
+            Dict with overall_score, segment_scores, anomalies, and method.
+        """
+        range_segs = [
+            (i, seg)
+            for i, seg in enumerate(index.segments)
+            if seg["end_time"] > start_time and seg["start_time"] < end_time
+        ]
+
+        if len(range_segs) < 2:
+            overall = 1.0 if len(range_segs) == 1 else 0.0
+            return {
+                "overall_score": overall,
+                "segment_scores": [],
+                "anomalies": [],
+                "method": "pairwise_similarity",
+                "note": "Not enough segments to compute coherence (need at least 2)",
+            }
+
+        emb_matrix = (
+            index.temporal_embeddings
+            if index.temporal_embeddings is not None
+            else index.embeddings
+        )
+        if emb_matrix is None:
+            return {"error": "No embeddings available"}
+
+        predict_future_fn = getattr(index, "_predict_future_fn", None)
+        method = "pairwise_similarity"
+        segment_scores = []
+
+        for k in range(len(range_segs) - 1):
+            curr_idx, curr_seg = range_segs[k]
+            next_idx, next_seg = range_segs[k + 1]
+
+            score: float
+            if (
+                predict_future_fn is not None
+                and index.temporal_feature_maps is not None
+                and curr_idx < len(index.temporal_feature_maps)
+            ):
+                method = "vjepa2_predictor"
+                feature_map = index.temporal_feature_maps[curr_idx]
+                predicted_features = predict_future_fn(feature_map, 16)
+                if predicted_features is not None:
+                    predicted_emb = predicted_features.mean(axis=0).reshape(1, -1)
+                    actual_emb = emb_matrix[next_idx].reshape(1, -1)
+                    score = float(cosine_similarity(predicted_emb, actual_emb)[0, 0])
+                else:
+                    curr_emb = emb_matrix[curr_idx].reshape(1, -1)
+                    next_emb = emb_matrix[next_idx].reshape(1, -1)
+                    score = float(cosine_similarity(curr_emb, next_emb)[0, 0])
+            else:
+                curr_emb = emb_matrix[curr_idx].reshape(1, -1)
+                next_emb = emb_matrix[next_idx].reshape(1, -1)
+                score = float(cosine_similarity(curr_emb, next_emb)[0, 0])
+
+            is_anomalous = score < threshold
+            segment_scores.append({
+                "start": curr_seg["start_time"],
+                "end": next_seg["end_time"],
+                "score": round(score, 4),
+                "is_anomalous": is_anomalous,
+            })
+
+        overall_score = float(np.mean([s["score"] for s in segment_scores]))
+        anomalies = [
+            {
+                "start": s["start"],
+                "end": s["end"],
+                "score": s["score"],
+                "description": (
+                    f"Unexpected transition at t={s['start']:.1f}s-{s['end']:.1f}s "
+                    f"(coherence: {s['score']:.3f})"
+                ),
+            }
+            for s in segment_scores
+            if s["is_anomalous"]
+        ]
+
+        return {
+            "overall_score": round(overall_score, 4),
+            "segment_scores": segment_scores,
+            "anomalies": anomalies,
+            "method": method,
+        }
+
+    return {
+        "tool": verify_coherence,
+        "description": (
+            "Verify temporal coherence between consecutive segments and detect anomalies. "
+            "Parameters: start_time (float, seconds), end_time (float, seconds), "
+            "threshold (float, default 0.3). "
+            "Returns overall_score, segment_scores, anomalies, and method."
         ),
     }
