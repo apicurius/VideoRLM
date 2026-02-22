@@ -498,6 +498,7 @@ _install_trace_logging()
 _state: dict[str, Any] = {
     "videos": {},  # video_id -> {"index", "indexer", "loaded_video", "video_path"}
     "active_video": None,  # current active video_id
+    "corpus": None,  # {"index": CorpusIndex} or None
     "eval_namespace": None,  # reserved for eval tool
     "llm_config": None,  # dict with primary/secondary backend+model routing, or None
     "stats": {
@@ -2225,6 +2226,140 @@ def kuavi_analyze_shards(
     if warning:
         result["_budget_warning"] = warning
     return result
+
+
+# ---------------------------------------------------------------------------
+# Corpus tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def kuavi_index_corpus(
+    video_dir: str | None = None,
+    video_paths: list[str] | None = None,
+    mode: str = "fast",
+    max_workers: int = 4,
+    output_dir: str | None = None,
+) -> dict[str, Any]:
+    """Index multiple videos into a unified searchable corpus.
+
+    Provide either video_dir (discovers .mp4/.avi/.mov/.mkv/.webm files) or
+    explicit video_paths list. Uses parallel indexing with max_workers threads.
+    Results are stored in server state and optionally saved to output_dir.
+    """
+    from kuavi.corpus import CorpusIndex, CorpusIndexer, corpus_stats, discover_videos
+
+    _track_tool_call("index")
+
+    if video_dir is None and not video_paths:
+        return {"error": "Provide video_dir or video_paths."}
+
+    # Discover or validate paths
+    if video_dir is not None:
+        discovered = discover_videos(video_dir)
+        if not discovered:
+            return {"error": f"No video files found in {video_dir}"}
+        paths: list[str] = [str(p) for p in discovered]
+    else:
+        paths = list(video_paths)  # type: ignore[arg-type]
+        missing = [p for p in paths if not Path(p).exists()]
+        if missing:
+            return {"error": f"Video files not found: {missing}"}
+
+    indexer = CorpusIndexer(max_workers=max_workers)
+
+    # Optionally set up Gemini captioning
+    caption_fn = None
+    frame_caption_fn = None
+    refine_fn = None
+    if mode == "full":
+        try:
+            gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            from kuavi.captioning import (
+                make_gemini_caption_fn,
+                make_gemini_frame_caption_fn,
+                make_gemini_refine_fn,
+            )
+
+            caption_fn = make_gemini_caption_fn(api_key=gemini_key)
+            frame_caption_fn = make_gemini_frame_caption_fn(api_key=gemini_key)
+            refine_fn = make_gemini_refine_fn(api_key=gemini_key)
+        except Exception:
+            logger.warning("Failed to initialize captioning for corpus; using fast mode.")
+
+    corpus = indexer.index_corpus(
+        paths,
+        mode=mode,
+        caption_fn=caption_fn,
+        frame_caption_fn=frame_caption_fn,
+        refine_fn=refine_fn,
+    )
+
+    _state["corpus"] = {"index": corpus}
+
+    if output_dir:
+        corpus.save(output_dir)
+
+    stats = corpus_stats(corpus)
+    result: dict[str, Any] = {
+        "status": "indexed",
+        "num_videos": stats["num_videos"],
+        "total_segments": stats["total_segments"],
+        "total_duration_seconds": stats["total_duration_seconds"],
+        "action_vocabulary_size": stats["action_vocabulary_size"],
+        "videos": list(corpus.video_indices.keys()),
+    }
+    if output_dir:
+        result["saved_to"] = output_dir
+    return result
+
+
+@mcp.tool()
+def kuavi_search_corpus(
+    query: str,
+    top_k: int = 10,
+    video_filter: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Search across all videos in the corpus.
+
+    Returns ranked results with video_id, timestamps, score, and caption.
+    Use video_filter to restrict results to specific video IDs.
+    """
+    corpus_entry = _state.get("corpus")
+    if corpus_entry is None:
+        return [{"error": "No corpus indexed. Call kuavi_index_corpus first."}]
+
+    _track_tool_call("search")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return [gate]
+
+    from kuavi.corpus import search_corpus
+
+    corpus = corpus_entry["index"]
+    results = search_corpus(corpus, query, top_k=top_k, video_filter=video_filter)
+    _track_response_tokens(results)
+
+    if warning and results:
+        results[-1]["_budget_warning"] = warning
+    return results
+
+
+@mcp.tool()
+def kuavi_corpus_stats() -> dict[str, Any]:
+    """Get statistics about the indexed corpus.
+
+    Returns video count, segment count, total duration, action vocabulary size,
+    top actions, and per-video metadata.
+    """
+    corpus_entry = _state.get("corpus")
+    if corpus_entry is None:
+        return {"error": "No corpus indexed. Call kuavi_index_corpus first."}
+
+    _track_tool_call("index")
+    from kuavi.corpus import corpus_stats
+
+    return corpus_stats(corpus_entry["index"])
 
 
 # ---------------------------------------------------------------------------
