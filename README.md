@@ -255,6 +255,10 @@ KUAVi re-exposes the VideoRLM tool set as an **MCP (Model Context Protocol) serv
 │  ┌───────────────────────────────────────────────┐  │
 │  │               Claude Code Agent               │  │
 │  │                                               │  │
+│  │  ┌────────┐                                   │  │
+│  │  │ video- │ Haiku — fast path from captions   │  │
+│  │  │triage  │ or escalate ──┐                   │  │
+│  │  └────────┘               ▼                   │  │
 │  │  ┌────────┐ ┌──────────┐ ┌──────────────┐     │  │
 │  │  │ video- │ │  video-  │ │video-segment │     │  │
 │  │  │analyst │─│decomposer│ │ analyst (xN) │     │  │
@@ -268,8 +272,8 @@ KUAVi re-exposes the VideoRLM tool set as an **MCP (Model Context Protocol) serv
 │                        │ MCP Protocol (stdio)       │
 │  ┌───────────────────────▼───────────────────────┐  │
 │  │             KUAVi MCP Tool Server             │  │
-│  │  24 tools: search, extract, pixel, eval       │  │
-│  │  Multi-video state, budget gates, tracing     │  │
+│  │  30 tools: search, extract, pixel, compound   │  │
+│  │  Result caching, budget gates, tracing        │  │
 │  └───────────────────────┬───────────────────────┘  │
 │                        │                            │
 │  ┌───────────────────────▼───────────────────────┐  │
@@ -393,7 +397,7 @@ Indexes are cached by content hash (`MD5(path|size|mtime)`) — repeated queries
 
 ### MCP Tool Server
 
-KUAVi exposes 27 MCP tools via a FastMCP stdio server, organized into five categories:
+KUAVi exposes 30 MCP tools via a FastMCP stdio server, organized into six categories:
 
 #### Search Tools
 
@@ -459,96 +463,110 @@ All pixel tools accept frame references by **integer index** into the last `extr
 | `kuavi_search_corpus` | Semantic search across all videos in a corpus index. |
 | `kuavi_corpus_stats` | Statistics for the current corpus (video count, segment count, action vocabulary). |
 
+#### Compound Tools
+
+Compound tools batch common multi-call patterns into single MCP calls, reducing agent API round-trips by ~60%. Results from search and metadata tools are cached per video — repeated calls return instantly.
+
+| Tool | Description |
+|------|-------------|
+| `kuavi_orient` | Get video overview: `get_index_info` + `get_scene_list` in one call. Cached per video. |
+| `kuavi_search_all` | Multi-field search + transcript search in parallel via `ThreadPoolExecutor`. Cached by query parameters. |
+| `kuavi_inspect_segment` | Extract frames + get transcript for a time range in one call. Supports zoom level presets (1-3). |
+
 ### Multi-Agent Orchestration
 
-KUAVi uses a **decompose-analyze-synthesize** pattern for complex video questions, coordinated by four specialized agents:
+KUAVi uses a **triage-first** architecture with a **decompose-analyze-synthesize** pattern for complex video questions, coordinated by five specialized agents:
 
 ```
                        User Question
                             │
                             ▼
                   ┌──────────────────┐
-                  │  video-analyst   │ Sonnet, 20 turns
-                  │  (orchestrator)  │
+                  │  video-triage   │ Haiku, 6 turns
+                  │  (fast entry)   │
                   └────────┬─────────┘
-                           │
-                  Is this complex?
-                  (multi-part, causal,
-                   comparative, long)
                            │
               ┌────────────┴────────────┐
               │                         │
-          SIMPLE                    COMPLEX
+          ANSWERABLE                NEEDS FRAMES
+        from captions              or is complex
               │                         │
               ▼                         ▼
-      SEARCH-FIRST            ┌──────────────┐
-      (direct answer)         │  Phase 1:    │
-      ┌──────────────┐        │  DECOMPOSE   │
-      │get_index_info│        └──────┬───────┘
-      │get_scene_list│
-      │search_video  │        ┌──────▼───────────┐
-      │search_transc │        │video-decomposer  │
-      │extract_frame │        │Haiku, 8 turns    │
-      │get_transcript│        └──────┬───────────┘
-      │verify + cite │
-      └──────────────┘        JSON plan with
-                              sub-questions,
-                              time ranges,
-                              dependencies
-                                     │
-                              ┌──────▼──────┐
-                              │  Phase 2:   │
-                              │  ANALYZE    │
-                              └──────┬──────┘
-                                     │
-                      ┌──────────────┼──────────────┐
-                      ▼              ▼              ▼
-               ┌────────────┐ ┌────────────┐ ┌────────────┐
-               │  segment-  │ │  segment-  │ │  segment-  │
-               │ analyst #1 │ │ analyst #2 │ │ analyst #3 │
-               │(background)│ │(background)│ │(background)│
-               │ (parallel) │ │ (parallel) │ │ (parallel) │
-               └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
-                     │              │              │
-               Sonnet, 12 turns each, 10-call budget
-               3-level zoom + pixel analysis + transcript
-                     │              │              │
-                     └──────────────┼──────────────┘
-                                    │
-                             ┌──────▼──────┐
-                             │  Phase 3:   │
-                             │ SYNTHESIZE  │
-                             └──────┬──────┘
-                                    │
-                             ┌──────▼──────────┐
-                             │video-synthesizer│ Sonnet
-                             │  search-only    │ 8 turns
-                             │  max 5 calls    │
-                             └──────┬──────────┘
-                                    │
-                             Final answer with
-                             timestamps, evidence,
-                             confidence levels
+      Direct answer             ┌──────────────────┐
+      (Haiku, 1-2 turns)       │  video-analyst   │ Sonnet, 20 turns
+      orient + search_all       │  (orchestrator)  │
+      → answer from captions    └────────┬─────────┘
+                                         │
+                                Is this complex?
+                                         │
+                            ┌────────────┴────────────┐
+                            │                         │
+                        SIMPLE                    COMPLEX
+                            │                         │
+                            ▼                         ▼
+                    Turn 1: orient +         ┌──────────────┐
+                    search_all (parallel)    │  Phase 1:    │
+                    Turn 2: inspect_segment  │  DECOMPOSE   │
+                    (parallel per hit)       └──────┬───────┘
+                    Turn 3: verify + answer
+                                             ┌──────▼───────────┐
+                                             │video-decomposer  │
+                                             │Haiku, 8 turns    │
+                                             └──────┬───────────┘
+
+                                             JSON plan with
+                                             sub-questions,
+                                             time ranges,
+                                             dependencies
+                                                    │
+                                             ┌──────▼──────┐
+                                             │  Phase 2:   │
+                                             │  ANALYZE    │
+                                             └──────┬──────┘
+                                                    │
+                                     ┌──────────────┼──────────────┐
+                                     ▼              ▼              ▼
+                              ┌────────────┐ ┌────────────┐ ┌────────────┐
+                              │  segment-  │ │  segment-  │ │  segment-  │
+                              │ analyst #1 │ │ analyst #2 │ │ analyst #3 │
+                              │(background)│ │(background)│ │(background)│
+                              └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
+                                    │              │              │
+                              Sonnet, 12 turns each, 10-call budget
+                              search_all + inspect_segment (parallel)
+                                    │              │              │
+                                    └──────────────┼──────────────┘
+                                                   │
+                                            ┌──────▼──────────┐
+                                            │video-synthesizer│ Sonnet
+                                            │  search-only    │ 8 turns
+                                            │  max 5 calls    │
+                                            └──────┬──────────┘
+                                                   │
+                                            Final answer with
+                                            timestamps, evidence,
+                                            confidence levels
 ```
 
 #### Agent Specifications
 
 | Agent | Model | Max Turns | Tools | Role |
 |-------|-------|:---------:|-------|------|
-| **video-analyst** | Sonnet | 20 | All search + extract + eval + `Task(decomposer, segment-analyst, synthesizer)` | Orchestrator: decides simple vs complex, dispatches sub-agents |
+| **video-triage** | Haiku | 6 | `orient`, `search_all`, search-only + `Task(video-analyst)` | Fast entry point: answers from captions/transcript or escalates to Sonnet |
+| **video-analyst** | Sonnet | 20 | All search + extract + compound + eval + `Task(decomposer, segment-analyst, synthesizer)` | Full analysis with frame inspection; orchestrates sub-agents for complex questions |
 | **video-decomposer** | Haiku | 8 | Search-only (search_video, search_transcript, get_scene_list, get_transcript, discriminative_vqa) | Produces structured JSON decomposition plan with sub-questions and time ranges |
-| **video-segment-analyst** | Sonnet | 12 | All search + extract + all pixel tools + eval (no Task) | Analyzes one temporal region; runs in background for parallelism |
+| **video-segment-analyst** | Sonnet | 12 | All search + extract + compound + all pixel tools + eval (no Task) | Analyzes one temporal region; runs in background for parallelism |
 | **video-synthesizer** | Sonnet | 8 | Search-only (max 5 verification calls) | Aggregates per-segment results; resolves conflicts (visual > transcript) |
 
 #### Search-First Strategy
 
-For both simple and complex questions, the agent follows a consistent search-first methodology:
+Agents use compound tools to maximize parallel tool calls per turn:
 
-1. **Orient** — `get_index_info()` + `get_scene_list()` to understand video structure
-2. **Search** — Field-decomposed queries: `summary` for content, `action` for activities, `visual` for appearances, `temporal` for motion; plus transcript keyword search
-3. **Inspect** — `extract_frames()` with progressive 3-level zoom (480px overview → 720px detail → 1280px high-res)
-4. **Cross-reference** — `get_transcript()` for the relevant time ranges
-5. **Verify** — Screen content overrides transcript; visual confirmation required for all numeric claims
+1. **Turn 1 (parallel)** — `orient()` + `search_all(query, fields, transcript_query)` in the same response
+2. **Turn 2 (parallel)** — `inspect_segment(start, end)` for all top hits simultaneously
+3. **Turn 3** — Verify (screen content overrides transcript) and answer
+
+Results from `orient`, `search_all`, `search_video`, `search_transcript`, `get_transcript`, `get_index_info`, and `get_scene_list` are **cached per video** — repeated calls across agents and turns return instantly without recomputation.
 
 ### Pixel Analysis Tools
 
@@ -764,7 +782,7 @@ kuavi/                          # KUAVi package (standalone)
 ├── loader.py                   # VideoLoader, LoadedVideo, VideoSegment
 ├── scene_detection.py          # V-JEPA 2 / SigLIP2 scene boundary detection
 ├── context.py                  # VideoContext, frame encoding
-├── mcp_server.py               # FastMCP stdio server (27 tools)
+├── mcp_server.py               # FastMCP stdio server (30 tools, result caching)
 ├── captioners.py               # Pluggable captioner backends (Gemini, OpenAI, local)
 ├── probes.py                   # AttentiveProbe, ProbeRegistry (cross-attention classifiers)
 ├── corpus.py                   # CorpusIndex, CorpusIndexer (multi-video indexing)
@@ -773,7 +791,7 @@ kuavi/                          # KUAVi package (standalone)
 └── cli.py                      # CLI: index, search, analyze, corpus
 
 .claude/                        # Claude Code integration
-├── agents/                     # 4 agent definitions
+├── agents/                     # 5 agent definitions
 ├── skills/                     # 8 skill definitions
 ├── hooks/                      # Validation + trace hooks
 ├── rules/                      # Architecture + development docs
@@ -809,7 +827,7 @@ The unified integration plan merged insights from three research papers — [V-J
 - **World model** (WI-11): Temporal coherence scoring and anomaly detection — segments where predicted ≠ actual are flagged as surprising
 - **Corpus indexing** (WI-12): Parallel multi-video indexing with cross-video search via stacked embeddings
 
-Test suite: 755 tests passing across 28 test files.
+Test suite: 780 tests passing across 30 test files.
 
 ---
 
