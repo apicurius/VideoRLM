@@ -803,6 +803,61 @@ def _check_prefetch(
     return None
 
 
+def _precompute_orient(video_id: str) -> None:
+    """Pre-build and cache orient data (index_info + scene_list) at index time.
+
+    Called after indexing or loading so the first orient/get_index_info/get_scene_list
+    call is a cache hit instead of recomputing.
+    """
+    index = _get_active_index(video_id)
+    if index is None:
+        return
+
+    entry = _get_video_entry(video_id)
+    loaded = entry["loaded_video"] if entry else None
+
+    # Build index_info
+    info: dict[str, Any] = {
+        "video_path": _get_active_video_path(video_id),
+        "segments": len(index.segments),
+        "transcript_entries": len(index.transcript),
+        "scene_boundaries": len(index.scene_boundaries),
+        "has_embeddings": index.embeddings is not None,
+        "has_action_embeddings": index.action_embeddings is not None,
+        "has_frame_embeddings": index.frame_embeddings is not None,
+        "has_temporal_embeddings": index.temporal_embeddings is not None,
+        "hierarchy_levels": len(index.segment_hierarchy),
+    }
+    if loaded:
+        info["duration"] = round(loaded.metadata.duration, 2)
+        info["original_fps"] = round(loaded.metadata.original_fps, 2)
+        info["extraction_fps"] = round(loaded.metadata.extraction_fps, 3)
+        info["frames_extracted"] = loaded.metadata.extracted_frame_count
+        info["resolution"] = f"{loaded.metadata.width}x{loaded.metadata.height}"
+    if index.embedding_quality:
+        info["embedding_quality"] = index.embedding_quality
+
+    _cache_put(_cache_key("get_index_info", video_id=video_id), info)
+
+    # Build scene_list
+    scenes = []
+    for i, seg in enumerate(index.segments):
+        scenes.append({
+            "scene_index": i,
+            "start_time": seg["start_time"],
+            "end_time": seg["end_time"],
+            "caption": seg.get("caption", ""),
+            "annotation": seg.get("annotation", {}),
+        })
+    _cache_put(_cache_key("get_scene_list", video_id=video_id), scenes)
+
+    # Build orient (combines both)
+    _cache_put(_cache_key("orient", video_id=video_id), {
+        "index_info": info,
+        "scenes": scenes,
+    })
+
+
 def _track_tool_call(tool_type: str) -> None:
     """Increment usage counters for session stats."""
     import time
@@ -1066,6 +1121,7 @@ def kuavi_index_video(
     }
     _state["active_video"] = video_id
     _cache_clear(video_id)
+    _precompute_orient(video_id)
     _track_tool_call("index")
 
     num_segments = len(index.segments)
@@ -1708,6 +1764,7 @@ def kuavi_load_index(
     }
     _state["active_video"] = vid
     _cache_clear(vid)
+    _precompute_orient(vid)
 
     return {
         "status": "loaded",
