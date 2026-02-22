@@ -136,7 +136,16 @@ For multi-video workflows:
 Use `kuavi_eval(code)` for programmatic analysis:
 - Persistent Python namespace with `np`, `cv2`, and all kuavi tools
 - `llm_query(prompt)` / `llm_query_batched(prompts)` for LLM calls from code
+- `llm_query_with_frames(prompt_text, frames)` — send text + frame images to an LLM. `frames` can be a single frame dict from `extract_frames` or a list of them.
+- `llm_query_with_frames_batched(prompt_texts, frames_list)` — parallel multimodal queries (one prompt+frames pair per entry)
 - Ideal for iteration, counting, and chaining multiple tool calls
+
+### Shard Analysis with Time Ranges
+
+`kuavi_analyze_shards` supports `start_time` and `end_time` to focus on a specific portion of the video. For long videos, always narrow the analysis window rather than analyzing the entire video with a small `max_shards`:
+```
+kuavi_analyze_shards(question="...", start_time=2000, end_time=3000, max_shards=10)
+```
 
 ## Response Format
 

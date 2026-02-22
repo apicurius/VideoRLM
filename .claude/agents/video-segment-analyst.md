@@ -52,6 +52,23 @@ For counting, measuring, or comparing:
 
 Use `kuavi_eval` for programmatic composition of multiple pixel tools.
 
+### Step 4b: Multimodal LLM Analysis (when needed)
+For asking an LLM to describe or read specific frame content:
+- `llm_query_with_frames(prompt_text, frames)` — query LLM with text + frame images. `frames` is a single frame dict or list from `extract_frames`.
+- `llm_query_with_frames_batched(prompt_texts, frames_list)` — parallel multimodal queries.
+
+Example in `kuavi_eval`:
+```python
+frames = extract_frames(10.0, 20.0, fps=2.0, max_frames=5)
+# Single frame query
+result = llm_query_with_frames("What text is visible?", frames[0])
+# Batch query across frames
+results = llm_query_with_frames_batched(
+    ["Read the score" for _ in frames],
+    frames  # one frame per prompt
+)
+```
+
 ### Step 5: Predictive Analysis (when relevant)
 For questions about what happens next or activity classification:
 - `kuavi_anticipate_action(time_point)` to predict next actions within your region

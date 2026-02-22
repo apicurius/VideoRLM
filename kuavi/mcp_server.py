@@ -1484,12 +1484,20 @@ def _build_shard_prompts(
     max_frames_per_segment: int = 3,
     frame_width: int = 480,
     frame_height: int = 360,
+    start_time: float | None = None,
+    end_time: float | None = None,
 ) -> list[list]:
     """Build multimodal shard prompts with text captions and actual keyframes.
 
     Each shard prompt is a list of strings and image dicts suitable for
     ``llm_query()`` or ``llm_query_batched()``.  This mirrors RLM's
     ``shard_prompts`` variable.
+
+    Args:
+        start_time: Optional start of analysis window (seconds). Defaults to
+            the earliest segment start.
+        end_time: Optional end of analysis window (seconds). Defaults to the
+            latest segment end.
     """
     index = _get_active_index()
     if index is None:
@@ -1502,8 +1510,8 @@ def _build_shard_prompts(
     video_path = _get_active_video_path()
     all_starts = [s["start_time"] for s in segments]
     all_ends = [s["end_time"] for s in segments]
-    video_start = min(all_starts)
-    video_end = max(all_ends)
+    video_start = start_time if start_time is not None else min(all_starts)
+    video_end = end_time if end_time is not None else max(all_ends)
 
     # Build shards
     shards: list[list[dict]] = []
@@ -1581,8 +1589,17 @@ def _build_shard_prompts(
     return shard_prompts
 
 
-def _build_shard_info(shard_duration: float = 30.0) -> list[str]:
-    """Build shard descriptions from the current index's segments."""
+def _build_shard_info(
+    shard_duration: float = 30.0,
+    start_time: float | None = None,
+    end_time: float | None = None,
+) -> list[str]:
+    """Build shard descriptions from the current index's segments.
+
+    Args:
+        start_time: Optional start of analysis window (seconds).
+        end_time: Optional end of analysis window (seconds).
+    """
     index = _get_active_index()
     if index is None:
         return ["No video indexed."]
@@ -1593,8 +1610,8 @@ def _build_shard_info(shard_duration: float = 30.0) -> list[str]:
 
     all_starts = [s["start_time"] for s in segments]
     all_ends = [s["end_time"] for s in segments]
-    video_start = min(all_starts)
-    video_end = max(all_ends)
+    video_start = start_time if start_time is not None else min(all_starts)
+    video_end = end_time if end_time is not None else max(all_ends)
 
     descriptions: list[str] = []
     t = video_start
@@ -1621,6 +1638,51 @@ def _build_shard_info(shard_duration: float = 30.0) -> list[str]:
         shard_idx += 1
 
     return descriptions
+
+
+def _llm_query_with_frames(
+    prompt_text: str,
+    frames,
+    backend: str = "gemini",
+    model: str = "gemini-2.5-flash",
+) -> str:
+    """Query LLM with text + frame images.
+
+    ``frames`` can be a single frame dict (from ``extract_frames``) or a list
+    of frame dicts.  Each dict must have ``data`` (base64) and ``mime_type``.
+    """
+    if isinstance(frames, dict):
+        frames = [frames]
+    content: list = [prompt_text] + [
+        f for f in frames if isinstance(f, dict) and "data" in f
+    ]
+    return _call_llm(
+        content, backend, model,
+        role="secondary",
+        _log_context="kuavi_eval:llm_query_with_frames",
+    )
+
+
+def _llm_query_with_frames_batched(
+    prompt_texts: list[str],
+    frames_list: list,
+    backend: str = "gemini",
+    model: str = "gemini-2.5-flash",
+) -> list[str]:
+    """Query LLM with text + frames for multiple prompts in parallel.
+
+    ``frames_list`` is a list of frame inputs (one per prompt).  Each entry
+    can be a single frame dict or a list of frame dicts.
+    """
+    prompts: list = []
+    for text, frames in zip(prompt_texts, frames_list):
+        if isinstance(frames, dict):
+            frames = [frames]
+        content: list = [text] + [
+            f for f in frames if isinstance(f, dict) and "data" in f
+        ]
+        prompts.append(content)
+    return _llm_query_batched(prompts, backend, model)
 
 
 @mcp.tool()
@@ -1675,13 +1737,15 @@ def kuavi_eval(code: str) -> dict[str, Any]:
             "llm_query": lambda prompt, backend="gemini", model="gemini-2.5-flash": _call_llm(
                 prompt, backend, model, role="secondary", _log_context="kuavi_eval:llm_query"
             ),
+            "llm_query_with_frames": _llm_query_with_frames,
+            "llm_query_with_frames_batched": _llm_query_with_frames_batched,
             "llm_query_batched": _llm_query_batched,
             "SHOW_VARS": lambda: {
                 k: type(v).__name__
                 for k, v in _state["eval_namespace"].items()
                 if not k.startswith("_")
             },
-            "get_shard_info": lambda shard_duration=30.0: _build_shard_info(shard_duration),
+            "get_shard_info": lambda shard_duration=30.0, start_time=None, end_time=None: _build_shard_info(shard_duration, start_time, end_time),
             "build_shard_prompts": _build_shard_prompts,
         }
 
@@ -2159,6 +2223,8 @@ def kuavi_analyze_shards(
     frames_per_shard: int = 2,
     backend: str = "gemini",
     model: str = "gemini-2.5-flash",
+    start_time: float | None = None,
+    end_time: float | None = None,
     video_id: str | None = None,
 ) -> dict[str, Any]:
     """Analyze video in parallel temporal shards using an LLM.
@@ -2168,6 +2234,13 @@ def kuavi_analyze_shards(
 
     When include_frames=True (default), keyframes are extracted and included
     in each shard prompt for multimodal analysis.
+
+    Args:
+        start_time: Optional start of analysis window (seconds). Defaults to
+            the earliest segment start. Use this to focus on a specific portion
+            of a long video.
+        end_time: Optional end of analysis window (seconds). Defaults to the
+            latest segment end.
     """
     import concurrent.futures
 
@@ -2187,8 +2260,8 @@ def kuavi_analyze_shards(
     # Determine total time range
     all_starts = [s["start_time"] for s in segments]
     all_ends = [s["end_time"] for s in segments]
-    video_start = min(all_starts)
-    video_end = max(all_ends)
+    video_start = start_time if start_time is not None else min(all_starts)
+    video_end = end_time if end_time is not None else max(all_ends)
 
     # Build temporal shards
     shards: list[dict[str, Any]] = []

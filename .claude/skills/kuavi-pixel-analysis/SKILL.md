@@ -90,19 +90,30 @@ print(f"Foreground coverage: {fg['changed_pct']:.1f}%")
 """)
 ```
 
-## Pattern 6: Parallel LLM Analysis of Frames
+## Pattern 6: Multimodal LLM Analysis of Frames
 
 ```python
-# Ask an LLM to describe specific content in multiple frames
+# Ask an LLM to describe specific content in a single frame
 kuavi_eval("""
 frames = extract_frames(30.0, 40.0, fps=2.0, max_frames=6)
-prompts = []
-for i, f in enumerate(frames):
-    prompts.append(f"What text or numbers are visible in this frame? Be precise.")
-# llm_query_batched sends all prompts in parallel
-descriptions = llm_query_batched(prompts)
+# Single frame — llm_query_with_frames(prompt, frame_or_frames)
+result = llm_query_with_frames("What text or numbers are visible?", frames[0])
+print(result)
+""")
+
+# Batch: ask the LLM about every frame in parallel
+kuavi_eval("""
+prompts = ["What text or numbers are visible in this frame? Be precise."] * len(frames)
+# llm_query_with_frames_batched(prompt_texts, frames_list)
+descriptions = llm_query_with_frames_batched(prompts, frames)
 for i, desc in enumerate(descriptions):
     print(f"Frame {i}: {desc}")
+""")
+
+# You can also pass multiple frames to a single query for comparison:
+kuavi_eval("""
+result = llm_query_with_frames("Compare these two frames — what changed?", [frames[0], frames[-1]])
+print(result)
 """)
 ```
 
@@ -126,6 +137,7 @@ for h in hits:
 
 - Variables persist across `kuavi_eval` calls — set values in one call, use them in the next.
 - Use `SHOW_VARS()` to inspect what's in the namespace.
-- `llm_query(prompt)` for single LLM calls; `llm_query_batched(prompts)` for parallel.
+- `llm_query(prompt)` for single text-only LLM calls; `llm_query_batched(prompts)` for parallel text-only.
+- `llm_query_with_frames(prompt_text, frames)` for multimodal (text + images); `llm_query_with_frames_batched(texts, frames_list)` for parallel multimodal.
 - All pixel tools return dicts with metadata — check the keys before accessing.
 - Keep each eval block focused on one task for clarity.
