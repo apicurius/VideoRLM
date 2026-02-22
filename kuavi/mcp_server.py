@@ -511,6 +511,8 @@ _state: dict[str, Any] = {
     "last_frames": [],  # cache of last extract_frames/zoom_frames result for reference by index
     "llm_clients": {},  # cached LLM clients per backend (avoids per-call reconnection)
     "result_cache": {},  # (tool_name, args_key) -> result; cleared on index/load
+    "frame_prefetch": {},  # (video_id, start, end, fps, w, h, max) -> frames list; filled by search_all
+    "prefetch_futures": {},  # same key -> Future; in-flight prefetch jobs
     "budget": {
         "max_tool_calls": 50,
         "warn_tool_calls": 35,
@@ -613,6 +615,8 @@ def _cache_clear(video_id: str | None = None) -> None:
     """Clear cached results. If video_id given, clear only entries for that video."""
     if video_id is None:
         _state["result_cache"].clear()
+        _state["frame_prefetch"].clear()
+        _state["prefetch_futures"].clear()
     else:
         # Remove entries where the video_id matches in the args
         to_remove = [
@@ -622,6 +626,181 @@ def _cache_clear(video_id: str | None = None) -> None:
         ]
         for k in to_remove:
             del _state["result_cache"][k]
+        # Clear frame prefetch for this video
+        to_remove_pf = [k for k in _state["frame_prefetch"] if k[0] == video_id]
+        for k in to_remove_pf:
+            del _state["frame_prefetch"][k]
+        to_remove_ft = [k for k in _state["prefetch_futures"] if k[0] == video_id]
+        for k in to_remove_ft:
+            del _state["prefetch_futures"][k]
+
+
+# ---------------------------------------------------------------------------
+# Frame prefetch — speculatively decode frames for top search hits
+# ---------------------------------------------------------------------------
+
+# Global executor for prefetch (lives for the process lifetime)
+_prefetch_executor: Any = None
+
+
+def _get_prefetch_executor():
+    """Lazy-init a shared ThreadPoolExecutor for frame prefetch."""
+    global _prefetch_executor
+    if _prefetch_executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _prefetch_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
+    return _prefetch_executor
+
+
+def _prefetch_key(
+    video_id: str, start: float, end: float, fps: float, w: int, h: int, max_frames: int,
+) -> tuple:
+    return (video_id, round(start, 2), round(end, 2), fps, w, h, max_frames)
+
+
+def _do_extract_frames(
+    video_path: str, start_time: float, end_time: float,
+    fps: float, width: int, height: int, max_frames: int,
+) -> list[dict[str, str]]:
+    """Extract frames from video file. Used by both prefetch and kuavi_extract_frames."""
+    import cv2
+
+    from kuavi.context import _encode_frame
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return [{"error": f"Cannot open video: {video_path}"}]
+
+    try:
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / original_fps if original_fps > 0 else 0.0
+
+        start_time = max(0.0, start_time)
+        end_time = min(end_time, duration)
+        if end_time <= start_time:
+            return []
+
+        interval = 1.0 / fps
+        times = []
+        t = start_time
+        while t < end_time:
+            times.append(t)
+            t += interval
+
+        if len(times) > max_frames:
+            step = len(times) / max_frames
+            times = [times[int(i * step)] for i in range(max_frames)]
+
+        frames = []
+        for t in times:
+            frame_idx = int(t * original_fps)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            frame = cv2.resize(frame, (width, height))
+            encoded = _encode_frame(frame, format=".jpg", quality=85)
+            frames.append({
+                "data": encoded["data"],
+                "mime_type": encoded["mime_type"],
+                "timestamp": str(round(t, 2)),
+            })
+        return frames
+    finally:
+        cap.release()
+
+
+def _prefetch_frames_for_results(
+    search_results: dict[str, Any], video_id: str, max_prefetch: int = 3,
+) -> None:
+    """Kick off background frame extraction for top search hits.
+
+    Collects the highest-scoring unique time ranges across all search fields
+    and submits prefetch jobs for them at zoom_level=2 (720x540, 2fps, 5 frames).
+    """
+    video_path = _get_active_video_path(video_id)
+    if video_path is None:
+        return
+
+    # Collect (score, start, end) from all field results
+    scored_ranges: list[tuple[float, float, float]] = []
+    for field_name, field_results in search_results.items():
+        if field_name.startswith("_") or not isinstance(field_results, list):
+            continue
+        for r in field_results:
+            if not isinstance(r, dict) or "error" in r:
+                continue
+            score = r.get("score", 0.0)
+            start = r.get("start_time")
+            end = r.get("end_time")
+            if start is not None and end is not None:
+                scored_ranges.append((score, float(start), float(end)))
+
+    if not scored_ranges:
+        return
+
+    # Deduplicate overlapping ranges, keep top N by score
+    scored_ranges.sort(key=lambda x: x[0], reverse=True)
+    seen: list[tuple[float, float]] = []
+    unique: list[tuple[float, float, float]] = []
+    for score, start, end in scored_ranges:
+        # Skip if this range significantly overlaps an already-selected one
+        overlaps = False
+        for s, e in seen:
+            overlap = min(end, e) - max(start, s)
+            if overlap > 0 and overlap / max(end - start, 1e-6) > 0.5:
+                overlaps = True
+                break
+        if not overlaps:
+            unique.append((score, start, end))
+            seen.append((start, end))
+            if len(unique) >= max_prefetch:
+                break
+
+    # Submit prefetch jobs for zoom_level=2 defaults
+    fps, width, height, max_frames = 2.0, 720, 540, 5
+    executor = _get_prefetch_executor()
+
+    for _score, start, end in unique:
+        pk = _prefetch_key(video_id, start, end, fps, width, height, max_frames)
+        if pk in _state["frame_prefetch"] or pk in _state["prefetch_futures"]:
+            continue  # already prefetched or in-flight
+
+        def _do_prefetch(vp=video_path, s=start, e=end, k=pk):
+            try:
+                frames = _do_extract_frames(vp, s, e, fps, width, height, max_frames)
+                _state["frame_prefetch"][k] = frames
+            except Exception:
+                pass  # prefetch is best-effort
+            finally:
+                _state["prefetch_futures"].pop(k, None)
+
+        future = executor.submit(_do_prefetch)
+        _state["prefetch_futures"][pk] = future
+
+
+def _check_prefetch(
+    video_id: str, start_time: float, end_time: float,
+    fps: float, width: int, height: int, max_frames: int,
+) -> list[dict[str, str]] | None:
+    """Check if frames are available from prefetch. Returns frames or None."""
+    pk = _prefetch_key(video_id, start_time, end_time, fps, width, height, max_frames)
+
+    # Check completed prefetch
+    if pk in _state["frame_prefetch"]:
+        return _state["frame_prefetch"].pop(pk)
+
+    # Check in-flight prefetch — wait briefly for it to complete
+    future = _state["prefetch_futures"].get(pk)
+    if future is not None:
+        try:
+            future.result(timeout=5.0)  # wait up to 5s for in-flight prefetch
+            return _state["frame_prefetch"].pop(pk, None)
+        except Exception:
+            _state["prefetch_futures"].pop(pk, None)
+
+    return None
 
 
 def _track_tool_call(tool_type: str) -> None:
@@ -1294,6 +1473,8 @@ def kuavi_extract_frames(
     """Extract frames from the indexed video as base64 JPEG images.
 
     Returns a list of dicts with 'data' (base64) and 'mime_type' keys.
+    Checks prefetch cache first — if search_all already triggered background
+    extraction for this range, returns instantly.
     """
     video_path = _get_active_video_path(video_id)
     if video_path is None:
@@ -1304,56 +1485,24 @@ def kuavi_extract_frames(
     if gate is not None:
         return [gate]
 
-    import cv2
+    vid = video_id or _state["active_video"]
 
-    from kuavi.context import _encode_frame
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return [{"error": f"Cannot open video: {video_path}"}]
+    # Check prefetch cache
+    prefetched = _check_prefetch(vid, start_time, end_time, fps, width, height, max_frames)
+    if prefetched is not None:
+        _track_response_tokens(prefetched)
+        if warning and prefetched:
+            prefetched[-1]["_budget_warning"] = warning
+        _state["last_frames"] = prefetched
+        return prefetched
 
-    try:
-        original_fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = total_frames / original_fps if original_fps > 0 else 0.0
+    frames = _do_extract_frames(video_path, start_time, end_time, fps, width, height, max_frames)
 
-        start_time = max(0.0, start_time)
-        end_time = min(end_time, duration)
-        if end_time <= start_time:
-            return []
-
-        interval = 1.0 / fps
-        times = []
-        t = start_time
-        while t < end_time:
-            times.append(t)
-            t += interval
-
-        if len(times) > max_frames:
-            step = len(times) / max_frames
-            times = [times[int(i * step)] for i in range(max_frames)]
-
-        frames = []
-        for t in times:
-            frame_idx = int(t * original_fps)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            frame = cv2.resize(frame, (width, height))
-            encoded = _encode_frame(frame, format=".jpg", quality=85)
-            frames.append({
-                "data": encoded["data"],
-                "mime_type": encoded["mime_type"],
-                "timestamp": str(round(t, 2)),
-            })
-
-        _track_response_tokens(frames)
-        if warning and frames:
-            frames[-1]["_budget_warning"] = warning
-        _state["last_frames"] = frames  # cache for pixel tool reference by index
-        return frames
-    finally:
-        cap.release()
+    _track_response_tokens(frames)
+    if warning and frames:
+        frames[-1]["_budget_warning"] = warning
+    _state["last_frames"] = frames  # cache for pixel tool reference by index
+    return frames
 
 
 @mcp.tool()
@@ -1432,6 +1581,8 @@ def kuavi_get_session_stats() -> dict[str, Any]:
         "elapsed_seconds": elapsed,
         "videos_loaded": len(_state["videos"]),
         "cache_entries": len(_state["result_cache"]),
+        "prefetch_ready": len(_state["frame_prefetch"]),
+        "prefetch_in_flight": len(_state["prefetch_futures"]),
         "budget": budget_info,
     }
 
@@ -2741,6 +2892,10 @@ def kuavi_search_all(
 
     _cache_put(ck, results)
     _track_response_tokens(results)
+
+    # Prefetch frames for top search hits in the background
+    _prefetch_frames_for_results(results, vid)
+
     if warning:
         results["_budget_warning"] = warning
     return results
