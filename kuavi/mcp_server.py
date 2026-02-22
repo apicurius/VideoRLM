@@ -510,6 +510,7 @@ _state: dict[str, Any] = {
     },
     "last_frames": [],  # cache of last extract_frames/zoom_frames result for reference by index
     "llm_clients": {},  # cached LLM clients per backend (avoids per-call reconnection)
+    "result_cache": {},  # (tool_name, args_key) -> result; cleared on index/load
     "budget": {
         "max_tool_calls": 50,
         "warn_tool_calls": 35,
@@ -580,6 +581,47 @@ def _resolve_image(image: Any) -> dict[str, Any]:
         f"Invalid image argument: expected an image dict with 'data' and 'mime_type' keys, "
         f"or a frame index (0–N) referencing the last extract_frames result. Got: {type(image).__name__}"
     )
+
+
+def _cache_key(tool_name: str, **kwargs: Any) -> tuple:
+    """Build a hashable cache key from tool name and arguments."""
+    # Sort kwargs and convert lists to tuples for hashability
+    def _make_hashable(v: Any) -> Any:
+        if isinstance(v, list):
+            return tuple(_make_hashable(i) for i in v)
+        if isinstance(v, dict):
+            return tuple(sorted((k, _make_hashable(val)) for k, val in v.items()))
+        return v
+
+    return (tool_name, tuple(sorted((k, _make_hashable(v)) for k, v in kwargs.items())))
+
+
+def _cache_get(key: tuple) -> tuple[bool, Any]:
+    """Look up a cached result. Returns (hit, result)."""
+    cache = _state["result_cache"]
+    if key in cache:
+        return True, cache[key]
+    return False, None
+
+
+def _cache_put(key: tuple, result: Any) -> None:
+    """Store a result in the cache."""
+    _state["result_cache"][key] = result
+
+
+def _cache_clear(video_id: str | None = None) -> None:
+    """Clear cached results. If video_id given, clear only entries for that video."""
+    if video_id is None:
+        _state["result_cache"].clear()
+    else:
+        # Remove entries where the video_id matches in the args
+        to_remove = [
+            k for k in _state["result_cache"]
+            if any(v == video_id for _, v in k[1]) or  # explicit video_id in args
+            (not any(kk == "video_id" for kk, _ in k[1]))  # no video_id arg (uses active)
+        ]
+        for k in to_remove:
+            del _state["result_cache"][k]
 
 
 def _track_tool_call(tool_type: str) -> None:
@@ -844,6 +886,7 @@ def kuavi_index_video(
         "video_path": video_path,
     }
     _state["active_video"] = video_id
+    _cache_clear(video_id)
     _track_tool_call("index")
 
     num_segments = len(index.segments)
@@ -905,6 +948,18 @@ def kuavi_search_video(
     if gate is not None:
         return [gate]
 
+    vid = video_id or _state["active_video"]
+    ck = _cache_key(
+        "search_video", query=query, top_k=top_k, field=field,
+        diverse=diverse, cluster_diverse=cluster_diverse,
+        exclude_non_action=exclude_non_action, level=level, video_id=vid,
+    )
+    hit, cached = _cache_get(ck)
+    if hit:
+        if warning and cached:
+            cached[-1]["_budget_warning"] = warning
+        return cached
+
     from kuavi.search import make_search_video
 
     tool = make_search_video(index)
@@ -917,6 +972,7 @@ def kuavi_search_video(
         exclude_non_action=exclude_non_action,
         level=level,
     )
+    _cache_put(ck, results)
     _track_response_tokens(results)
     if warning and results:
         results[-1]["_budget_warning"] = warning
@@ -938,10 +994,19 @@ def kuavi_search_transcript(
     if gate is not None:
         return [gate]
 
+    vid = video_id or _state["active_video"]
+    ck = _cache_key("search_transcript", query=query, video_id=vid)
+    hit, cached = _cache_get(ck)
+    if hit:
+        if warning and cached:
+            cached[-1]["_budget_warning"] = warning
+        return cached
+
     from kuavi.search import make_search_transcript
 
     tool = make_search_transcript(index)
     results = tool["tool"](query=query)
+    _cache_put(ck, results)
     _track_response_tokens(results)
     if warning and results:
         results[-1]["_budget_warning"] = warning
@@ -964,10 +1029,19 @@ def kuavi_get_transcript(
     if gate is not None:
         return gate["message"]
 
+    vid = video_id or _state["active_video"]
+    ck = _cache_key("get_transcript", start_time=start_time, end_time=end_time, video_id=vid)
+    hit, cached = _cache_get(ck)
+    if hit:
+        if warning:
+            cached = cached + f"\n\n[WARNING: {warning}]"
+        return cached
+
     from kuavi.search import make_get_transcript
 
     tool = make_get_transcript(index)
     result = tool["tool"](start_time=start_time, end_time=end_time)
+    _cache_put(ck, result)
     _track_response_tokens(result)
     if warning:
         result = result + f"\n\n[WARNING: {warning}]"
@@ -986,10 +1060,19 @@ def kuavi_get_scene_list(video_id: str | None = None) -> list[dict[str, Any]]:
     if gate is not None:
         return [gate]
 
+    vid = video_id or _state["active_video"]
+    ck = _cache_key("get_scene_list", video_id=vid)
+    hit, cached = _cache_get(ck)
+    if hit:
+        if warning and cached:
+            cached[-1]["_budget_warning"] = warning
+        return cached
+
     from kuavi.search import make_get_scene_list
 
     tool = make_get_scene_list(index)
     results = tool["tool"]()
+    _cache_put(ck, results)
     _track_response_tokens(results)
     if warning and results:
         results[-1]["_budget_warning"] = warning
@@ -1282,6 +1365,12 @@ def kuavi_get_index_info(video_id: str | None = None) -> dict[str, Any]:
 
     _track_tool_call("info")
 
+    vid = video_id or _state["active_video"]
+    ck = _cache_key("get_index_info", video_id=vid)
+    hit, cached = _cache_get(ck)
+    if hit:
+        return cached
+
     entry = _get_video_entry(video_id)
     loaded = entry["loaded_video"] if entry else None
 
@@ -1307,6 +1396,7 @@ def kuavi_get_index_info(video_id: str | None = None) -> dict[str, Any]:
     if index.embedding_quality:
         info["embedding_quality"] = index.embedding_quality
 
+    _cache_put(ck, info)
     return info
 
 
@@ -1341,6 +1431,7 @@ def kuavi_get_session_stats() -> dict[str, Any]:
         "searches_performed": stats["searches_performed"],
         "elapsed_seconds": elapsed,
         "videos_loaded": len(_state["videos"]),
+        "cache_entries": len(_state["result_cache"]),
         "budget": budget_info,
     }
 
@@ -1465,6 +1556,7 @@ def kuavi_load_index(
         "video_path": None,
     }
     _state["active_video"] = vid
+    _cache_clear(vid)
 
     return {
         "status": "loaded",
@@ -2540,6 +2632,7 @@ def kuavi_orient(video_id: str | None = None) -> dict[str, Any]:
 
     Combines kuavi_get_index_info + kuavi_get_scene_list into a single response.
     Use this as the first call when starting video analysis.
+    Results are cached per video — repeated calls return instantly.
     """
     index = _get_active_index(video_id)
     if index is None:
@@ -2550,7 +2643,14 @@ def kuavi_orient(video_id: str | None = None) -> dict[str, Any]:
     if gate is not None:
         return gate
 
-    # Reuse existing tool logic
+    vid = video_id or _state["active_video"]
+    ck = _cache_key("orient", video_id=vid)
+    hit, cached = _cache_get(ck)
+    if hit:
+        if warning:
+            cached["_budget_warning"] = warning
+        return cached
+
     index_info = kuavi_get_index_info(video_id=video_id)
     scene_list = kuavi_get_scene_list(video_id=video_id)
 
@@ -2558,6 +2658,7 @@ def kuavi_orient(video_id: str | None = None) -> dict[str, Any]:
         "index_info": index_info,
         "scenes": scene_list,
     }
+    _cache_put(ck, result)
     if warning:
         result["_budget_warning"] = warning
     return result
@@ -2575,7 +2676,8 @@ def kuavi_search_all(
     """Search video across multiple fields and transcript in one call.
 
     Runs all field searches in parallel via ThreadPoolExecutor.
-    Returns results grouped by field name.
+    Returns results grouped by field name. Results are cached — repeated
+    calls with the same parameters return instantly.
 
     Args:
         query: Semantic search query for video fields.
@@ -2597,6 +2699,17 @@ def kuavi_search_all(
 
     if fields is None:
         fields = ["summary", "action", "visual"]
+
+    vid = video_id or _state["active_video"]
+    ck = _cache_key(
+        "search_all", query=query, fields=fields,
+        transcript_query=transcript_query, top_k=top_k, level=level, video_id=vid,
+    )
+    hit, cached = _cache_get(ck)
+    if hit:
+        if warning:
+            cached["_budget_warning"] = warning
+        return cached
 
     results: dict[str, Any] = {}
     futures = {}
@@ -2626,6 +2739,7 @@ def kuavi_search_all(
             except Exception as e:
                 results[field_name] = [{"error": str(e)}]
 
+    _cache_put(ck, results)
     _track_response_tokens(results)
     if warning:
         results["_budget_warning"] = warning
