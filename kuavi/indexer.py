@@ -148,6 +148,7 @@ class VideoIndexer:
         hierarchical: bool = False,
         scene_model: str | None = None,
         scene_clip_size: int = 16,
+        scene_stride: int = 8,
         scene_model_preset: str | None = None,
     ):
         from kuavi.types import VJEPA2_PRESETS
@@ -183,6 +184,7 @@ class VideoIndexer:
             self._scene_model_name = scene_model
             self._scene_clip_size = scene_clip_size
             self._scene_embed_dim = 1024  # default ViT-L
+        self._scene_stride = scene_stride
 
     # ------------------------------------------------------------------
     # Lazy model loading
@@ -295,6 +297,8 @@ class VideoIndexer:
         refine_rounds: int = 3,
         mode: str = "full",
         store_feature_maps: bool = False,
+        overlapping_vjepa: bool = False,
+        semantic_dedup: bool = False,
     ) -> VideoIndex:
         """Build a full searchable index from a loaded video.
 
@@ -349,8 +353,40 @@ class VideoIndexer:
         vjepa_clip_embeddings: np.ndarray | None = None
         vjepa_clip_timestamps: list[float] | None = None
         vjepa_clip_feature_maps: list[np.ndarray] | None = None
-        if self._scene_model_name:
-            # V-JEPA 2 clip-level scene detection
+        if self._scene_model_name and overlapping_vjepa:
+            # Overlapping V-JEPA 2 windows with per-frame averaging
+            from kuavi.scene_detection import detect_scenes_perframe
+
+            self._ensure_scene_model()
+            logger.info(
+                "[pipeline] V-JEPA 2: detecting scenes (overlapping windows, stride=%d)",
+                self._scene_stride,
+            )
+            per_frame_embs, _ = self._encode_frames_overlapping_vjepa(
+                frames,
+                timestamps,
+                clip_size=self._scene_clip_size,
+                stride=self._scene_stride,
+            )
+
+            if self._hierarchical:
+                levels = []
+                for thresh, min_dur in zip((0.10, 0.20, 0.35), (0.5, 2.0, 4.0)):
+                    scenes_level = detect_scenes_perframe(
+                        per_frame_embs, timestamps, threshold=thresh, min_duration=min_dur
+                    )
+                    levels.append(scenes_level)
+                hierarchy_result = {"levels": levels}
+                scenes = hierarchy_result["levels"][0]
+            else:
+                scenes = detect_scenes_perframe(per_frame_embs, timestamps, threshold=0.20)
+
+            # Store per-frame embeddings as temporal embeddings (segment-averaged later)
+            vjepa_clip_embeddings = per_frame_embs
+            vjepa_clip_timestamps = timestamps
+            logger.info("[pipeline] V-JEPA 2 (overlapping): %d scenes detected", len(scenes))
+        elif self._scene_model_name:
+            # V-JEPA 2 clip-level scene detection (non-overlapping, default)
             self._ensure_scene_model()
             logger.info("[pipeline] V-JEPA 2: detecting scenes")
             clips, clip_timestamps = self._group_frames_into_clips(
@@ -599,6 +635,14 @@ class VideoIndexer:
 
         quality = self._check_embedding_quality(embeddings, label="caption")
 
+        # 7b2. Semantic deduplication via k-means clustering (optional)
+        if semantic_dedup:
+            self._semantic_deduplicate(
+                segment_infos,
+                embeddings,
+                action_embeddings=action_embeddings,
+            )
+
         # 7c. Embed representative frame per segment for visual search
         rep_frames = []
         for seg in segment_infos:
@@ -831,6 +875,104 @@ class VideoIndexer:
                 len(segments),
                 threshold,
             )
+
+    def _semantic_deduplicate(
+        self,
+        segment_infos: list[dict],
+        embeddings: np.ndarray | None,
+        action_embeddings: np.ndarray | None = None,
+        n_clusters: int | None = None,
+        similarity_threshold: float = 0.92,
+    ) -> np.ndarray | None:
+        """Semantic deduplication via k-means clustering.
+
+        Clusters segments by embedding similarity and marks near-duplicates
+        within each cluster. Also stores cluster_id on each segment for
+        downstream cluster-aware search diversity.
+
+        Args:
+            segment_infos: List of segment dicts (modified in place).
+            embeddings: (N, D) caption embeddings. If None, skips dedup.
+            action_embeddings: Optional (N, D) action embeddings for combined clustering.
+            n_clusters: Number of clusters. If None, auto-computed as
+                max(2, len(segments) // 5).
+            similarity_threshold: Cosine similarity above which segments in the
+                same cluster are considered duplicates (default 0.92).
+
+        Returns:
+            cluster_labels array of shape (N,) or None if skipped.
+        """
+        if embeddings is None or len(embeddings) < 3:
+            return None
+
+        from sklearn.cluster import KMeans
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        n = len(embeddings)
+        if n_clusters is None:
+            n_clusters = max(2, n // 5)
+        n_clusters = min(n_clusters, n)
+
+        # Combine embeddings if action embeddings available
+        if action_embeddings is not None and len(action_embeddings) == n:
+            combined = np.concatenate([embeddings, action_embeddings], axis=1)
+            norms = np.linalg.norm(combined, axis=1, keepdims=True)
+            combined = combined / np.maximum(norms, 1e-10)
+        else:
+            combined = embeddings
+
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(combined)
+
+        # Assign cluster_id to each segment
+        for i, seg in enumerate(segment_infos):
+            seg["cluster_id"] = int(labels[i])
+
+        # Within each cluster, mark duplicates (keep highest-quality representative)
+        clusters: dict[int, list[int]] = {}
+        for i, label in enumerate(labels):
+            clusters.setdefault(int(label), []).append(i)
+
+        dedup_count = 0
+        for cluster_indices in clusters.values():
+            if len(cluster_indices) < 2:
+                continue
+
+            cluster_embs = embeddings[cluster_indices]
+            sim_matrix = cosine_similarity(cluster_embs)
+
+            # Sort by quality score (descending), keep best as representative
+            scored = [
+                (idx, segment_infos[idx].get("quality_score", 0.5)) for idx in cluster_indices
+            ]
+            scored.sort(key=lambda x: x[1], reverse=True)
+
+            kept: set[int] = set()
+            for idx, _score in scored:
+                is_dup = False
+                local_pos = cluster_indices.index(idx)
+                for kept_idx in kept:
+                    kept_local = cluster_indices.index(kept_idx)
+                    if sim_matrix[local_pos, kept_local] > similarity_threshold:
+                        is_dup = True
+                        segment_infos[idx]["is_semantic_duplicate"] = True
+                        segment_infos[idx]["_semantic_dup_of"] = kept_idx
+                        dedup_count += 1
+                        break
+                if not is_dup:
+                    kept.add(idx)
+
+        if dedup_count > 0:
+            logger.info(
+                "Semantic dedup: %d/%d segments marked as duplicates"
+                " (threshold=%.2f, clusters=%d)",
+                dedup_count,
+                n,
+                similarity_threshold,
+                n_clusters,
+            )
+
+        return labels
 
     def _filter_edge_frames(self, seg_frames: list, threshold: float = 0.5) -> list:
         """Filter visually dissimilar edge frames from a segment."""
@@ -2040,6 +2182,74 @@ class VideoIndexer:
             mid = min(i + len(clip) // 2, len(frames) - 1)
             clip_timestamps.append(timestamps[mid])
         return clips, clip_timestamps
+
+    def _encode_frames_overlapping_vjepa(
+        self,
+        frames: list[np.ndarray],
+        timestamps: list[float],
+        clip_size: int = 64,
+        stride: int = 8,
+    ) -> tuple[np.ndarray, list[float]]:
+        """Encode frames using overlapping V-JEPA 2 windows with per-frame averaging.
+
+        Each frame appears in up to clip_size/stride windows. The final per-frame
+        embedding is the L2-normalized average of all window embeddings containing
+        that frame.
+
+        Args:
+            frames: BGR numpy arrays.
+            timestamps: Per-frame timestamps in seconds.
+            clip_size: Number of frames per V-JEPA 2 window (default 64).
+            stride: Window stride in frames (default 8).
+
+        Returns:
+            Tuple of (per_frame_embeddings, timestamps) where per_frame_embeddings
+            has shape (N_frames, D) — one embedding per frame.
+        """
+        n = len(frames)
+        if n == 0:
+            return np.empty((0, self._scene_embed_dim), dtype=np.float32), []
+
+        # Build overlapping windows
+        windows = []
+        window_frame_ranges = []  # (start_idx, end_idx) for each window
+        for start in range(0, n, stride):
+            end = min(start + clip_size, n)
+            if end - start < 2:  # skip tiny windows
+                continue
+            windows.append(frames[start:end])
+            window_frame_ranges.append((start, end))
+
+        if not windows:
+            # Fallback: single window with all frames
+            windows = [frames]
+            window_frame_ranges = [(0, n)]
+
+        # Encode all windows via _encode_clips_vjepa
+        clip_embeddings = self._encode_clips_vjepa(windows)  # (N_windows, D)
+
+        # Per-frame averaging: accumulate embeddings for each frame
+        D = clip_embeddings.shape[1]
+        frame_emb_sum = np.zeros((n, D), dtype=np.float64)
+        frame_emb_count = np.zeros(n, dtype=np.float64)
+
+        for w_idx, (start, end) in enumerate(window_frame_ranges):
+            for f_idx in range(start, end):
+                frame_emb_sum[f_idx] += clip_embeddings[w_idx]
+                frame_emb_count[f_idx] += 1.0
+
+        # Average and L2-normalize
+        mask = frame_emb_count > 0
+        per_frame = np.zeros((n, D), dtype=np.float32)
+        per_frame[mask] = (frame_emb_sum[mask] / frame_emb_count[mask, np.newaxis]).astype(
+            np.float32
+        )
+
+        norms = np.linalg.norm(per_frame, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-10)
+        per_frame = per_frame / norms
+
+        return per_frame, timestamps
 
     def _get_transcript(
         self,

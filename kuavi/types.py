@@ -46,6 +46,7 @@ class KUAViConfig:
         resize: Optional (width, height) to resize extracted frames.
         hierarchical: Enable multi-level scene hierarchy.
         scene_clip_size: Number of frames per V-JEPA 2 clip.
+        scene_stride: Stride for overlapping V-JEPA 2 windows (used when overlapping_vjepa=True).
     """
 
     embedding_model: str = "google/siglip2-base-patch16-256"
@@ -60,5 +61,6 @@ class KUAViConfig:
     resize: tuple[int, int] | None = None
     hierarchical: bool = False
     scene_clip_size: int = 16
+    scene_stride: int = 8
     scene_model_preset: str | None = None
     caption_preset: str | None = None

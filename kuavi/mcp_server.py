@@ -728,6 +728,8 @@ def kuavi_index_video(
     mode: str = "full",
     caption_preset: str | None = None,
     store_feature_maps: bool = False,
+    overlapping_vjepa: bool = False,
+    semantic_dedup: bool = False,
 ) -> dict[str, Any]:
     """Index a video file for search and analysis.
 
@@ -829,6 +831,8 @@ def kuavi_index_video(
         transcript_path=transcript_path,
         mode=mode,
         store_feature_maps=store_feature_maps,
+        overlapping_vjepa=overlapping_vjepa,
+        semantic_dedup=semantic_dedup,
     )
 
     video_id = Path(video_path).stem

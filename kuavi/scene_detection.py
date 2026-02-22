@@ -91,6 +91,43 @@ def _detect_scenes_embedding(
     return scenes
 
 
+def detect_scenes_perframe(
+    per_frame_embeddings: np.ndarray,
+    timestamps: list[float],
+    threshold: float = 0.20,
+    min_duration: float = 4.0,
+) -> list[tuple[float, float]]:
+    """Detect scene boundaries from pre-computed per-frame embeddings.
+
+    Unlike detect_scenes() which calls an embed_fn, this takes pre-computed
+    embeddings directly. Used with overlapping V-JEPA 2 windows which produce
+    per-frame averaged embeddings.
+
+    Args:
+        per_frame_embeddings: (N_frames, D) array, already L2-normalized.
+        timestamps: Per-frame timestamps (same length as per_frame_embeddings).
+        threshold: Ward clustering distance threshold. Default 0.20 (lower than
+            standard 0.30 because overlapping windows produce smoother embeddings).
+        min_duration: Minimum scene duration in seconds.
+
+    Returns:
+        List of (start_time, end_time) tuples.
+    """
+    n = len(per_frame_embeddings)
+    if n == 0:
+        return []
+    if n == 1:
+        return [(timestamps[0], timestamps[0])]
+
+    def _passthrough_embed_fn(_frames):
+        return per_frame_embeddings
+
+    dummy_frames = [None] * n
+    return _detect_scenes_embedding(
+        dummy_frames, timestamps, _passthrough_embed_fn, threshold, min_duration
+    )
+
+
 def detect_scenes_hierarchical(
     frames: list[np.ndarray],
     timestamps: list[float],

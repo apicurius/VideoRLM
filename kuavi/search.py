@@ -85,6 +85,34 @@ def _mmr_rerank(
     return [int(candidate_indices[i]) for i in selected]
 
 
+def _round_robin_from_clusters(
+    clusters: dict[int, list[int]],
+    scores: np.ndarray,
+    top_k: int,
+) -> list[int]:
+    """Round-robin selection from clusters sorted by best score per cluster."""
+    for label in clusters:
+        clusters[label].sort(key=lambda idx: scores[idx], reverse=True)
+    cluster_keys = sorted(
+        clusters.keys(), key=lambda k: scores[clusters[k][0]], reverse=True
+    )
+    cluster_ptrs = {k: 0 for k in cluster_keys}
+    top_indices: list[int] = []
+    while len(top_indices) < top_k:
+        added_any = False
+        for label in cluster_keys:
+            if len(top_indices) >= top_k:
+                break
+            ptr = cluster_ptrs[label]
+            if ptr < len(clusters[label]):
+                top_indices.append(clusters[label][ptr])
+                cluster_ptrs[label] = ptr + 1
+                added_any = True
+        if not added_any:
+            break
+    return top_indices
+
+
 def make_search_video(index: VideoIndex) -> dict[str, Any]:
     """Semantic search over video segment embeddings."""
     from sklearn.metrics.pairwise import cosine_similarity
@@ -153,7 +181,7 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
 
                 scores = scores.copy()
                 for i, seg in enumerate(index.segments):
-                    if seg.get("is_duplicate"):
+                    if seg.get("is_duplicate") or seg.get("is_semantic_duplicate"):
                         scores[i] = -np.inf
 
                 top_indices = list(np.argsort(scores)[::-1][:top_k])
@@ -192,7 +220,7 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
 
                 scores = scores.copy()
                 for i, seg in enumerate(index.segments):
-                    if seg.get("is_duplicate"):
+                    if seg.get("is_duplicate") or seg.get("is_semantic_duplicate"):
                         scores[i] = -np.inf
 
                 top_indices = list(np.argsort(scores)[::-1][:top_k])
@@ -268,9 +296,6 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                     scores[i] = -np.inf
 
             if cluster_diverse and top_k > 2:
-                from sklearn.cluster import KMeans
-
-                active_matrix = summary_emb if summary_emb is not None else frame_emb
                 valid_mask = scores > -np.inf
                 valid_indices_arr = np.where(valid_mask)[0]
                 n_valid = len(valid_indices_arr)
@@ -279,34 +304,26 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                     top_indices = list(
                         valid_indices_arr[np.argsort(scores[valid_indices_arr])[::-1]]
                     )
+                elif all("cluster_id" in index.segments[vi] for vi in valid_indices_arr):
+                    # Use pre-computed cluster_ids from _semantic_deduplicate
+                    clusters: dict[int, list[int]] = {}
+                    for vi in valid_indices_arr:
+                        cid = index.segments[vi].get("cluster_id", 0)
+                        clusters.setdefault(int(cid), []).append(int(vi))
+                    top_indices = _round_robin_from_clusters(clusters, scores, top_k)
                 else:
+                    from sklearn.cluster import KMeans
+
+                    active_matrix = summary_emb if summary_emb is not None else frame_emb
                     k = min(top_k, n_valid)
                     valid_embs = active_matrix[valid_indices_arr]
                     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
                     labels = kmeans.fit_predict(valid_embs)
 
-                    clusters: dict[int, list[int]] = {}
+                    clusters = {}
                     for vi, label in zip(valid_indices_arr, labels, strict=False):
                         clusters.setdefault(int(label), []).append(int(vi))
-                    for label in clusters:
-                        clusters[label].sort(key=lambda idx: scores[idx], reverse=True)
-                    top_indices: list[int] = []
-                    cluster_keys = sorted(
-                        clusters.keys(), key=lambda k: scores[clusters[k][0]], reverse=True
-                    )
-                    cluster_ptrs = {k: 0 for k in cluster_keys}
-                    while len(top_indices) < top_k:
-                        added_any = False
-                        for label in cluster_keys:
-                            if len(top_indices) >= top_k:
-                                break
-                            ptr = cluster_ptrs[label]
-                            if ptr < len(clusters[label]):
-                                top_indices.append(clusters[label][ptr])
-                                cluster_ptrs[label] = ptr + 1
-                                added_any = True
-                        if not added_any:
-                            break
+                    top_indices = _round_robin_from_clusters(clusters, scores, top_k)
             elif diverse and top_k > 1:
                 n_candidates = min(top_k * 3, len(scores))
                 candidate_indices = np.argsort(scores)[::-1][:n_candidates]
@@ -361,49 +378,36 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
 
         scores = scores.copy()
         for i, seg in enumerate(index.segments):
-            if seg.get("is_duplicate"):
+            if seg.get("is_duplicate") or seg.get("is_semantic_duplicate"):
                 scores[i] = -np.inf
 
         if cluster_diverse and top_k > 2:
-            from sklearn.cluster import KMeans
-
-            active_matrix = matrices[0]
             valid_mask = scores > -np.inf
             valid_indices = np.where(valid_mask)[0]
             n_valid = len(valid_indices)
 
             if n_valid <= top_k:
                 top_indices = list(valid_indices[np.argsort(scores[valid_indices])[::-1]])
+            elif all("cluster_id" in index.segments[vi] for vi in valid_indices):
+                # Use pre-computed cluster_ids from _semantic_deduplicate
+                clusters: dict[int, list[int]] = {}
+                for vi in valid_indices:
+                    cid = index.segments[vi].get("cluster_id", 0)
+                    clusters.setdefault(int(cid), []).append(int(vi))
+                top_indices = _round_robin_from_clusters(clusters, scores, top_k)
             else:
+                from sklearn.cluster import KMeans
+
+                active_matrix = matrices[0]
                 k = min(top_k, n_valid)
                 valid_embs = active_matrix[valid_indices]
                 kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
                 labels = kmeans.fit_predict(valid_embs)
 
-                clusters: dict[int, list[int]] = {}
+                clusters = {}
                 for vi, label in zip(valid_indices, labels, strict=False):
                     clusters.setdefault(int(label), []).append(int(vi))
-
-                for label in clusters:
-                    clusters[label].sort(key=lambda idx: scores[idx], reverse=True)
-
-                top_indices: list[int] = []
-                cluster_keys = sorted(
-                    clusters.keys(), key=lambda k: scores[clusters[k][0]], reverse=True
-                )
-                cluster_ptrs = {k: 0 for k in cluster_keys}
-                while len(top_indices) < top_k:
-                    added_any = False
-                    for label in cluster_keys:
-                        if len(top_indices) >= top_k:
-                            break
-                        ptr = cluster_ptrs[label]
-                        if ptr < len(clusters[label]):
-                            top_indices.append(clusters[label][ptr])
-                            cluster_ptrs[label] = ptr + 1
-                            added_any = True
-                    if not added_any:
-                        break
+                top_indices = _round_robin_from_clusters(clusters, scores, top_k)
         elif diverse and top_k > 1:
             n_candidates = min(top_k * 3, len(scores))
             candidate_indices = np.argsort(scores)[::-1][:n_candidates]
