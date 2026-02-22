@@ -56,7 +56,7 @@ def cmd_index(args: argparse.Namespace) -> None:
         "FPS": f"{fps:.2f}" + (" (auto)" if args.auto_fps else ""),
         "Embedding Model": args.embedding_model.split("/")[-1],
         "Scene Model": scene_model.split("/")[-1] if scene_model else "disabled",
-        "Whisper": args.whisper_model,
+        "ASR": args.asr_model,
         "Cache": args.cache_dir or "none",
     })
 
@@ -83,7 +83,7 @@ def cmd_index(args: argparse.Namespace) -> None:
     )
     index = indexer.index_video(
         loaded_video,
-        whisper_model=args.whisper_model,
+        asr_model=args.asr_model,
     )
     index_time = time.time() - t0
     printer.print_step_done("Indexing complete", elapsed=index_time)
@@ -340,7 +340,7 @@ def main() -> None:
         help="Separate text embedding model"
     )
     p_index.add_argument("--no-text-embedding", action="store_true")
-    p_index.add_argument("--whisper-model", default="base", help="Whisper ASR model size")
+    p_index.add_argument("--asr-model", default="Qwen/Qwen3-ASR-1.7B", help="Qwen3-ASR model name")
     p_index.add_argument("--cache-dir", default=None, help="Cache directory")
 
     # --- search ---

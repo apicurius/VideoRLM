@@ -123,7 +123,7 @@ class VideoIndexer:
     """Build a searchable :class:`VideoIndex` from a loaded video.
 
     Handles scene detection, optional captioning, sentence-transformer embedding,
-    and Whisper-based ASR transcription.
+    and Qwen3-ASR-based speech transcription.
 
     Args:
         embedding_model: HuggingFace model id for sentence-transformers.
@@ -269,7 +269,7 @@ class VideoIndexer:
         caption_fn: Callable | None = None,
         frame_caption_fn: Callable | None = None,
         refine_fn: Callable | None = None,
-        whisper_model: str = "base",
+        asr_model: str = "Qwen/Qwen3-ASR-1.7B",
         transcript_path: str | None = None,
         refine_rounds: int = 3,
     ) -> VideoIndex:
@@ -309,9 +309,9 @@ class VideoIndexer:
             refine_fn: Optional function ``(draft: str, context: str) -> str``
                 used for Self-Refine.  When provided, annotations are iteratively
                 refined for 3 rounds using neighbor and transcript context.
-            whisper_model: Faster-whisper model size to use for ASR.
+            asr_model: Qwen3-ASR model name for speech transcription.
             transcript_path: Path to a pre-existing transcript JSON/SRT file.
-                When provided, Whisper ASR is skipped.
+                When provided, ASR is skipped.
 
         Returns:
             A :class:`VideoIndex` ready for use with the search-tool factories in
@@ -403,14 +403,14 @@ class VideoIndexer:
         else:
             segment_infos = self._segments_from_scenes(scenes, frames, timestamps)
 
-        # 4. Transcript (Whisper ASR or pre-existing file) — run before captioning
+        # 4. Transcript (Qwen3-ASR or pre-existing file) — run before captioning
         #    so ASR context can be injected into caption prompts
         transcript = self._get_transcript(
             loaded_video.metadata.path,
-            whisper_model=whisper_model,
+            asr_model=asr_model,
             transcript_path=transcript_path,
         )
-        logger.info("[pipeline] FastWhisper: %d transcript segments", len(transcript))
+        logger.info("[pipeline] Qwen3-ASR: %d transcript segments", len(transcript))
 
         # 4b. Pre-captioning dedup: identify visually similar segments
         #     and only caption representatives, propagating results afterward.
@@ -1691,14 +1691,14 @@ class VideoIndexer:
         self,
         video_path: str,
         *,
-        whisper_model: str = "base",
+        asr_model: str = "Qwen/Qwen3-ASR-1.7B",
         transcript_path: str | None = None,
     ) -> list[dict]:
         """Return ASR transcript as a list of ``{start_time, end_time, text}`` dicts."""
         if transcript_path is not None:
             return self._load_transcript_file(transcript_path)
 
-        return self._run_whisper(video_path, whisper_model)
+        return self._run_asr(video_path, asr_model)
 
     @staticmethod
     def _load_transcript_file(path: str) -> list[dict]:
@@ -1739,34 +1739,74 @@ class VideoIndexer:
             logger.warning("Audio extraction failed for %s (ffmpeg may be missing).", video_path)
             return False
 
-    def _run_whisper(self, video_path: str, model_size: str) -> list[dict]:
-        """Transcribe audio using faster-whisper."""
+    def _run_asr(self, video_path: str, model_name: str) -> list[dict]:
+        """Transcribe audio using Qwen3-ASR with word-level timestamps."""
         try:
-            from faster_whisper import WhisperModel
+            from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
         except ImportError:
-            logger.info("faster_whisper not installed; skipping ASR.")
+            logger.info("qwen_asr not installed; skipping ASR.")
             return []
 
+        logger.info("[pipeline] Qwen3-ASR: starting ASR transcription")
         with tempfile.TemporaryDirectory() as tmp:
             wav_path = str(Path(tmp) / "audio.wav")
             if not self._extract_audio(video_path, wav_path):
                 return []
 
             try:
-                model = WhisperModel(model_size, device="auto", compute_type="int8")
-                logger.info("[pipeline] FastWhisper: starting ASR transcription")
-                segments_iter, _info = model.transcribe(wav_path)
+                import torch
 
+                forced_aligner = Qwen3ForcedAligner.from_pretrained(
+                    "Qwen/Qwen3-ASR-ForcedAligner",
+                    dtype=torch.bfloat16,
+                    device_map="auto",
+                )
+                model = Qwen3ASRModel.from_pretrained(
+                    model_name,
+                    forced_aligner=forced_aligner,
+                    dtype=torch.bfloat16,
+                    device_map="auto",
+                )
+                results = model.transcribe(audio=wav_path, return_time_stamps=True)
+
+                if not results:
+                    return []
+                asr_result = results[0]
+
+                # Group word-level timestamps into sentence-level segments.
                 transcript: list[dict] = []
-                for seg in segments_iter:
-                    transcript.append(
-                        {
-                            "start_time": round(seg.start, 2),
-                            "end_time": round(seg.end, 2),
-                            "text": seg.text.strip(),
-                        }
-                    )
+                if asr_result.time_stamps is not None and asr_result.time_stamps.items:
+                    items = asr_result.time_stamps.items
+                    seg_words: list[str] = []
+                    seg_start: float | None = None
+                    seg_end: float = 0.0
+
+                    for item in items:
+                        if seg_start is None:
+                            seg_start = item.start_time
+                        seg_words.append(item.text)
+                        seg_end = item.end_time
+
+                        is_sentence_end = item.text.rstrip().endswith((".", "!", "?"))
+                        at_end = item is items[-1]
+                        if is_sentence_end or at_end:
+                            text = " ".join(seg_words).strip()
+                            if text:
+                                transcript.append({
+                                    "start_time": round(seg_start, 2),
+                                    "end_time": round(seg_end, 2),
+                                    "text": text,
+                                })
+                            seg_words = []
+                            seg_start = None
+                elif asr_result.text.strip():
+                    transcript.append({
+                        "start_time": 0.0,
+                        "end_time": 0.0,
+                        "text": asr_result.text.strip(),
+                    })
+
                 return transcript
             except Exception:
-                logger.warning("Whisper transcription failed.", exc_info=True)
+                logger.warning("Qwen3-ASR transcription failed.", exc_info=True)
                 return []

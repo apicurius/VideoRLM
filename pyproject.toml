@@ -31,7 +31,7 @@ dependencies = [
     "transformers>=4.40.0",
     "sentence-transformers>=3.0.0",
     "google-genai>=1.0.0",
-    "faster-whisper>=1.1.0",
+    "qwen-asr>=0.0.6",
 ]
 
 [project.urls]
@@ -47,7 +47,7 @@ embeddings = [
     "torchvision>=0.20.0",
 ]
 asr = [
-    "faster-whisper>=1.1.0",
+    "qwen-asr>=0.0.6",
 ]
 gemini = [
     "google-genai>=1.0.0",

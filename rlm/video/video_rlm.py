@@ -104,7 +104,7 @@ class VideoRLM:
         custom_sub_tools: dict[str, Any] | None = None,
         enable_search: bool = True,
         embedding_model: str | None = None,
-        whisper_model: str = "base",
+        asr_model: str = "Qwen/Qwen3-ASR-1.7B",
         transcript_path: str | None = None,
         refine_fn: Callable | None = None,
         caption_fn: Callable | None = None,
@@ -135,7 +135,7 @@ class VideoRLM:
         self.segment_duration = segment_duration
         self.enable_search = enable_search
         self.embedding_model = embedding_model
-        self.whisper_model = whisper_model
+        self.asr_model = asr_model
         self.transcript_path = transcript_path
         self.refine_fn = refine_fn
         self.caption_fn = caption_fn
@@ -247,7 +247,7 @@ class VideoRLM:
                 caption_fn=self.caption_fn,
                 frame_caption_fn=self.frame_caption_fn,
                 refine_fn=self.refine_fn,
-                whisper_model=self.whisper_model,
+                asr_model=self.asr_model,
                 transcript_path=self.transcript_path,
             )
 

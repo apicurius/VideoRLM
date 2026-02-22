@@ -107,11 +107,11 @@ def _render_answer_html(text: str) -> str:
 
 SCENE_MODEL = "facebook/vjepa2-vitl-fpc64-256"
 VISUAL_EMBED_MODEL = "google/siglip2-base-patch16-256"
-TEXT_EMBED_MODEL = "google/embedding-gemma-300m"
+TEXT_EMBED_MODEL = "google/embeddinggemma-300m"
 
 PIPELINE_STEPS = [
     {"id": "vjepa",   "label": "V-JEPA 2 Scene Detection"},
-    {"id": "whisper", "label": "FastWhisper ASR"},
+    {"id": "whisper", "label": "Qwen3-ASR"},
     {"id": "caption", "label": "Segment Captioning"},
     {"id": "gemma",   "label": "Gemma Text Embeddings"},
     {"id": "siglip",  "label": "SigLIP2 Visual Embeddings"},
@@ -157,9 +157,9 @@ class _QueueLogHandler(logging.Handler):
             self._emit({"type": "step", "id": "gemma", "status": "running", "detail": msg.split("[pipeline] ")[-1]})
         elif "[pipeline] Gemma:" in msg:
             self._emit({"type": "step", "id": "gemma", "status": "done", "detail": msg.split("[pipeline] ")[-1]})
-        elif "[pipeline] FastWhisper: starting" in msg:
+        elif "[pipeline] Qwen3-ASR: starting" in msg:
             self._emit({"type": "step", "id": "whisper", "status": "running", "detail": msg.split("[pipeline] ")[-1]})
-        elif "[pipeline] FastWhisper:" in msg or "faster_whisper not installed" in msg:
+        elif "[pipeline] Qwen3-ASR:" in msg or "qwen_asr not installed" in msg:
             status = "skip" if "not installed" in msg else "done"
             self._emit({"type": "step", "id": "whisper", "status": status, "detail": msg.split("[pipeline] ")[-1]})
         elif "Gemini caption" in msg or "caption_fn" in msg:
@@ -272,7 +272,7 @@ def _kuavi_pipeline(
                 caption_fn = make_gemini_caption_fn(model=caption_model, api_key=gemini_key)
                 frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model, api_key=gemini_key)
                 refine_fn = make_gemini_refine_fn(model=caption_model, api_key=gemini_key)
-                emit({"type": "step", "id": "caption", "status": "running",
+                emit({"type": "step", "id": "caption", "status": "pending",
                       "detail": f"using {caption_model}"})
             except ImportError:
                 gemini_key = None  # fall through to OpenAI fallback
@@ -299,7 +299,7 @@ def _kuavi_pipeline(
                     except Exception:
                         return ""
 
-                emit({"type": "step", "id": "caption", "status": "running",
+                emit({"type": "step", "id": "caption", "status": "pending",
                       "detail": f"using {cap_model}"})
             except ImportError:
                 emit({"type": "step", "id": "caption", "status": "skip",
@@ -312,7 +312,7 @@ def _kuavi_pipeline(
         )
         index = indexer.index_video(
             loaded,
-            whisper_model="base",
+            asr_model="Qwen/Qwen3-ASR-1.7B",
             caption_fn=caption_fn,
             frame_caption_fn=frame_caption_fn,
             refine_fn=refine_fn,
@@ -748,7 +748,7 @@ def _full_pipeline(
             caption_fn = make_gemini_caption_fn(model=caption_model_name, api_key=gemini_key)
             frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model_name, api_key=gemini_key)
             refine_fn = make_gemini_refine_fn(model=caption_model_name, api_key=gemini_key)
-            emit({"type": "step", "id": "caption", "status": "running",
+            emit({"type": "step", "id": "caption", "status": "pending",
                   "detail": f"using {caption_model_name}"})
         except ImportError:
             gemini_key = None  # fall through to OpenAI fallback
@@ -775,17 +775,23 @@ def _full_pipeline(
                 except Exception:
                     return ""
 
-            emit({"type": "step", "id": "caption", "status": "running",
+            emit({"type": "step", "id": "caption", "status": "pending",
                   "detail": f"using {caption_model_name}"})
         except ImportError:
             emit({"type": "step", "id": "caption", "status": "skip",
                   "detail": "no captioning available"})
 
     log_handler = _QueueLogHandler(emit)
-    log_handler.setLevel(logging.DEBUG)
+    log_handler.setLevel(logging.INFO)
     indexer_logger = logging.getLogger("rlm.video.video_indexer")
+    indexer_logger.setLevel(logging.INFO)
+    kuavi_logger = logging.getLogger("kuavi.indexer")
+    kuavi_logger.setLevel(logging.INFO)
     indexer_logger.addHandler(log_handler)
+    kuavi_logger.addHandler(log_handler)
+
     try:
+        emit({"type": "step", "id": "vjepa", "status": "running", "detail": "loading video..."})
         rlm_logger = _EventRLMLogger(emit)
         video_rlm = VideoRLM(
             backend=client_backend,
@@ -794,7 +800,7 @@ def _full_pipeline(
             scene_model=SCENE_MODEL,
             embedding_model=VISUAL_EMBED_MODEL,
             text_embedding_model=TEXT_EMBED_MODEL,
-            whisper_model="base",
+            asr_model="Qwen/Qwen3-ASR-1.7B",
             caption_fn=caption_fn,
             frame_caption_fn=frame_caption_fn,
             refine_fn=refine_fn,
@@ -830,6 +836,7 @@ def _full_pipeline(
         emit({"type": "error", "message": str(exc)})
     finally:
         indexer_logger.removeHandler(log_handler)
+        kuavi_logger.removeHandler(log_handler)
 
 
 @app.post("/api/analyze")

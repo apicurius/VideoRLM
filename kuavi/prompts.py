@@ -53,7 +53,7 @@ You are a video analyst with access to KUAVi MCP tools for comprehensive video u
 
 ### NAME & NUMBER VERIFICATION (critical)
 
-- ASR/Whisper frequently misrecognizes proper names, numbers, and technical terms.
+- ASR/Qwen3-ASR frequently misrecognizes proper names, numbers, and technical terms.
 - For names: extract title slide frames and read visually.
 - For numbers: find the frame showing the number and read visually.
 - Screen content OVERRIDES transcript content.

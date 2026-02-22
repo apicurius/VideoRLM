@@ -20,7 +20,7 @@ class KUAViConfig:
         auto_fps: Dynamically compute FPS based on video duration.
         target_frames: Target frame count when auto_fps is enabled.
         cache_dir: Directory for caching video indices.
-        whisper_model: Faster-whisper model size for ASR.
+        asr_model: Qwen3-ASR model name for speech transcription.
         max_frames_per_segment: Cap frames per segment for memory efficiency.
         resize: Optional (width, height) to resize extracted frames.
         hierarchical: Enable multi-level scene hierarchy.
@@ -34,7 +34,7 @@ class KUAViConfig:
     auto_fps: bool = False
     target_frames: int = 120
     cache_dir: str | Path | None = None
-    whisper_model: str = "base"
+    asr_model: str = "Qwen/Qwen3-ASR-1.7B"
     max_frames_per_segment: int = 32
     resize: tuple[int, int] | None = None
     hierarchical: bool = False

@@ -714,7 +714,7 @@ def kuavi_index_video(
     embedding_model: str = "google/siglip2-base-patch16-256",
     scene_model: str | None = "facebook/vjepa2-vitl-fpc64-256",
     text_embedding_model: str | None = None,
-    whisper_model: str = "base",
+    asr_model: str = "Qwen/Qwen3-ASR-1.7B",
     cache_dir: str | None = None,
     no_scene_model: bool = False,
     no_text_embedding: bool = False,
@@ -805,7 +805,7 @@ def kuavi_index_video(
         caption_fn=caption_fn,
         frame_caption_fn=frame_caption_fn,
         refine_fn=refine_fn,
-        whisper_model=whisper_model,
+        asr_model=asr_model,
         transcript_path=transcript_path,
     )
 
