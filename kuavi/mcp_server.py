@@ -724,6 +724,8 @@ def kuavi_index_video(
     transcript_path: str | None = None,
     auto_shard_segments: int | None = None,
     num_segments: int | None = None,
+    scene_model_preset: str | None = None,
+    mode: str = "full",
 ) -> dict[str, Any]:
     """Index a video file for search and analysis.
 
@@ -732,6 +734,10 @@ def kuavi_index_video(
 
     When num_segments is set, the video is split into that many equal-duration
     temporal segments instead of using V-JEPA 2 scene detection.
+
+    When mode is set to "fast", the indexer skips Tree-of-Captions and
+    Self-Refine to produce a quickly searchable index using only midpoint
+    frame captions. Use mode="full" (default) for the richest annotations.
     """
     import cv2
 
@@ -740,6 +746,8 @@ def kuavi_index_video(
 
     if no_scene_model:
         scene_model_resolved = None
+    elif scene_model_preset is not None:
+        scene_model_resolved = None  # preset overrides scene_model directly in VideoIndexer
     else:
         scene_model_resolved = scene_model
 
@@ -779,6 +787,7 @@ def kuavi_index_video(
         text_embedding_model=text_embedding_model_resolved,
         scene_model=scene_model_resolved,
         caption_resize=caption_resize,
+        scene_model_preset=scene_model_preset,
     )
 
     # Build captioning functions when captioning is enabled
@@ -807,6 +816,7 @@ def kuavi_index_video(
         refine_fn=refine_fn,
         asr_model=asr_model,
         transcript_path=transcript_path,
+        mode=mode,
     )
 
     video_id = Path(video_path).stem

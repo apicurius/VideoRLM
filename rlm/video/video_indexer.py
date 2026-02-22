@@ -143,7 +143,10 @@ class VideoIndexer:
         hierarchical: bool = False,
         scene_model: str | None = None,
         scene_clip_size: int = 16,
+        scene_model_preset: str | None = None,
     ):
+        from kuavi.types import VJEPA2_PRESETS
+
         self._embedding_model_name = embedding_model
         self._device = device
         self._temporal_window = temporal_window
@@ -158,10 +161,23 @@ class VideoIndexer:
         self._text_model = None
         self._text_tokenizer = None
         self._memory_cache: dict[str, VideoIndex] = {}
-        self._scene_model_name = scene_model
         self._scene_model = None
         self._scene_processor = None
-        self._scene_clip_size = scene_clip_size
+
+        if scene_model_preset is not None:
+            if scene_model_preset not in VJEPA2_PRESETS:
+                raise ValueError(
+                    f"Unknown scene_model_preset {scene_model_preset!r}. "
+                    f"Valid presets: {list(VJEPA2_PRESETS)}"
+                )
+            preset = VJEPA2_PRESETS[scene_model_preset]
+            self._scene_model_name = preset["model"]
+            self._scene_clip_size = preset["clip_size"]
+            self._scene_embed_dim = preset["embed_dim"]
+        else:
+            self._scene_model_name = scene_model
+            self._scene_clip_size = scene_clip_size
+            self._scene_embed_dim = 1024  # default ViT-L
 
     # ------------------------------------------------------------------
     # Lazy model loading
@@ -272,6 +288,7 @@ class VideoIndexer:
         asr_model: str = "Qwen/Qwen3-ASR-1.7B",
         transcript_path: str | None = None,
         refine_rounds: int = 3,
+        mode: str = "full",
     ) -> VideoIndex:
         """Build a full searchable index from a loaded video.
 
@@ -312,6 +329,10 @@ class VideoIndexer:
             asr_model: Qwen3-ASR model name for speech transcription.
             transcript_path: Path to a pre-existing transcript JSON/SRT file.
                 When provided, ASR is skipped.
+            mode: Indexing mode — ``"full"`` (default) runs the complete
+                Tree-of-Captions + Self-Refine pipeline; ``"fast"`` skips
+                segment captioning and Self-Refine, using only midpoint
+                frame captions to produce a quickly searchable index.
 
         Returns:
             A :class:`VideoIndex` ready for use with the search-tool factories in
@@ -425,140 +446,163 @@ class VideoIndexer:
             temporal_clip_timestamps=vjepa_clip_timestamps,
         )
 
-        # 5. Caption each segment (if a caption function was provided)
-        if caption_fn is not None or frame_caption_fn is not None:
-            # Prepare all segments first (skip near-duplicates)
-            caption_tasks = []
+        if mode == "fast":
+            # Fast mode: use midpoint frame captions only — skip Tree-of-Captions and Self-Refine.
+            # 5 (fast). Action-first pass: frame captions for non-skipped segments
+            self._action_first_pass(segment_infos, frame_caption_fn)
+
+            # 5c (fast). Propagate captions from representatives to skipped duplicates
             for seg in segment_infos:
-                seg_frames = seg.pop("_frames")
-                if seg.get("_skip_caption"):
-                    continue
-                # ASR context injection: prepend transcript text for this segment
-                transcript_text = self._transcript_for_range(
-                    transcript,
-                    seg["start_time"],
-                    seg["end_time"],
-                )
-                if transcript_text:
-                    seg_frames = [f"[transcript] {transcript_text}"] + seg_frames
-                caption_tasks.append((seg, seg_frames))
+                src_idx = seg.get("_caption_source")
+                if src_idx is not None:
+                    src = segment_infos[src_idx]
+                    for key in ("caption", "annotation", "frame_caption", "is_non_action"):
+                        if key in src:
+                            seg[key] = src[key]
 
-            # 5a. Frame-level captioning (Tree-of-Captions leaf level)
-            if frame_caption_fn is not None:
-
-                def _frame_caption_one(args):
-                    seg, seg_frames = args
-                    # Extract midpoint keyframe (skip string context tokens)
-                    real_frames = [f for f in seg_frames if not isinstance(f, str)]
-                    if real_frames:
-                        mid_idx = len(real_frames) // 2
-                        mid_frame = real_frames[mid_idx]
-                        result = frame_caption_fn([mid_frame])
-                        return seg, result if isinstance(result, str) else str(result)
-                    return seg, ""
-
-                with ThreadPoolExecutor(max_workers=8) as pool:
-                    futures = [pool.submit(_frame_caption_one, task) for task in caption_tasks]
-                    for future in as_completed(futures):
-                        try:
-                            seg, frame_cap = future.result()
-                            seg["frame_caption"] = frame_cap
-                        except Exception:
-                            logger.warning(
-                                "Frame caption future raised an exception", exc_info=True
-                            )
-
-            # 5b. Segment-level captioning (Tree-of-Captions node level)
-            if caption_fn is not None:
-
-                def _caption_segment(args):
-                    seg, seg_frames = args
-                    # Filter visually dissimilar edge frames
-                    if self._model is not None:
-                        real_frames = [f for f in seg_frames if not isinstance(f, str)]
-                        if len(real_frames) >= 5:
-                            filtered_real = self._filter_edge_frames(real_frames, threshold=0.5)
-                            str_tokens = [f for f in seg_frames if isinstance(f, str)]
-                            seg_frames = str_tokens + filtered_real
-                    # Resize real frames for captioning if caption_resize is set
-                    if self._caption_resize:
-                        import cv2
-
-                        resized = []
-                        for f in seg_frames:
-                            if isinstance(f, str):
-                                resized.append(f)
-                            else:
-                                resized.append(cv2.resize(f, self._caption_resize))
-                        seg_frames = resized
-                    # Inject frame caption as context if available
-                    frame_cap = seg.get("frame_caption", "")
-                    if frame_cap:
-                        seg_frames = [f"[frame_caption] {frame_cap}"] + seg_frames
-                    result = caption_fn(seg_frames)
-                    # Backward compat: wrap plain strings into structured annotation
-                    if isinstance(result, str):
-                        annotation = {
-                            "summary": {"brief": result, "detailed": result},
-                            "action": {"brief": "", "detailed": "", "actor": None},
-                        }
-                    else:
-                        annotation = result
-                    return seg, annotation
-
-                with ThreadPoolExecutor(max_workers=8) as pool:
-                    futures = [pool.submit(_caption_segment, task) for task in caption_tasks]
-                    for future in as_completed(futures):
-                        try:
-                            seg, annotation = future.result()
-                            seg["annotation"] = annotation
-                            seg["annotation"]["frame_caption"] = seg.get("frame_caption", "")
-                            seg["caption"] = annotation.get("summary", {}).get("brief", "")
-                            action_brief = annotation.get("action", {}).get("brief", "").strip()
-                            if not action_brief or action_brief.upper() == "N/A":
-                                seg["is_non_action"] = True
-                        except Exception:
-                            logger.warning("Caption future raised an exception", exc_info=True)
+            # Clean up temporary dedup keys
+            for seg in segment_infos:
+                seg.pop("_skip_caption", None)
+                seg.pop("_caption_source", None)
         else:
+            # Full mode: Tree-of-Captions + Self-Refine (original behavior)
+
+            # 5. Caption each segment (if a caption function was provided)
+            if caption_fn is not None or frame_caption_fn is not None:
+                # Prepare all segments first (skip near-duplicates)
+                caption_tasks = []
+                for seg in segment_infos:
+                    seg_frames = seg.pop("_frames")
+                    if seg.get("_skip_caption"):
+                        continue
+                    # ASR context injection: prepend transcript text for this segment
+                    transcript_text = self._transcript_for_range(
+                        transcript,
+                        seg["start_time"],
+                        seg["end_time"],
+                    )
+                    if transcript_text:
+                        seg_frames = [f"[transcript] {transcript_text}"] + seg_frames
+                    caption_tasks.append((seg, seg_frames))
+
+                # 5a. Frame-level captioning (Tree-of-Captions leaf level)
+                if frame_caption_fn is not None:
+
+                    def _frame_caption_one(args):
+                        seg, seg_frames = args
+                        # Extract midpoint keyframe (skip string context tokens)
+                        real_frames = [f for f in seg_frames if not isinstance(f, str)]
+                        if real_frames:
+                            mid_idx = len(real_frames) // 2
+                            mid_frame = real_frames[mid_idx]
+                            result = frame_caption_fn([mid_frame])
+                            return seg, result if isinstance(result, str) else str(result)
+                        return seg, ""
+
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        futures = [pool.submit(_frame_caption_one, task) for task in caption_tasks]
+                        for future in as_completed(futures):
+                            try:
+                                seg, frame_cap = future.result()
+                                seg["frame_caption"] = frame_cap
+                            except Exception:
+                                logger.warning(
+                                    "Frame caption future raised an exception", exc_info=True
+                                )
+
+                # 5b. Segment-level captioning (Tree-of-Captions node level)
+                if caption_fn is not None:
+
+                    def _caption_segment(args):
+                        seg, seg_frames = args
+                        # Filter visually dissimilar edge frames
+                        if self._model is not None:
+                            real_frames = [f for f in seg_frames if not isinstance(f, str)]
+                            if len(real_frames) >= 5:
+                                filtered_real = self._filter_edge_frames(real_frames, threshold=0.5)
+                                str_tokens = [f for f in seg_frames if isinstance(f, str)]
+                                seg_frames = str_tokens + filtered_real
+                        # Resize real frames for captioning if caption_resize is set
+                        if self._caption_resize:
+                            import cv2
+
+                            resized = []
+                            for f in seg_frames:
+                                if isinstance(f, str):
+                                    resized.append(f)
+                                else:
+                                    resized.append(cv2.resize(f, self._caption_resize))
+                            seg_frames = resized
+                        # Inject frame caption as context if available
+                        frame_cap = seg.get("frame_caption", "")
+                        if frame_cap:
+                            seg_frames = [f"[frame_caption] {frame_cap}"] + seg_frames
+                        result = caption_fn(seg_frames)
+                        # Backward compat: wrap plain strings into structured annotation
+                        if isinstance(result, str):
+                            annotation = {
+                                "summary": {"brief": result, "detailed": result},
+                                "action": {"brief": "", "detailed": "", "actor": None},
+                            }
+                        else:
+                            annotation = result
+                        return seg, annotation
+
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        futures = [pool.submit(_caption_segment, task) for task in caption_tasks]
+                        for future in as_completed(futures):
+                            try:
+                                seg, annotation = future.result()
+                                seg["annotation"] = annotation
+                                seg["annotation"]["frame_caption"] = seg.get("frame_caption", "")
+                                seg["caption"] = annotation.get("summary", {}).get("brief", "")
+                                action_brief = (
+                                    annotation.get("action", {}).get("brief", "").strip()
+                                )
+                                if not action_brief or action_brief.upper() == "N/A":
+                                    seg["is_non_action"] = True
+                            except Exception:
+                                logger.warning("Caption future raised an exception", exc_info=True)
+            else:
+                for seg in segment_infos:
+                    seg.pop("_frames", None)
+
+            # 5c. Propagate captions from representatives to skipped duplicates
             for seg in segment_infos:
-                seg.pop("_frames", None)
+                src_idx = seg.get("_caption_source")
+                if src_idx is not None:
+                    src = segment_infos[src_idx]
+                    for key in ("caption", "annotation", "frame_caption", "is_non_action"):
+                        if key in src:
+                            seg[key] = src[key]
 
-        # 5c. Propagate captions from representatives to skipped duplicates
-        for seg in segment_infos:
-            src_idx = seg.get("_caption_source")
-            if src_idx is not None:
-                src = segment_infos[src_idx]
-                for key in ("caption", "annotation", "frame_caption", "is_non_action"):
-                    if key in src:
-                        seg[key] = src[key]
+            # Clean up temporary dedup keys
+            for seg in segment_infos:
+                seg.pop("_skip_caption", None)
+                seg.pop("_caption_source", None)
 
-        # Clean up temporary dedup keys
-        for seg in segment_infos:
-            seg.pop("_skip_caption", None)
-            seg.pop("_caption_source", None)
+            # 6. Self-Refine annotations
+            self._refine_annotations(
+                segment_infos,
+                transcript,
+                refine_fn,
+                video_metadata=loaded_video.metadata,
+                rounds=refine_rounds,
+            )
 
-        # 6. Self-Refine annotations
-        self._refine_annotations(
-            segment_infos,
-            transcript,
-            refine_fn,
-            video_metadata=loaded_video.metadata,
-            rounds=refine_rounds,
-        )
+            # 6b. Mark near-duplicate adjacent segments before embedding
+            self._deduplicate_segments(segment_infos)
 
-        # 6b. Mark near-duplicate adjacent segments before embedding
-        self._deduplicate_segments(segment_infos)
+            # 6c. Global dedup: find duplicates anywhere (non-adjacent)
+            self._global_deduplicate(segment_infos)
 
-        # 6c. Global dedup: find duplicates anywhere (non-adjacent)
-        self._global_deduplicate(segment_infos)
-
-        # 6.5 Score annotations and re-caption low-quality ones
-        self._score_annotations(
-            segment_infos,
-            loaded_video_frames=frames,
-            timestamps=timestamps,
-            caption_fn=caption_fn,
-        )
+            # 6.5 Score annotations and re-caption low-quality ones
+            self._score_annotations(
+                segment_infos,
+                loaded_video_frames=frames,
+                timestamps=timestamps,
+                caption_fn=caption_fn,
+            )
 
         # 7. Embed captions
         logger.info("[pipeline] Gemma: embedding captions for %d segments", len(segment_infos))
@@ -1536,6 +1580,221 @@ class VideoIndexer:
             len(segments),
         )
 
+    def _action_first_pass(
+        self,
+        segment_infos: list[dict],
+        frame_caption_fn: Callable | None,
+    ) -> None:
+        """Set brief frame captions for fast-mode indexing (action-first pass).
+
+        For each non-skipped segment, extracts the midpoint keyframe and calls
+        ``frame_caption_fn`` to produce a brief caption.  Sets ``caption``,
+        ``frame_caption``, and a minimal ``annotation`` structure so that
+        ``_embed_captions`` can produce searchable embeddings immediately,
+        without running the full Tree-of-Captions or Self-Refine pipeline.
+
+        Skipped segments (Tier-0 dead frames or pre-caption dedup) have their
+        ``_frames`` key removed; caption propagation from representatives is
+        handled by the caller after this method returns.
+        """
+        caption_tasks = []
+        for seg in segment_infos:
+            seg_frames = seg.pop("_frames", [])
+            if seg.get("_skip_caption"):
+                # Already captioned (Tier 0) or dedup'd — propagation handled by caller
+                continue
+            real_frames = [f for f in seg_frames if not isinstance(f, str)]
+            if real_frames:
+                mid_frame = real_frames[len(real_frames) // 2]
+                caption_tasks.append((seg, mid_frame))
+
+        if frame_caption_fn is None or not caption_tasks:
+            return
+
+        def _caption_one(args):
+            seg, mid_frame = args
+            try:
+                result = frame_caption_fn([mid_frame])
+                caption = result if isinstance(result, str) else str(result)
+            except Exception:
+                logger.warning("Fast-mode frame caption failed", exc_info=True)
+                caption = ""
+            return seg, caption
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(_caption_one, task) for task in caption_tasks]
+            for future in as_completed(futures):
+                try:
+                    seg, caption = future.result()
+                    seg["frame_caption"] = caption
+                    seg["caption"] = caption
+                    seg["annotation"] = {
+                        "summary": {"brief": caption, "detailed": caption},
+                        "action": {"brief": "", "detailed": "", "actor": None},
+                    }
+                except Exception:
+                    logger.warning(
+                        "Fast-mode caption future raised an exception", exc_info=True
+                    )
+
+    def enhance_index(
+        self,
+        index: VideoIndex,
+        loaded_video: LoadedVideo,
+        *,
+        caption_fn: Callable | None = None,
+        frame_caption_fn: Callable | None = None,
+        refine_fn: Callable | None = None,
+        refine_rounds: int = 3,
+    ) -> VideoIndex:
+        """Run full captioning and Self-Refine on a fast-mode :class:`VideoIndex`.
+
+        Takes an index produced by ``index_video(mode="fast")`` and runs the
+        full Tree-of-Captions + Self-Refine pipeline on the segments, returning
+        an updated :class:`VideoIndex` with richer annotations and embeddings.
+
+        Args:
+            index: Existing :class:`VideoIndex` (typically from fast-mode indexing).
+            loaded_video: The original :class:`LoadedVideo` used to build the index.
+            caption_fn: Segment-level captioning function (Tree-of-Captions node).
+            frame_caption_fn: Keyframe captioning function (Tree-of-Captions leaf).
+            refine_fn: Self-Refine function ``(draft, context, effort) -> str``.
+            refine_rounds: Number of Self-Refine iterations.
+
+        Returns:
+            The same :class:`VideoIndex` instance with updated segments,
+            embeddings, and ``embed_fn`` re-attached.
+        """
+        fps = loaded_video.metadata.extraction_fps
+        frames = loaded_video.frames
+        timestamps = [i / fps for i in range(len(frames))]
+        transcript = index.transcript
+        segment_infos = index.segments
+
+        # Re-populate _frames for each segment from the loaded video
+        for seg in segment_infos:
+            seg_frames = [
+                f
+                for f, t in zip(frames, timestamps, strict=False)
+                if seg["start_time"] <= t <= seg["end_time"]
+            ]
+            if self._max_frames_per_segment and len(seg_frames) > self._max_frames_per_segment:
+                step = len(seg_frames) / self._max_frames_per_segment
+                seg_frames = [
+                    seg_frames[int(i * step)] for i in range(self._max_frames_per_segment)
+                ]
+            seg["_frames"] = seg_frames
+
+        # Run full captioning pipeline (steps 5-6 of index_video)
+        if caption_fn is not None or frame_caption_fn is not None:
+            caption_tasks = []
+            for seg in segment_infos:
+                seg_frames = seg.pop("_frames")
+                transcript_text = self._transcript_for_range(
+                    transcript,
+                    seg["start_time"],
+                    seg["end_time"],
+                )
+                if transcript_text:
+                    seg_frames = [f"[transcript] {transcript_text}"] + seg_frames
+                caption_tasks.append((seg, seg_frames))
+
+            if frame_caption_fn is not None:
+
+                def _frame_caption_one(args):
+                    seg, seg_frames = args
+                    real_frames = [f for f in seg_frames if not isinstance(f, str)]
+                    if real_frames:
+                        mid_idx = len(real_frames) // 2
+                        mid_frame = real_frames[mid_idx]
+                        result = frame_caption_fn([mid_frame])
+                        return seg, result if isinstance(result, str) else str(result)
+                    return seg, ""
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    futures = [pool.submit(_frame_caption_one, task) for task in caption_tasks]
+                    for future in as_completed(futures):
+                        try:
+                            seg, frame_cap = future.result()
+                            seg["frame_caption"] = frame_cap
+                        except Exception:
+                            logger.warning(
+                                "Frame caption future raised an exception", exc_info=True
+                            )
+
+            if caption_fn is not None:
+
+                def _caption_segment(args):
+                    seg, seg_frames = args
+                    if self._model is not None:
+                        real_frames = [f for f in seg_frames if not isinstance(f, str)]
+                        if len(real_frames) >= 5:
+                            filtered_real = self._filter_edge_frames(real_frames, threshold=0.5)
+                            str_tokens = [f for f in seg_frames if isinstance(f, str)]
+                            seg_frames = str_tokens + filtered_real
+                    if self._caption_resize:
+                        import cv2
+
+                        resized = []
+                        for f in seg_frames:
+                            if isinstance(f, str):
+                                resized.append(f)
+                            else:
+                                resized.append(cv2.resize(f, self._caption_resize))
+                        seg_frames = resized
+                    frame_cap = seg.get("frame_caption", "")
+                    if frame_cap:
+                        seg_frames = [f"[frame_caption] {frame_cap}"] + seg_frames
+                    result = caption_fn(seg_frames)
+                    if isinstance(result, str):
+                        annotation = {
+                            "summary": {"brief": result, "detailed": result},
+                            "action": {"brief": "", "detailed": "", "actor": None},
+                        }
+                    else:
+                        annotation = result
+                    return seg, annotation
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    futures = [pool.submit(_caption_segment, task) for task in caption_tasks]
+                    for future in as_completed(futures):
+                        try:
+                            seg, annotation = future.result()
+                            seg["annotation"] = annotation
+                            seg["annotation"]["frame_caption"] = seg.get("frame_caption", "")
+                            seg["caption"] = annotation.get("summary", {}).get("brief", "")
+                            action_brief = (
+                                annotation.get("action", {}).get("brief", "").strip()
+                            )
+                            if not action_brief or action_brief.upper() == "N/A":
+                                seg["is_non_action"] = True
+                        except Exception:
+                            logger.warning("Caption future raised an exception", exc_info=True)
+        else:
+            for seg in segment_infos:
+                seg.pop("_frames", None)
+
+        # Self-Refine
+        self._refine_annotations(
+            segment_infos,
+            transcript,
+            refine_fn,
+            video_metadata=loaded_video.metadata,
+            rounds=refine_rounds,
+        )
+
+        # Re-embed with updated captions
+        embeddings, action_embeddings = self._embed_captions(segment_infos)
+        if embeddings is not None:
+            embeddings = self._smooth_embeddings(embeddings, window=3)
+        if action_embeddings is not None:
+            action_embeddings = self._smooth_embeddings(action_embeddings, window=3)
+
+        index.embeddings = embeddings
+        index.action_embeddings = action_embeddings
+        index.embed_fn = self._encode_query
+        return index
+
     def _build_coarse_level(
         self,
         segments: list[dict],
@@ -1637,7 +1896,7 @@ class VideoIndexer:
         indexed_clips.sort(key=lambda x: len(x[1]))
 
         result_embs = [None] * len(clips)
-        batch_size = 4
+        batch_size = 2 if getattr(self, "_scene_embed_dim", 1024) >= 1280 else 4
 
         for _frame_count, group in groupby(indexed_clips, key=lambda x: len(x[1])):
             group_items = list(group)
@@ -1720,6 +1979,7 @@ class VideoIndexer:
             subprocess.run(
                 [
                     "ffmpeg",
+                    "-nostdin",
                     "-y",
                     "-i",
                     video_path,
@@ -1734,6 +1994,7 @@ class VideoIndexer:
                 ],
                 check=True,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
             )
             return True
         except (subprocess.CalledProcessError, FileNotFoundError):
@@ -1757,17 +2018,17 @@ class VideoIndexer:
             try:
                 import torch
 
+                device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
+                
                 forced_aligner = Qwen3ForcedAligner.from_pretrained(
                     "Qwen/Qwen3-ASR-ForcedAligner",
-                    dtype=torch.bfloat16,
-                    device_map="auto",
-                )
+                    dtype=torch.float16,
+                ).to(device)
                 model = Qwen3ASRModel.from_pretrained(
                     model_name,
                     forced_aligner=forced_aligner,
-                    dtype=torch.bfloat16,
-                    device_map="auto",
-                )
+                    dtype=torch.float16,
+                ).to(device)
                 results = model.transcribe(audio=wav_path, return_time_stamps=True)
 
                 if not results:

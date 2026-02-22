@@ -5,6 +5,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+VJEPA2_PRESETS: dict[str, dict] = {
+    "fast": {
+        "model": "facebook/vjepa2-vitl-fpc64-256",
+        "clip_size": 16,
+        "resolution": 256,
+        "embed_dim": 1024,
+    },
+    "balanced": {
+        "model": "facebook/vjepa2-vith-fpc64-256",
+        "clip_size": 32,
+        "resolution": 256,
+        "embed_dim": 1280,
+    },
+    "quality": {
+        "model": "facebook/vjepa2-vitg-fpc64-384",
+        "clip_size": 64,
+        "resolution": 384,
+        "embed_dim": 1536,
+    },
+}
+
 
 @dataclass
 class KUAViConfig:
@@ -39,3 +60,4 @@ class KUAViConfig:
     resize: tuple[int, int] | None = None
     hierarchical: bool = False
     scene_clip_size: int = 16
+    scene_model_preset: str | None = None
