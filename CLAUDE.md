@@ -26,13 +26,13 @@ KUAVi uses a decompose-analyze-synthesize pattern for complex video questions:
 
 | Agent | Role | Model |
 |-------|------|-------|
-| `video-analyst` | Orchestrator — decides simple vs complex, dispatches sub-agents | Sonnet |
+| `video-triage` | Fast entry point — answers from captions/transcript or escalates to video-analyst | Haiku |
+| `video-analyst` | Full analysis with frame inspection, orchestrates sub-agents for complex questions | Sonnet |
 | `video-decomposer` | Breaks complex questions into sub-questions with time ranges | Haiku |
 | `video-segment-analyst` | Analyzes one temporal region (runs in background for parallelism) | Sonnet |
 | `video-synthesizer` | Aggregates per-segment results into a final answer | Sonnet |
 
-For simple questions, `video-analyst` answers directly using SEARCH-FIRST.
-For complex questions, it orchestrates: decompose → parallel segment analysis → synthesize.
+Use `video-triage` as the default entry point for video questions. It answers simple questions directly from search results on Haiku (fast path), and escalates to `video-analyst` (Sonnet) only when visual frame inspection or complex orchestration is needed.
 
 ## Skills
 

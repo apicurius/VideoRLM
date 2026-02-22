@@ -31,7 +31,8 @@ kuavi/                  # Main package
 - **MCP Server**: `.mcp.json` registers `kuavi` MCP server (stdio)
 - **Skills**: `.claude/skills/kuavi-{index,search,analyze,compare,deep-analyze,pixel-analysis,deep-search,predictive,corpus}/SKILL.md`
 - **Agents**:
-  - `video-analyst.md` — Orchestrator (Sonnet, 30 turns, can spawn sub-agents)
+  - `video-triage.md` — Fast entry point (Haiku, 6 turns, search-only, escalates to video-analyst)
+  - `video-analyst.md` — Full analysis with frame inspection (Sonnet, 20 turns, can spawn sub-agents)
   - `video-decomposer.md` — Question decomposition (Haiku, 8 turns, search-only tools)
   - `video-segment-analyst.md` — Parallel temporal analysis (Sonnet, 12 turns, background)
   - `video-synthesizer.md` — Result aggregation (Sonnet, 8 turns)
