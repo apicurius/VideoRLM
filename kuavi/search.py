@@ -14,6 +14,31 @@ if TYPE_CHECKING:
     from kuavi.indexer import VideoIndex
 
 
+def _align_query_dim(query_emb: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    """Align query embedding dimension to match the target matrix's column dimension.
+
+    V-JEPA 2 temporal embeddings are 1024-d while SigLIP2 text queries are 768-d.
+    Zero-pad the query to match so cosine_similarity doesn't raise a ValueError.
+    """
+    d_q = query_emb.shape[1]
+    d_m = matrix.shape[1]
+    if d_q == d_m:
+        return query_emb
+    if d_q < d_m:
+        # Zero-pad query and re-normalize to unit length
+        padded = np.zeros((1, d_m), dtype=query_emb.dtype)
+        padded[0, :d_q] = query_emb[0]
+        norm = np.linalg.norm(padded)
+        return padded / norm if norm > 0 else padded
+    # d_q > d_m: truncate (shouldn't happen in practice)
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "Query dim %d > matrix dim %d; truncating query embedding.", d_q, d_m
+    )
+    return query_emb[:, :d_m]
+
+
 def _mmr_rerank(
     query_emb: np.ndarray,
     candidate_embs: np.ndarray,
@@ -118,10 +143,12 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                 and index.temporal_embeddings is not None
                 and len(index.temporal_embeddings) > 0
             ):
-                # V-JEPA is vision-only; use SigLIP2 text encoder for query
+                # V-JEPA is vision-only; use SigLIP2 text encoder for query.
+                # Align dims: SigLIP2 produces 768-d but V-JEPA 2 embeddings are 1024-d.
                 visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
                 query_emb = visual_fn(query)
                 query_emb = np.asarray(query_emb).reshape(1, -1)
+                query_emb = _align_query_dim(query_emb, index.temporal_embeddings)
                 scores = _search_matrix(query_emb, index.temporal_embeddings)
 
                 scores = scores.copy()
@@ -224,7 +251,9 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                 weighted_scores += 0.2 * _search_matrix(query_emb_visual, frame_emb)
                 total_weight += 0.2
             if temporal_emb is not None and len(temporal_emb) > 0:
-                weighted_scores += 0.2 * _search_matrix(query_emb_visual, temporal_emb)
+                # Align dims: SigLIP2 visual query (768-d) vs V-JEPA 2 temporal (1024-d).
+                query_emb_temporal = _align_query_dim(query_emb_visual, temporal_emb)
+                weighted_scores += 0.2 * _search_matrix(query_emb_temporal, temporal_emb)
                 total_weight += 0.2
 
             if total_weight > 0:
