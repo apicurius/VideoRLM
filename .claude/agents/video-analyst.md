@@ -3,7 +3,7 @@ name: video-analyst
 description: Specialized video analysis agent with access to KUAVi MCP tools
 model: sonnet
 maxTurns: 20
-tools: Task(video-decomposer, video-segment-analyst, video-synthesizer), mcp__kuavi__kuavi_index_video, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_get_session_stats, mcp__kuavi__kuavi_set_budget, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_analyze_shards, mcp__kuavi__kuavi_anticipate_action, mcp__kuavi__kuavi_predict_future, mcp__kuavi__kuavi_verify_coherence, mcp__kuavi__kuavi_classify_segment, mcp__kuavi__kuavi_index_corpus, mcp__kuavi__kuavi_search_corpus, mcp__kuavi__kuavi_corpus_stats, mcp__kuavi__kuavi_orient, mcp__kuavi__kuavi_search_all, mcp__kuavi__kuavi_inspect_segment
+tools: Task(video-decomposer, video-segment-analyst, video-synthesizer), mcp__kuavi__kuavi_index_video, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_get_session_stats, mcp__kuavi__kuavi_set_budget, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_analyze_shards, mcp__kuavi__kuavi_anticipate_action, mcp__kuavi__kuavi_predict_future, mcp__kuavi__kuavi_verify_coherence, mcp__kuavi__kuavi_classify_segment, mcp__kuavi__kuavi_index_corpus, mcp__kuavi__kuavi_search_corpus, mcp__kuavi__kuavi_corpus_stats, mcp__kuavi__kuavi_orient, mcp__kuavi__kuavi_search_all, mcp__kuavi__kuavi_inspect_segment, mcp__kuavi__kuavi_quick_answer
 mcpServers: kuavi
 memory: project
 skills: kuavi-search, kuavi-pixel-analysis, kuavi-deep-search, kuavi-predictive, kuavi-corpus
@@ -61,14 +61,24 @@ It resolves conflicts, follows dependencies, and composes the final answer.
 
 **Maximize parallel tool calls per turn.** Call independent tools together in the same response to minimize round-trips. Use compound tools over individual calls unless you need fine-grained control.
 
-### Turn 1: Orient + Search (parallel)
+### Fast Path: Targeted Factual Questions
+
+For questions seeking a specific value, score, name, or fact:
+1. **Turn 1** (parallel): `kuavi_orient()` + `kuavi_quick_answer(question)` — searches all fields AND auto-inspects top hits with frame extraction in one call
+2. **Turn 2**: Read frames from inspections, answer with evidence
+
+Use this when the question has a single, specific answer (not open-ended summarization). `kuavi_quick_answer` eliminates the search→inspect round-trip by doing both server-side.
+
+### Standard Path: Exploratory / Open-Ended Questions
+
+#### Turn 1: Orient + Search (parallel)
 Call BOTH in the same response — they are independent:
 - `kuavi_orient()` — video metadata + scene list
 - `kuavi_search_all(query, fields=["summary", "action", "visual"], transcript_query=query)` — multi-field + transcript search
 
 This replaces what was previously 5-7 sequential calls with 2 parallel calls in a single turn.
 
-### Turn 2: Inspect hits (parallel)
+#### Turn 2: Inspect hits (parallel)
 From search results, identify the top 1-3 time ranges. Call `kuavi_inspect_segment` for ALL of them in the same response:
 - `kuavi_inspect_segment(start1, end1, zoom_level=2)` — frames + transcript for hit 1
 - `kuavi_inspect_segment(start2, end2, zoom_level=2)` — frames + transcript for hit 2
@@ -77,7 +87,7 @@ Do NOT inspect one hit, wait for results, then inspect the next. Call them all a
 
 For precise reading, use `zoom_level=3`. Fall back to individual `kuavi_extract_frames` only for custom FPS/resolution.
 
-### Turn 3: Verify + Answer
+#### Turn 3: Verify + Answer
 - Screen content OVERRIDES transcript content
 - ASR frequently misrecognizes names, numbers, and technical terms
 - Require visual confirmation for any specific value

@@ -2037,6 +2037,7 @@ def kuavi_eval(code: str) -> dict[str, Any]:
             "orient": kuavi_orient,
             "search_all": kuavi_search_all,
             "inspect_segment": kuavi_inspect_segment,
+            "quick_answer": kuavi_quick_answer,
             "llm_query": lambda prompt, backend="gemini", model="gemini-2.5-flash": _call_llm(
                 prompt, backend, model, role="secondary", _log_context="kuavi_eval:llm_query"
             ),
@@ -3017,6 +3018,117 @@ def kuavi_inspect_segment(
             video_id=video_id,
         )
 
+    _track_response_tokens(result)
+    if warning:
+        result["_budget_warning"] = warning
+    return result
+
+
+@mcp.tool()
+def kuavi_quick_answer(
+    question: str,
+    fields: list[str] | None = None,
+    transcript_query: str | None = None,
+    top_k: int = 3,
+    inspect_top: int = 3,
+    zoom_level: int = 2,
+    max_frames_per_hit: int = 5,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """One-shot search + inspect: find relevant segments and extract frames/transcript.
+
+    Combines kuavi_search_all + kuavi_inspect_segment for the top hits in one call.
+    Use for targeted factual questions where you need to read values from frames.
+
+    Args:
+        question: The search query / question about the video.
+        fields: Search fields. Default: ["summary", "action", "visual"].
+        transcript_query: Transcript keyword query. Default: same as question.
+        top_k: Number of results per search field.
+        inspect_top: How many top hits to auto-inspect with frame extraction.
+        zoom_level: Frame zoom preset (1=overview, 2=detail, 3=high-res).
+        max_frames_per_hit: Maximum frames to extract per inspected hit.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    index = _get_active_index(video_id)
+    if index is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("quick_answer")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    # Step 1: Search across all fields
+    search_results = kuavi_search_all(
+        query=question,
+        fields=fields,
+        transcript_query=transcript_query or question,
+        top_k=top_k,
+        video_id=video_id,
+    )
+
+    # Step 2: Rank and deduplicate hits across all fields
+    all_hits = []
+    for field_name, hits in search_results.items():
+        if field_name.startswith("_") or not isinstance(hits, list):
+            continue
+        for hit in hits:
+            if isinstance(hit, dict) and "start_time" in hit:
+                all_hits.append(hit)
+
+    # Sort by score descending, deduplicate overlapping time ranges
+    all_hits.sort(key=lambda h: h.get("score", 0), reverse=True)
+    selected = []
+    for hit in all_hits:
+        s, e = hit["start_time"], hit["end_time"]
+        overlaps = any(
+            not (e <= sel["start_time"] or s >= sel["end_time"])
+            for sel in selected
+        )
+        if not overlaps:
+            selected.append(hit)
+        if len(selected) >= inspect_top:
+            break
+
+    # Step 3: Inspect top hits in parallel
+    inspections = []
+    if selected:
+        with ThreadPoolExecutor(max_workers=min(len(selected), 4)) as executor:
+            futures = {}
+            for hit in selected:
+                f = executor.submit(
+                    kuavi_inspect_segment,
+                    start_time=hit["start_time"],
+                    end_time=hit["end_time"],
+                    zoom_level=zoom_level,
+                    max_frames=max_frames_per_hit,
+                    video_id=video_id,
+                )
+                futures[f] = hit
+            for future in as_completed(futures):
+                hit = futures[future]
+                try:
+                    inspection = future.result()
+                    inspection["search_score"] = hit.get("score", 0)
+                    inspection["search_field"] = hit.get("field", "unknown")
+                    inspection["caption"] = hit.get("caption", "")
+                    inspections.append(inspection)
+                except Exception as e:
+                    inspections.append({
+                        "error": str(e),
+                        "time_range": {"start": hit["start_time"], "end": hit["end_time"]},
+                    })
+
+    # Sort inspections by time
+    inspections.sort(key=lambda i: i.get("time_range", {}).get("start", 0))
+
+    result = {
+        "search_results": search_results,
+        "inspections": inspections,
+        "inspected_count": len(inspections),
+    }
     _track_response_tokens(result)
     if warning:
         result["_budget_warning"] = warning

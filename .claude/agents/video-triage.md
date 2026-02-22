@@ -41,7 +41,7 @@ When answering directly:
 - Question asks about fine visual details, spatial layout, or precise timing
 - Long video (>5min) with broad question requiring decomposition
 
-When escalating, dispatch `video-analyst` with the full question. Pass along any useful context from your search (e.g., "Search results suggest the answer is around 150-200s, with topic X mentioned in captions").
+When escalating, dispatch `video-analyst` with the full question. For targeted factual questions (specific values, scores, names), hint that the fast path should be used: "Use kuavi_quick_answer for this targeted factual question." Pass along any useful context from your search (e.g., "Search results suggest the answer is around 150-200s, with topic X mentioned in captions").
 
 ## Anti-Hallucination Rules
 

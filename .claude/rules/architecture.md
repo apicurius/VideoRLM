@@ -76,3 +76,4 @@ kuavi/                  # Main package
 | `kuavi_orient` | Compound: get_index_info + get_scene_list in one call |
 | `kuavi_search_all` | Compound: multi-field search + transcript search in parallel |
 | `kuavi_inspect_segment` | Compound: extract_frames + get_transcript for a time range |
+| `kuavi_quick_answer` | Compound: search_all + inspect_segment for top hits in one call |
