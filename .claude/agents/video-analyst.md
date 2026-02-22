@@ -59,33 +59,41 @@ It resolves conflicts, follows dependencies, and composes the final answer.
 
 ## Core Strategy: SEARCH-FIRST (for simple questions)
 
-**Prefer compound tools over individual calls for efficiency.** Use individual tools only when you need fine-grained control (e.g., a single specific field, custom FPS).
+**Maximize parallel tool calls per turn.** Call independent tools together in the same response to minimize round-trips. Use compound tools over individual calls unless you need fine-grained control.
 
-### Step 1: Orient
-Call `kuavi_orient()` to get video metadata + scene list in one call.
-(Replaces separate `kuavi_get_index_info` + `kuavi_get_scene_list`.)
+### Turn 1: Orient + Search (parallel)
+Call BOTH in the same response — they are independent:
+- `kuavi_orient()` — video metadata + scene list
+- `kuavi_search_all(query, fields=["summary", "action", "visual"], transcript_query=query)` — multi-field + transcript search
 
-### Step 2: Search (multi-field + transcript)
-Call `kuavi_search_all(query, fields=["summary", "action", "visual"], transcript_query=query)` to search across all fields and transcript in one call.
-(Replaces 3-5 separate `kuavi_search_video` + `kuavi_search_transcript` calls.)
+This replaces what was previously 5-7 sequential calls with 2 parallel calls in a single turn.
 
-For additional search needs:
-- **Motion/dynamics**: `kuavi_search_video(query, field="temporal")`
-- **Multiple-choice**: `kuavi_discriminative_vqa(question, candidates)`
-- Use `level=1` for broad localization, then `level=0` for fine-grained search.
+### Turn 2: Inspect hits (parallel)
+From search results, identify the top 1-3 time ranges. Call `kuavi_inspect_segment` for ALL of them in the same response:
+- `kuavi_inspect_segment(start1, end1, zoom_level=2)` — frames + transcript for hit 1
+- `kuavi_inspect_segment(start2, end2, zoom_level=2)` — frames + transcript for hit 2
 
-If results are poor (scores < 0.3), use the `kuavi-deep-search` skill patterns.
+Do NOT inspect one hit, wait for results, then inspect the next. Call them all at once.
 
-### Step 3: Inspect + Cross-reference
-For relevant hits, call `kuavi_inspect_segment(start, end, zoom_level=2)` to get frames + transcript in one call.
-(Replaces separate `kuavi_extract_frames` + `kuavi_get_transcript`.)
+For precise reading, use `zoom_level=3`. Fall back to individual `kuavi_extract_frames` only for custom FPS/resolution.
 
-For precise reading, use `kuavi_inspect_segment(start, end, zoom_level=3)` or fall back to individual `kuavi_extract_frames` for custom parameters.
-
-### Step 4: Verify
+### Turn 3: Verify + Answer
 - Screen content OVERRIDES transcript content
 - ASR frequently misrecognizes names, numbers, and technical terms
 - Require visual confirmation for any specific value
+- If confident, answer immediately. If not, do one more targeted search or zoom pass.
+
+### Parallelism Rules
+- **Independent calls → same turn.** If call B doesn't need call A's result, call them together.
+- **Dependent calls → next turn.** If you need search results to know WHAT to inspect, that's a new turn.
+- **Multiple inspections → always parallel.** Never inspect segments one at a time.
+- **Budget check → piggyback.** Don't waste a turn on `get_session_stats` alone; call it alongside other tools.
+
+### Additional Search (when needed)
+- **Motion/dynamics**: `kuavi_search_video(query, field="temporal")`
+- **Multiple-choice**: `kuavi_discriminative_vqa(question, candidates)`
+- Use `level=1` for broad localization, then `level=0` for fine-grained search.
+- If results are poor (scores < 0.3), use the `kuavi-deep-search` skill patterns.
 
 ## Anti-Hallucination Rules
 

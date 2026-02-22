@@ -22,25 +22,27 @@ You receive a task with:
 
 ## Your Process
 
-### Step 1: Search Within Your Region
-**Prefer compound tools to save budget.** Use `kuavi_search_all` for multi-field search in one call:
-- `kuavi_search_all(query, fields=["summary", "action", "visual"], transcript_query=query, top_k=3)`
+**Maximize parallel tool calls per turn.** Call independent tools together in the same response.
 
-For individual field needs or motion-specific queries:
-- `kuavi_search_video(query, field="temporal", top_k=3)` — for motion/dynamics questions
+### Turn 1: Search + Inspect (parallel)
+Call BOTH in the same response — for your assigned region, you already know the time range:
+- `kuavi_search_all(query, fields=["summary", "action", "visual"], transcript_query=query, top_k=3)` — find relevant segments
+- `kuavi_inspect_segment(start, end, zoom_level=2, max_frames=8)` — get frames + transcript for your full region
 
-Filter results to only those within your assigned time range.
+This gets search context AND visual evidence in a single turn instead of two.
 
-### Step 2: Visual Inspection + Cross-Reference
-Use `kuavi_inspect_segment` to get frames and transcript in one call:
-1. **Overview**: `kuavi_inspect_segment(start, end, zoom_level=1, max_frames=5)`
-2. **Detail**: `kuavi_inspect_segment(start, end, zoom_level=2, max_frames=8)` on narrowed range
-3. **Precise**: `kuavi_inspect_segment(start, end, zoom_level=3, max_frames=5)` for value reading
+For motion-specific queries, add `kuavi_search_video(query, field="temporal", top_k=3)` in the same call.
+
+Filter search results to only those within your assigned time range.
+
+### Turn 2: Targeted follow-up (if needed)
+If Turn 1 reveals a specific sub-region that needs closer inspection:
+- `kuavi_inspect_segment(narrow_start, narrow_end, zoom_level=3, max_frames=5)` — high-res for value reading
 
 For frames-only or transcript-only, use `include_frames=False` or `include_transcript=False`.
-Fall back to individual `kuavi_extract_frames` / `kuavi_get_transcript` when you need custom parameters.
+Fall back to individual `kuavi_extract_frames` / `kuavi_get_transcript` only for custom FPS/resolution.
 
-### Step 4: Pixel Analysis (when needed)
+### Pixel Analysis (when needed)
 For counting, measuring, or comparing:
 - `kuavi_crop_frame` to isolate regions of interest
 - `kuavi_diff_frames` to detect changes between frames
