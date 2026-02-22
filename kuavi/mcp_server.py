@@ -1117,6 +1117,88 @@ def kuavi_classify_segment(
 
 
 @mcp.tool()
+def kuavi_predict_future(
+    start_time: float,
+    end_time: float,
+    n_future_tokens: int = 16,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Predict what content is likely to follow a given time range.
+
+    Uses V-JEPA 2 predictor when feature maps are available, falls back to
+    temporal continuation heuristic (cosine similarity + temporal proximity).
+    """
+    entry = _get_video_entry(video_id)
+    if entry is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("predict_future")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    idx = entry["index"]
+    tools = entry.get("tools", {})
+
+    if "predict_future" not in tools:
+        from kuavi.search import make_predict_future
+
+        tools["predict_future"] = make_predict_future(idx)
+        entry["tools"] = tools
+
+    result = tools["predict_future"]["tool"](
+        start_time=start_time,
+        end_time=end_time,
+        n_future_tokens=n_future_tokens,
+    )
+    _track_response_tokens(result)
+    if warning and isinstance(result, dict):
+        result["_budget_warning"] = warning
+    return result
+
+
+@mcp.tool()
+def kuavi_verify_coherence(
+    start_time: float,
+    end_time: float,
+    threshold: float = 0.3,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Verify temporal coherence between segments and detect anomalies.
+
+    For each consecutive segment pair in the range, computes a coherence score.
+    Uses V-JEPA 2 predictor if available, else pairwise cosine similarity.
+    """
+    entry = _get_video_entry(video_id)
+    if entry is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("verify_coherence")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    idx = entry["index"]
+    tools = entry.get("tools", {})
+
+    if "verify_coherence" not in tools:
+        from kuavi.search import make_verify_coherence
+
+        tools["verify_coherence"] = make_verify_coherence(idx)
+        entry["tools"] = tools
+
+    result = tools["verify_coherence"]["tool"](
+        start_time=start_time,
+        end_time=end_time,
+        threshold=threshold,
+    )
+    _track_response_tokens(result)
+    if warning and isinstance(result, dict):
+        result["_budget_warning"] = warning
+    return result
+
+
+@mcp.tool()
 def kuavi_extract_frames(
     start_time: float,
     end_time: float,

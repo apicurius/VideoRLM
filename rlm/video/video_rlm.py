@@ -265,12 +265,16 @@ class VideoRLM:
                 make_anticipate_action,
                 make_classify_segment,
                 make_discriminative_vqa,
+                make_predict_future,
+                make_verify_coherence,
             )
 
             for extra_factory in [
                 make_discriminative_vqa,
                 make_anticipate_action,
                 make_classify_segment,
+                make_predict_future,
+                make_verify_coherence,
             ]:
                 extra_result = extra_factory(video_index)
                 extra_tools[extra_result["tool"].__name__] = extra_result
