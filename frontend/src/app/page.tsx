@@ -26,6 +26,16 @@ type Timestamp = {
   label: string;
 };
 
+const DEFAULT_PIPELINE_STEPS: PipelineStep[] = [
+  { id: "vjepa", label: "V-JEPA 2 Scene Detection", status: "pending" },
+  { id: "whisper", label: "Qwen3-ASR", status: "pending" },
+  { id: "caption", label: "Segment Captioning", status: "pending" },
+  { id: "gemma", label: "Gemma Text Embeddings", status: "pending" },
+  { id: "siglip", label: "SigLIP2 Visual Embeddings", status: "pending" },
+  { id: "index", label: "Search Index", status: "pending" },
+  { id: "agent", label: "Recursive Agent Loop", status: "pending" },
+];
+
 // Main Page Component
 export default function VideoRLMInterface() {
   const [file, setFile] = useState<File | null>(null);
@@ -104,7 +114,7 @@ export default function VideoRLMInterface() {
     setIsLoading(true);
     setIsPanelOpen(true);
     setAnswerHtml(null);
-    setSteps([]);
+    setSteps(DEFAULT_PIPELINE_STEPS.map(s => ({ ...s, status: "pending" as const })));
     setAgentIterations([]);
     startTimer();
 
@@ -175,7 +185,9 @@ export default function VideoRLMInterface() {
                 stopTimer();
                 setIsLoading(false);
               } else if (event.type === "error") {
-                throw new Error(event.message);
+                setError(event.message || "Pipeline error");
+                stopTimer();
+                setIsLoading(false);
               }
             } catch (err) {
               console.error("Error parsing event stream payload:", line, err);
