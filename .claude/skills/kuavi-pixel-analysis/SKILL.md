@@ -15,6 +15,7 @@ Use `kuavi_eval(code)` to compose pixel tools programmatically when discrete MCP
 - **Comparing regions** across time (same area, different moments)
 - **Reading values** from charts, tables, or graphs
 - **Iterating** over multiple frames with the same analysis
+- **Motion-focused search**: Use `field="temporal"` with `kuavi_search_video` to find motion/dynamics-heavy segments before pixel analysis
 
 ## Pattern 1: Object Counting
 

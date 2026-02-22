@@ -15,6 +15,7 @@ Try different search fields — the same query may match differently depending o
 kuavi_search_video("your query", field="summary", top_k=5)
 kuavi_search_video("your query", field="action", top_k=5)
 kuavi_search_video("your query", field="visual", top_k=5)
+kuavi_search_video("your query", field="temporal", top_k=5)
 ```
 
 If `field="summary"` misses, `field="visual"` may catch it through raw frame embeddings.
@@ -87,7 +88,7 @@ for s in late_scenes:
 ```
 Initial search (field="all") → scores > 0.4? → DONE
                              ↓ no
-Field rotation (summary/action/visual) → found? → DONE
+Field rotation (summary/action/visual/temporal) → found? → DONE
                              ↓ no
 Query reformulation (3 variants) → found? → DONE
                              ↓ no

@@ -3,10 +3,10 @@ name: video-analyst
 description: Specialized video analysis agent with access to KUAVi MCP tools
 model: sonnet
 maxTurns: 20
-tools: Task(video-decomposer, video-segment-analyst, video-synthesizer), mcp__kuavi__kuavi_index_video, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_get_session_stats, mcp__kuavi__kuavi_set_budget, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_analyze_shards
+tools: Task(video-decomposer, video-segment-analyst, video-synthesizer), mcp__kuavi__kuavi_index_video, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_get_session_stats, mcp__kuavi__kuavi_set_budget, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_analyze_shards, mcp__kuavi__kuavi_anticipate_action, mcp__kuavi__kuavi_predict_future, mcp__kuavi__kuavi_verify_coherence, mcp__kuavi__kuavi_classify_segment, mcp__kuavi__kuavi_index_corpus, mcp__kuavi__kuavi_search_corpus, mcp__kuavi__kuavi_corpus_stats
 mcpServers: kuavi
 memory: project
-skills: kuavi-search, kuavi-pixel-analysis, kuavi-deep-search
+skills: kuavi-search, kuavi-pixel-analysis, kuavi-deep-search, kuavi-predictive, kuavi-corpus
 permissionMode: default
 ---
 
@@ -69,6 +69,7 @@ Call `kuavi_get_scene_list` to see the video structure.
 - **Visual descriptions**: `kuavi_search_video(query, field="summary")`
 - **Actions/activities**: `kuavi_search_video(query, field="action")`
 - **Pixel content**: `kuavi_search_video(query, field="visual")`
+- **Motion/dynamics**: `kuavi_search_video(query, field="temporal")`
 - **Broad search**: `kuavi_search_video(query, field="all")`
 - **Spoken content**: `kuavi_search_transcript(query)`
 - **Multiple-choice**: `kuavi_discriminative_vqa(question, candidates)`
@@ -114,6 +115,21 @@ Cross-reference visual evidence with transcript:
 ## Pixel Analysis Delegation
 
 For pixel-level analysis (counting, motion detection, change tracking, brightness), use `kuavi_eval` with patterns from the `kuavi-pixel-analysis` skill. All pixel tools (`crop_frame`, `diff_frames`, `blend_frames`, `threshold_frame`, `frame_info`) are available inside the `kuavi_eval` namespace. For dedicated per-segment pixel work, delegate to the `video-segment-analyst` which has direct access to individual pixel tools.
+
+## Predictive Analysis
+
+Use predictive tools for forward-looking questions:
+- **What happens next?**: `kuavi_anticipate_action(time_point)` — predicts the next action after a given timestamp using V-JEPA 2 predictor
+- **Future prediction**: `kuavi_predict_future(start_time, end_time)` — predicts future content from a time range
+- **Coherence check**: `kuavi_verify_coherence()` — scores temporal coherence across segments, flags anomalies
+- **Activity classification**: `kuavi_classify_segment(start_time, end_time)` — classifies a segment using attentive probes (SSv2, K400, Diving48)
+
+## Corpus Analysis
+
+For multi-video workflows:
+- **Index multiple videos**: `kuavi_index_corpus(video_paths)` — builds cross-video index
+- **Cross-video search**: `kuavi_search_corpus(query)` — semantic search across all indexed videos
+- **Corpus overview**: `kuavi_corpus_stats()` — video count, segment count, action vocabulary
 
 ## Code-Based Reasoning (kuavi_eval)
 

@@ -1,7 +1,7 @@
 ---
 name: video-segment-analyst
 description: Analyzes a specific temporal region of a video in isolation. Use for parallel shard analysis — each instance focuses on one time range and returns a concise summary. Run in background for parallelism.
-tools: mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_crop_frame, mcp__kuavi__kuavi_diff_frames, mcp__kuavi__kuavi_blend_frames, mcp__kuavi__kuavi_threshold_frame, mcp__kuavi__kuavi_frame_info, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_get_index_info
+tools: mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_extract_frames, mcp__kuavi__kuavi_zoom_frames, mcp__kuavi__kuavi_crop_frame, mcp__kuavi__kuavi_diff_frames, mcp__kuavi__kuavi_blend_frames, mcp__kuavi__kuavi_threshold_frame, mcp__kuavi__kuavi_frame_info, mcp__kuavi__kuavi_discriminative_vqa, mcp__kuavi__kuavi_eval, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_anticipate_action, mcp__kuavi__kuavi_predict_future, mcp__kuavi__kuavi_verify_coherence, mcp__kuavi__kuavi_classify_segment, mcp__kuavi__kuavi_analyze_shards
 model: sonnet
 maxTurns: 12
 permissionMode: default
@@ -26,6 +26,7 @@ You receive a task with:
 Use the provided search hints, or decompose the question yourself:
 - `kuavi_search_video(query, field="summary", top_k=3)` — constrain mentally to your time range
 - `kuavi_search_video(query, field="action", top_k=3)` — for activity-focused questions
+- `kuavi_search_video(query, field="temporal", top_k=3)` — for motion/dynamics questions
 - `kuavi_search_transcript(query)` — for spoken content
 
 Filter results to only those within your assigned time range.
@@ -50,6 +51,12 @@ For counting, measuring, or comparing:
 - `kuavi_frame_info` for brightness/color analysis
 
 Use `kuavi_eval` for programmatic composition of multiple pixel tools.
+
+### Step 5: Predictive Analysis (when relevant)
+For questions about what happens next or activity classification:
+- `kuavi_anticipate_action(time_point)` to predict next actions within your region
+- `kuavi_classify_segment(start_time, end_time)` to get benchmark activity labels
+- `kuavi_verify_coherence()` to check for anomalous transitions in your region
 
 ## Output Format
 

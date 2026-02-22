@@ -393,7 +393,7 @@ Indexes are cached by content hash (`MD5(path|size|mtime)`) — repeated queries
 
 ### MCP Tool Server
 
-KUAVi exposes 24 MCP tools via a FastMCP stdio server, organized into five categories:
+KUAVi exposes 27 MCP tools via a FastMCP stdio server, organized into five categories:
 
 #### Search Tools
 
@@ -764,7 +764,7 @@ kuavi/                          # KUAVi package (standalone)
 ├── loader.py                   # VideoLoader, LoadedVideo, VideoSegment
 ├── scene_detection.py          # V-JEPA 2 / SigLIP2 scene boundary detection
 ├── context.py                  # VideoContext, frame encoding
-├── mcp_server.py               # FastMCP stdio server (24 tools)
+├── mcp_server.py               # FastMCP stdio server (27 tools)
 ├── captioners.py               # Pluggable captioner backends (Gemini, OpenAI, local)
 ├── probes.py                   # AttentiveProbe, ProbeRegistry (cross-attention classifiers)
 ├── corpus.py                   # CorpusIndex, CorpusIndexer (multi-video indexing)

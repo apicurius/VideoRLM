@@ -1663,6 +1663,15 @@ def kuavi_eval(code: str) -> dict[str, Any]:
             "zoom_frames": kuavi_zoom_frames,
             "get_session_stats": kuavi_get_session_stats,
             "set_budget": kuavi_set_budget,
+            "anticipate_action": kuavi_anticipate_action,
+            "predict_future": kuavi_predict_future,
+            "verify_coherence": kuavi_verify_coherence,
+            "classify_segment": kuavi_classify_segment,
+            "index_corpus": kuavi_index_corpus,
+            "search_corpus": kuavi_search_corpus,
+            "corpus_stats": kuavi_corpus_stats,
+            "analyze_shards": kuavi_analyze_shards,
+            "set_llm_config": kuavi_set_llm_config,
             "llm_query": lambda prompt, backend="gemini", model="gemini-2.5-flash": _call_llm(
                 prompt, backend, model, role="secondary", _log_context="kuavi_eval:llm_query"
             ),

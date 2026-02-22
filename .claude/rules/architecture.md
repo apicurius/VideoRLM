@@ -16,7 +16,7 @@ kuavi/                  # Main package
 ├── probes.py           # AttentiveProbe, ProbeRegistry (cross-attention classifiers)
 ├── corpus.py           # CorpusIndex, CorpusIndexer (multi-video indexing)
 ├── prompts.py          # VIDEO_ANALYSIS_PROMPT for Claude Code integration
-├── mcp_server.py       # FastMCP stdio server with 24 tools
+├── mcp_server.py       # FastMCP stdio server with 27 tools
 └── cli.py              # CLI: kuavi index/search/analyze/corpus
 ```
 
@@ -29,7 +29,7 @@ kuavi/                  # Main package
 ## Claude Code Integration
 
 - **MCP Server**: `.mcp.json` registers `kuavi` MCP server (stdio)
-- **Skills**: `.claude/skills/kuavi-{index,search,analyze,compare,deep-analyze,pixel-analysis,deep-search}/SKILL.md`
+- **Skills**: `.claude/skills/kuavi-{index,search,analyze,compare,deep-analyze,pixel-analysis,deep-search,predictive,corpus}/SKILL.md`
 - **Agents**:
   - `video-analyst.md` — Orchestrator (Sonnet, 30 turns, can spawn sub-agents)
   - `video-decomposer.md` — Question decomposition (Haiku, 8 turns, search-only tools)
@@ -69,3 +69,6 @@ kuavi/                  # Main package
 | `kuavi_classify_segment` | Classify segment via attentive probes (SSv2, K400, Diving48, etc.) |
 | `kuavi_index_corpus` | Index multiple videos in parallel for cross-video search |
 | `kuavi_search_corpus` | Semantic search across all videos in a corpus index |
+| `kuavi_corpus_stats` | Statistics for the current corpus (video count, segment count, action vocabulary) |
+| `kuavi_set_budget` | Configure tool-call, time, and token limits for the session |
+| `kuavi_set_llm_config` | Route primary and secondary LLM calls to specific backends/models |

@@ -16,6 +16,7 @@ Search an indexed video using semantic search, transcript search, and frame extr
    a. `kuavi_search_video` with `field="all"` for broad results
    b. `kuavi_search_transcript` for spoken content matches
    c. For specific values/text, also search with `field="visual"`
+   d. For motion/dynamics: `kuavi_search_video` with `field="temporal"`
 4. For the top results, use `kuavi_extract_frames` to get visual evidence.
 5. Present results with timestamps, captions, and confidence scores.
 6. Cross-reference visual results with transcript using `kuavi_get_transcript`.
@@ -26,6 +27,7 @@ User: `/kuavi-search person cooking pasta`
 
 1. `kuavi_search_video(query="person cooking pasta", field="all", top_k=5)`
 2. `kuavi_search_video(query="cooking pasta", field="action", top_k=3)`
-3. `kuavi_search_transcript(query="pasta")`
-4. For top hits: `kuavi_extract_frames(start_time, end_time)`
-5. Report findings with timestamps and visual descriptions
+3. `kuavi_search_video(query="cooking motion", field="temporal", top_k=3)`
+4. `kuavi_search_transcript(query="pasta")`
+5. For top hits: `kuavi_extract_frames(start_time, end_time)`
+6. Report findings with timestamps and visual descriptions

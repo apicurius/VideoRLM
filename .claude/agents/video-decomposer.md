@@ -38,6 +38,8 @@ Identify what the question requires:
 Use targeted searches to identify which temporal regions are relevant:
 - `kuavi_search_video(query, field="summary")` for general content
 - `kuavi_search_video(query, field="action")` for activities
+- `kuavi_search_video(query, field="temporal")` for motion/dynamics
+- `kuavi_search_video(query, field="visual")` for appearance/objects
 - `kuavi_search_transcript(query)` for spoken content
 
 ### Step 4: Produce the Decomposition Plan

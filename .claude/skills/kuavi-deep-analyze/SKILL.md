@@ -17,7 +17,7 @@ Perform comprehensive, multi-pass video analysis with parallel temporal sharding
 2. **Index**: If the video is not yet indexed, call `kuavi_index_video`.
 3. **Orient**: Call `kuavi_get_scene_list` to understand the video structure.
 4. **Parallel Shard Analysis**: Call `kuavi_analyze_shards` with the question to get per-shard answers from parallel LLM workers. Use this to identify which temporal regions are most relevant.
-5. **Pass 1 — Visual Search**: Use `kuavi_search_video` across multiple fields (summary, action, visual) to find relevant segments. Cross-reference with shard analysis results.
+5. **Pass 1 — Visual Search**: Use `kuavi_search_video` across multiple fields (summary, action, visual, temporal) to find relevant segments. Cross-reference with shard analysis results.
 6. **Pass 2 — Transcript Search**: Use `kuavi_search_transcript` and `kuavi_get_transcript` to find spoken evidence. Note any discrepancies with visual findings.
 7. **Pass 3 — Cross-Reference**: For key findings, use the 3-pass zoom protocol:
    - Level 1 zoom to locate

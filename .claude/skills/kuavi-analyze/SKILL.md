@@ -18,7 +18,7 @@ Perform comprehensive video analysis: index, search, reason, and answer.
 3. **Orient**: Call `kuavi_get_scene_list` to understand the video structure.
 4. **Search**: Use the SEARCH-FIRST strategy to find relevant content:
    - Decompose the question into search sub-queries
-   - Search across multiple fields (summary, action, visual)
+   - Search across multiple fields (summary, action, visual, temporal)
    - Search transcript for spoken content
 5. **Inspect**: Extract frames for the most relevant segments.
 6. **Reason**: Synthesize findings from visual evidence and transcript.

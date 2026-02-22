@@ -26,3 +26,17 @@ Call `kuavi_index_video` with `video_path="/path/to/video.mp4"`, then report:
 - Number of scene boundaries
 - Whether transcript was generated
 - Whether embeddings are available
+
+## Advanced Options
+
+- **Overlapping V-JEPA 2 windows**: Set `scene_stride` for per-frame averaged embeddings (smoother scene detection)
+- **Feature map storage**: Enable `store_feature_maps=True` for spatial analysis
+- **Auto FPS**: Set `auto_fps=True` to automatically compute FPS from video duration (targets 120 frames)
+
+## Corpus Indexing
+
+For multi-video workflows, use `kuavi_index_corpus` instead:
+```
+kuavi_index_corpus(video_paths=["/path/to/video1.mp4", "/path/to/video2.mp4"])
+```
+This builds a cross-video index enabling `kuavi_search_corpus` for cross-video semantic search.

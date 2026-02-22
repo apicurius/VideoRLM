@@ -43,6 +43,8 @@ For complex questions, it orchestrates: decompose → parallel segment analysis 
 | `kuavi-search` | Standard multi-field search |
 | `kuavi-analyze` | End-to-end analysis |
 | `kuavi-deep-analyze` | Multi-pass with shard analysis |
+| `kuavi-predictive` | Action anticipation, future prediction, coherence verification |
+| `kuavi-corpus` | Multi-video corpus indexing and cross-video search |
 
 ## Hooks
 
@@ -53,4 +55,4 @@ For complex questions, it orchestrates: decompose → parallel segment analysis 
 
 ## Compaction
 
-When compacting, always preserve: the list of modified files, current task context, active video path and index info, sub-agent dispatch state, and KUAVi MCP tool names (`kuavi_index_video`, `kuavi_search_video`, `kuavi_search_transcript`, `kuavi_get_transcript`, `kuavi_get_scene_list`, `kuavi_discriminative_vqa`, `kuavi_extract_frames`, `kuavi_get_index_info`).
+When compacting, always preserve: the list of modified files, current task context, active video path and index info, sub-agent dispatch state, and KUAVi MCP tool names (`kuavi_index_video`, `kuavi_search_video`, `kuavi_search_transcript`, `kuavi_get_transcript`, `kuavi_get_scene_list`, `kuavi_discriminative_vqa`, `kuavi_extract_frames`, `kuavi_get_index_info`, `kuavi_anticipate_action`, `kuavi_predict_future`, `kuavi_verify_coherence`, `kuavi_classify_segment`).

@@ -1,7 +1,7 @@
 ---
 name: video-synthesizer
 description: Synthesizes results from multiple parallel segment analyses into a coherent final answer. Use after dispatching video-segment-analyst subagents.
-tools: mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript
+tools: mcp__kuavi__kuavi_get_transcript, mcp__kuavi__kuavi_get_scene_list, mcp__kuavi__kuavi_get_index_info, mcp__kuavi__kuavi_search_video, mcp__kuavi__kuavi_search_transcript, mcp__kuavi__kuavi_verify_coherence, mcp__kuavi__kuavi_discriminative_vqa
 model: sonnet
 maxTurns: 8
 permissionMode: default
@@ -35,6 +35,9 @@ If the decomposition plan specified sequential dependencies (sq2 depends on sq1)
 
 ### Step 4: Cross-Reference (optional)
 If sub-answers reference specific moments, you may call `kuavi_get_transcript` or `kuavi_search_video` to verify a critical claim. Keep this to 2-3 calls maximum — your primary job is synthesis, not re-analysis.
+
+### Step 4b: Coherence Verification (optional)
+If sub-answers span multiple temporal regions, use `kuavi_verify_coherence` to check whether transitions between analyzed segments are natural or anomalous. This helps identify surprising events that may be relevant to the synthesis.
 
 ### Step 5: Compose Final Answer
 Structure your synthesis:
