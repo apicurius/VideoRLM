@@ -210,7 +210,7 @@ VideoRLM extends the RLM paradigm to video understanding by **injecting video an
 │     ├──▶ VideoIndexer ──▶ VideoIndex                     │
 │     │       │  V-JEPA 2 scene detection                  │
 │     │       │  SigLIP2 frame/text embeddings             │
-│     │       │  Whisper ASR transcription                 │
+│     │       │  Qwen3-ASR transcription                   │
 │     │       │  Tree-of-Captions + Self-Refine            │
 │     │                                                    │
 │     └──▶ Build extra_tools:                              │
@@ -331,7 +331,7 @@ Raw Video
                           ▼
 ┌──────────────────────────────────────────────────────┐
 │ Stage 3: Transcript Extraction                       │
-│   ffmpeg → PCM audio → faster-whisper (int8)         │
+│   ffmpeg → PCM audio → Qwen3-ASR + ForcedAligner     │
 │   Or load pre-computed transcript from JSON file     │
 └─────────────────────────┬────────────────────────────┘
                           ▼

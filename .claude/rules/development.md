@@ -27,4 +27,4 @@ uv run python -m kuavi.cli analyze <video> -q "question"
 
 - **Core**: opencv-python, numpy, scikit-learn, mcp
 - **Embeddings** (optional): torch, transformers, sentence-transformers
-- **ASR** (optional): faster-whisper
+- **ASR** (optional): qwen-asr

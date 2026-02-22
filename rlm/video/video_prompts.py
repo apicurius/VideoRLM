@@ -122,7 +122,7 @@ print(f"Visual: {{visual_description}}")
 print(f"Speech: {{transcript}}")
 ```
 5. VERIFY: Cross-reference annotations (action, actor, summary) with visual evidence and transcript.
-6. NAME & NUMBER VERIFICATION (CRITICAL): ASR/Whisper frequently misrecognizes proper names, numbers, decimals, and technical terms. Before writing your final answer, ALWAYS verify visually:
+6. NAME & NUMBER VERIFICATION (CRITICAL): ASR/Qwen3-ASR frequently misrecognizes proper names, numbers, decimals, and technical terms. Before writing your final answer, ALWAYS verify visually:
    - For names: extract the title slide (first 10 seconds) and read the presenter's name visually. The name printed on slides OVERRIDES any name from the transcript.
    - For numbers/scores/values: find the frame showing the number and read it visually. The number shown on screen OVERRIDES any number from the transcript. Never use a transcript number as your final answer without visual confirmation from a frame.
    Example: If the transcript says "the OOLONG score is 62.4" but you cannot find or read that number in any frame, do NOT report 62.4. Instead, keep searching or report that the value could not be visually confirmed.

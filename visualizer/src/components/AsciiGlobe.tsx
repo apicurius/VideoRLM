@@ -103,7 +103,7 @@ export function AsciiRLM() {
 const KUAVI_DIAGRAM = `
   ┌──────────┐      ┌──────────────────────────────────────────┐
   │  Video   │      │           Indexing Pipeline               │
-  │──────────│ ───► │  V-JEPA 2  │  SigLIP2  │  Whisper ASR   │
+  │──────────│ ───► │  V-JEPA 2  │  SigLIP2  │  Qwen3-ASR     │
   │   .mp4   │      └────────────────────┬─────────────────────┘
   └──────────┘                           │
                                ┌─────────▼─────────┐
@@ -157,7 +157,7 @@ export function AsciiKUAVi() {
             );
           }
           // Model names — violet bold (check before generic Video/Index)
-          if (line.includes('V-JEPA') || line.includes('SigLIP2') || line.includes('Whisper')) {
+          if (line.includes('V-JEPA') || line.includes('SigLIP2') || line.includes('Qwen3-ASR')) {
             if (!'[]│─┌┐└┘'.includes(char) && char !== ' ') {
               return <span key={key} className="text-violet-600 dark:text-violet-400 font-bold">{char}</span>;
             }
