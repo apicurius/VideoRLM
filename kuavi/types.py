@@ -61,3 +61,4 @@ class KUAViConfig:
     hierarchical: bool = False
     scene_clip_size: int = 16
     scene_model_preset: str | None = None
+    caption_preset: str | None = None

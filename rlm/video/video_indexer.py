@@ -36,6 +36,7 @@ class VideoIndex:
     frame_embeddings: np.ndarray | None = None
     visual_embed_fn: Any = None
     temporal_embeddings: np.ndarray | None = None  # (N_segments, 1024) from V-JEPA 2
+    temporal_feature_maps: np.ndarray | None = None  # (N_segments, num_patches, D) from V-JEPA 2
     segment_hierarchy: list[list[dict]] = field(default_factory=list)
     hierarchy_embeddings: list[np.ndarray | None] = field(default_factory=list)
 
@@ -59,6 +60,8 @@ class VideoIndex:
             arrays["frame_embeddings"] = self.frame_embeddings
         if self.temporal_embeddings is not None:
             arrays["temporal_embeddings"] = self.temporal_embeddings
+        if self.temporal_feature_maps is not None:
+            arrays["temporal_feature_maps"] = self.temporal_feature_maps
         for lvl_idx, h_emb in enumerate(self.hierarchy_embeddings):
             if h_emb is not None:
                 arrays[f"hierarchy_emb_L{lvl_idx}"] = h_emb
@@ -89,6 +92,7 @@ class VideoIndex:
         action_embeddings = npz["action_embeddings"] if "action_embeddings" in npz else None
         frame_embeddings = npz["frame_embeddings"] if "frame_embeddings" in npz else None
         temporal_embeddings = npz["temporal_embeddings"] if "temporal_embeddings" in npz else None
+        temporal_feature_maps = npz["temporal_feature_maps"] if "temporal_feature_maps" in npz else None
 
         # Load hierarchy embeddings
         hierarchy_embeddings: list[np.ndarray | None] = []
@@ -103,6 +107,7 @@ class VideoIndex:
             action_embeddings=action_embeddings,
             frame_embeddings=frame_embeddings,
             temporal_embeddings=temporal_embeddings,
+            temporal_feature_maps=temporal_feature_maps,
             transcript=metadata["transcript"],
             scene_boundaries=metadata["scene_boundaries"],
             embedding_quality=metadata.get("embedding_quality", {}),
@@ -289,6 +294,7 @@ class VideoIndexer:
         transcript_path: str | None = None,
         refine_rounds: int = 3,
         mode: str = "full",
+        store_feature_maps: bool = False,
     ) -> VideoIndex:
         """Build a full searchable index from a loaded video.
 
@@ -369,6 +375,7 @@ class VideoIndexer:
         hierarchy_result: dict | None = None
         vjepa_clip_embeddings: np.ndarray | None = None
         vjepa_clip_timestamps: list[float] | None = None
+        vjepa_clip_feature_maps: list[np.ndarray] | None = None
         logger.info("[pipeline] V-JEPA 2: detecting scenes in %d frames", len(frames))
         if self._scene_model_name:
             # V-JEPA 2 clip-level scene detection
@@ -378,7 +385,12 @@ class VideoIndexer:
             )
 
             # Compute clip embeddings once and cache for reuse
-            vjepa_clip_embeddings = self._encode_clips_vjepa(clips)
+            if store_feature_maps:
+                vjepa_clip_embeddings, vjepa_clip_feature_maps = self._encode_clips_vjepa(
+                    clips, return_full=True
+                )
+            else:
+                vjepa_clip_embeddings = self._encode_clips_vjepa(clips)
             vjepa_clip_timestamps = clip_timestamps
 
             def _vjepa_embed_fn(_frames):
@@ -638,8 +650,10 @@ class VideoIndexer:
 
         # 7d. Aggregate V-JEPA 2 temporal embeddings per segment
         temporal_embeddings: np.ndarray | None = None
+        temporal_feature_maps: np.ndarray | None = None
         if vjepa_clip_embeddings is not None and vjepa_clip_timestamps is not None:
             temporal_per_seg: list[np.ndarray] = []
+            feature_maps_per_seg: list[np.ndarray] = []
             for seg in segment_infos:
                 clip_indices = [
                     i
@@ -652,9 +666,18 @@ class VideoIndexer:
                     if norm > 1e-10:
                         seg_emb = seg_emb / norm
                     temporal_per_seg.append(seg_emb)
+                    if vjepa_clip_feature_maps is not None:
+                        seg_maps = np.stack([vjepa_clip_feature_maps[i] for i in clip_indices])
+                        feature_maps_per_seg.append(seg_maps.mean(axis=0))
                 else:
                     temporal_per_seg.append(np.zeros(vjepa_clip_embeddings.shape[1]))
+                    if vjepa_clip_feature_maps is not None:
+                        num_patches = vjepa_clip_feature_maps[0].shape[0]
+                        patch_dim = vjepa_clip_feature_maps[0].shape[1]
+                        feature_maps_per_seg.append(np.zeros((num_patches, patch_dim)))
             temporal_embeddings = np.stack(temporal_per_seg)
+            if vjepa_clip_feature_maps is not None and feature_maps_per_seg:
+                temporal_feature_maps = np.stack(feature_maps_per_seg)
             temporal_embeddings = self._smooth_embeddings(temporal_embeddings, window=3)
             self._check_embedding_quality(temporal_embeddings, label="temporal")
 
@@ -707,6 +730,7 @@ class VideoIndexer:
             action_embeddings=action_embeddings,
             frame_embeddings=frame_embeddings,
             temporal_embeddings=temporal_embeddings,
+            temporal_feature_maps=temporal_feature_maps,
             transcript=transcript,
             scene_boundaries=scene_boundaries,
             embedding_quality=quality,
@@ -2054,7 +2078,11 @@ class VideoIndexer:
         self._ensure_model()
         return self._encode_texts([text])[0]
 
-    def _encode_clips_vjepa(self, clips: list[list[np.ndarray]]) -> np.ndarray:
+    def _encode_clips_vjepa(
+        self,
+        clips: list[list[np.ndarray]],
+        return_full: bool = False,
+    ) -> np.ndarray | tuple[np.ndarray, list[np.ndarray]]:
         """Embed video clips using V-JEPA 2.
 
         Each clip is a list of BGR frames. Returns an ``(N_clips, 1024)``
@@ -2064,6 +2092,13 @@ class VideoIndexer:
         Clips are grouped by frame count before batching because the video
         processor requires all clips in a batch to have the same temporal
         length (e.g. the remainder clip may be shorter than the rest).
+
+        Args:
+            clips: List of clips, each a list of frames (H, W, C) BGR.
+            return_full: When False (default), returns pooled embeddings array
+                of shape (N_clips, D). When True, returns a tuple
+                ``(pooled_embs, feature_maps)`` where ``feature_maps`` is a
+                list of arrays of shape ``(num_patches, D)``, one per clip.
         """
         from itertools import groupby
 
@@ -2074,6 +2109,7 @@ class VideoIndexer:
         indexed_clips.sort(key=lambda x: len(x[1]))
 
         result_embs = [None] * len(clips)
+        result_maps: list[np.ndarray | None] | None = [None] * len(clips) if return_full else None
         batch_size = 2 if getattr(self, "_scene_embed_dim", 1024) >= 1280 else 4
 
         for _frame_count, group in groupby(indexed_clips, key=lambda x: len(x[1])):
@@ -2094,10 +2130,17 @@ class VideoIndexer:
                     clip_embs = patch_tokens.mean(dim=1)  # (batch, 1024)
                     clip_embs = clip_embs / clip_embs.norm(p=2, dim=-1, keepdim=True)
                 embs_np = clip_embs.cpu().float().numpy()
+                if return_full:
+                    maps_np = patch_tokens.cpu().float().numpy()
                 for j, (orig_idx, _clip) in enumerate(batch_items):
                     result_embs[orig_idx] = embs_np[j]
+                    if return_full:
+                        result_maps[orig_idx] = maps_np[j]
 
-        return np.stack(result_embs)
+        pooled = np.stack(result_embs)
+        if return_full:
+            return pooled, result_maps
+        return pooled
 
     def _group_frames_into_clips(
         self,
