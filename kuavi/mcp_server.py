@@ -1029,6 +1029,93 @@ def kuavi_discriminative_vqa(
 
 
 @mcp.tool()
+def kuavi_anticipate_action(
+    time_point: float,
+    top_k: int = 3,
+    candidates: list[str] | None = None,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Predict what happens next after a given time point.
+
+    Uses V-JEPA 2 predictor when available, falls back to embedding
+    similarity for anticipation.
+    """
+    entry = _get_video_entry(video_id)
+    if entry is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("anticipate")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    idx = entry["index"]
+    tools = entry.get("tools", {})
+
+    if "anticipate_action" not in tools:
+        from kuavi.search import make_anticipate_action
+
+        tools["anticipate_action"] = make_anticipate_action(idx)
+        entry["tools"] = tools
+
+    result = tools["anticipate_action"]["tool"](
+        time_point=time_point,
+        top_k=top_k,
+        candidates=candidates,
+    )
+    _track_response_tokens(result)
+    if warning and isinstance(result, dict):
+        result["_budget_warning"] = warning
+    return result
+
+
+@mcp.tool()
+def kuavi_classify_segment(
+    task: str = "k400",
+    start_time: float | None = None,
+    end_time: float | None = None,
+    segment_index: int | None = None,
+    top_k: int = 5,
+    video_id: str | None = None,
+) -> dict[str, Any]:
+    """Classify a video segment using attentive probes on V-JEPA 2 features.
+
+    Requires store_feature_maps=True during indexing.
+    task options: ssv2, k400, diving48, jester, coin, imagenet.
+    Provide either segment_index or (start_time, end_time).
+    """
+    entry = _get_video_entry(video_id)
+    if entry is None:
+        return {"error": "No video indexed. Call kuavi_index_video first."}
+
+    _track_tool_call("classify")
+    gate, warning = _check_budget_gate()
+    if gate is not None:
+        return gate
+
+    idx = entry["index"]
+    tools = entry.get("tools", {})
+
+    if "classify_segment" not in tools:
+        from kuavi.search import make_classify_segment
+
+        tools["classify_segment"] = make_classify_segment(idx)
+        entry["tools"] = tools
+
+    result = tools["classify_segment"]["tool"](
+        start_time=start_time,
+        end_time=end_time,
+        segment_index=segment_index,
+        task=task,
+        top_k=top_k,
+    )
+    _track_response_tokens(result)
+    if warning and isinstance(result, dict):
+        result["_budget_warning"] = warning
+    return result
+
+
+@mcp.tool()
 def kuavi_extract_frames(
     start_time: float,
     end_time: float,

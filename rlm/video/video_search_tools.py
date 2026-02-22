@@ -699,3 +699,230 @@ def make_get_scene_list(index: VideoIndex) -> dict[str, Any]:
             "caption, and annotation. Use this to understand the video structure."
         ),
     }
+
+
+def make_anticipate_action(index: VideoIndex) -> dict[str, Any]:
+    """Predict what happens next after a given time point."""
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    def anticipate_action(
+        time_point: float,
+        top_k: int = 3,
+        candidates: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Predict what happens after the given time point.
+
+        Args:
+            time_point: Time in seconds to predict from.
+            top_k: Number of candidate future segments to return.
+            candidates: Optional list of action descriptions to rank.
+
+        Returns:
+            Dict with 'predicted_segments' (nearest future segments by embedding)
+            and optionally 'candidate_ranking' (if candidates provided).
+        """
+        predict_fn = getattr(index, "_predict_fn", None)
+        if predict_fn is None:
+            # Fallback: use embedding similarity restricted to future segments
+            context_seg_idx = None
+            for i, seg in enumerate(index.segments):
+                if seg["start_time"] <= time_point <= seg["end_time"]:
+                    context_seg_idx = i
+                    break
+                if seg["end_time"] <= time_point:
+                    context_seg_idx = i
+
+            if context_seg_idx is None:
+                return {"error": "No segment found at the given time point", "predicted_segments": []}
+
+            if index.embeddings is None:
+                return {"error": "No embeddings available", "predicted_segments": []}
+
+            context_emb = index.embeddings[context_seg_idx].reshape(1, -1)
+
+            future_mask = np.array([
+                seg["start_time"] > time_point for seg in index.segments
+            ])
+
+            if not future_mask.any():
+                return {"predicted_segments": [], "note": "No future segments available"}
+
+            scores = cosine_similarity(context_emb, index.embeddings)[0]
+            scores[~future_mask] = -np.inf
+            scores[context_seg_idx] = -np.inf
+
+            top_indices = np.argsort(scores)[::-1][:top_k]
+
+            predicted = []
+            for idx in top_indices:
+                if scores[idx] <= -np.inf:
+                    continue
+                seg = index.segments[idx]
+                predicted.append({
+                    "start_time": seg["start_time"],
+                    "end_time": seg["end_time"],
+                    "score": round(float(scores[idx]), 4),
+                    "caption": seg.get("caption", ""),
+                    "annotation": seg.get("annotation", {}),
+                })
+
+            result: dict[str, Any] = {
+                "context_segment": {
+                    "start_time": index.segments[context_seg_idx]["start_time"],
+                    "end_time": index.segments[context_seg_idx]["end_time"],
+                    "caption": index.segments[context_seg_idx].get("caption", ""),
+                },
+                "predicted_segments": predicted,
+                "method": "embedding_similarity",
+                "note": "V-JEPA 2 predictor not available; using embedding similarity fallback",
+            }
+
+            if candidates and index.embed_fn is not None:
+                candidate_embs = np.stack([
+                    np.asarray(index.embed_fn(c)).flatten() for c in candidates
+                ])
+                if predicted:
+                    pred_indices = [
+                        i for i in top_indices if scores[i] > -np.inf
+                    ][:top_k]
+                    pred_embs = index.embeddings[pred_indices]
+                    mean_pred = pred_embs.mean(axis=0).reshape(1, -1)
+                    cand_scores = cosine_similarity(candidate_embs, mean_pred).flatten()
+                    ranking = sorted(
+                        zip(candidates, cand_scores),
+                        key=lambda x: x[1], reverse=True,
+                    )
+                    result["candidate_ranking"] = [
+                        {"action": a, "confidence": round(float(s), 4)}
+                        for a, s in ranking
+                    ]
+
+            return result
+
+        # Full predictor path (when V-JEPA 2 predictor is available)
+        predicted_emb = predict_fn(time_point)
+        if predicted_emb is None:
+            return {"error": "Prediction failed", "predicted_segments": []}
+
+        predicted_emb = predicted_emb.reshape(1, -1)
+        if index.temporal_embeddings is not None:
+            scores = cosine_similarity(predicted_emb, index.temporal_embeddings)[0]
+        elif index.embeddings is not None:
+            scores = cosine_similarity(predicted_emb, index.embeddings)[0]
+        else:
+            return {"error": "No embeddings available", "predicted_segments": []}
+
+        top_indices = np.argsort(scores)[::-1][:top_k]
+        predicted_segs = []
+        for idx in top_indices:
+            seg = index.segments[idx]
+            predicted_segs.append({
+                "start_time": seg["start_time"],
+                "end_time": seg["end_time"],
+                "score": round(float(scores[idx]), 4),
+                "caption": seg.get("caption", ""),
+            })
+
+        return {
+            "predicted_segments": predicted_segs,
+            "method": "vjepa2_predictor",
+        }
+
+    return {
+        "tool": anticipate_action,
+        "description": (
+            "Predict what happens next after a given time point in the video. "
+            "Parameters: time_point (float, seconds), top_k (int, default 3), "
+            "candidates (optional list of action descriptions to rank). "
+            "Returns predicted future segments and optional candidate ranking."
+        ),
+    }
+
+
+def make_classify_segment(index: VideoIndex) -> dict[str, Any]:
+    """Classify video segments using attentive probes on V-JEPA 2 features."""
+
+    def classify_segment(
+        start_time: float | None = None,
+        end_time: float | None = None,
+        segment_index: int | None = None,
+        task: str = "k400",
+        top_k: int = 5,
+    ) -> dict[str, Any]:
+        """Classify a video segment using a pre-trained attentive probe.
+
+        Args:
+            start_time: Start time of segment (used with end_time).
+            end_time: End time of segment (used with start_time).
+            segment_index: Direct segment index (alternative to time range).
+            task: Classification task name (e.g., "k400", "ssv2").
+            top_k: Number of top predictions.
+
+        Returns:
+            Dict with predictions and segment info.
+        """
+        if index.temporal_feature_maps is None:
+            return {
+                "error": (
+                    "No temporal feature maps available. "
+                    "Re-index with store_feature_maps=True to enable classification."
+                )
+            }
+
+        if segment_index is not None:
+            if segment_index < 0 or segment_index >= len(index.segments):
+                return {"error": f"Invalid segment_index {segment_index}"}
+            seg_idx = segment_index
+        elif start_time is not None and end_time is not None:
+            seg_idx = None
+            best_overlap = 0.0
+            for i, seg in enumerate(index.segments):
+                overlap = min(seg["end_time"], end_time) - max(seg["start_time"], start_time)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    seg_idx = i
+            if seg_idx is None:
+                return {"error": "No segment found in the given time range"}
+        else:
+            return {"error": "Provide either segment_index or (start_time, end_time)"}
+
+        features = index.temporal_feature_maps[seg_idx]  # (num_patches, D)
+
+        registry = getattr(index, "_probe_registry", None)
+        if registry is None:
+            from kuavi.probes import ProbeRegistry
+
+            registry = ProbeRegistry.from_configs()
+            index._probe_registry = registry  # type: ignore[attr-defined]
+
+        probe = registry.get(task)
+        if probe is None:
+            available = registry.available_tasks()
+            return {"error": f"Unknown task '{task}'. Available: {available}"}
+
+        predictions = probe.classify(features, top_k=top_k)
+
+        seg = index.segments[seg_idx]
+        return {
+            "segment": {
+                "index": seg_idx,
+                "start_time": seg["start_time"],
+                "end_time": seg["end_time"],
+                "caption": seg.get("caption", ""),
+            },
+            "task": task,
+            "task_description": probe.config.description,
+            "predictions": predictions,
+            "weights_loaded": probe._model is not None and probe.config.weights_path is not None,
+        }
+
+    return {
+        "tool": classify_segment,
+        "description": (
+            "Classify a video segment using attentive probes on V-JEPA 2 features. "
+            "Parameters: start_time (float), end_time (float), OR segment_index (int); "
+            "task (str, default 'k400' — options: ssv2, k400, diving48, jester, coin, imagenet); "
+            "top_k (int, default 5). "
+            "Requires store_feature_maps=True during indexing."
+        ),
+    }

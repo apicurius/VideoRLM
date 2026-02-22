@@ -169,6 +169,7 @@ class VideoIndexer:
         self._memory_cache: dict[str, VideoIndex] = {}
         self._scene_model = None
         self._scene_processor = None
+        self._scene_predictor = None
 
         if scene_model_preset is not None:
             if scene_model_preset not in VJEPA2_PRESETS:
@@ -255,6 +256,60 @@ class VideoIndexer:
         )
         self._scene_torch_device = device
         logger.info("Loaded scene model %s on %s", self._scene_model_name, device)
+
+        # Try to access predictor from model (may not be available in HF checkpoint)
+        predictor = getattr(self._scene_model, "predictor", None)
+        if predictor is not None:
+            self._scene_predictor = predictor
+            logger.info("V-JEPA 2 predictor loaded from model checkpoint")
+        else:
+            self._scene_predictor = None
+            logger.warning(
+                "V-JEPA 2 predictor not found in HF checkpoint %s. "
+                "Action anticipation will not be available. "
+                "The predictor may need to be loaded from the original "
+                "facebookresearch/vjepa2 repository weights.",
+                self._scene_model_name,
+            )
+
+    def _predict_future_embedding(
+        self,
+        context_features: np.ndarray,
+        n_future_tokens: int = 16,
+    ) -> np.ndarray | None:
+        """Predict future frame representation using V-JEPA 2 predictor.
+
+        Args:
+            context_features: (num_patches, D) spatial feature map from a segment.
+            n_future_tokens: Number of future token positions to predict.
+
+        Returns:
+            (n_future_tokens, D) predicted feature map, or None if predictor unavailable.
+        """
+        if self._scene_predictor is None:
+            return None
+
+        import torch
+
+        # Convert to tensor and add batch dimension
+        context_tensor = torch.from_numpy(context_features).unsqueeze(0).to(
+            self._scene_torch_device, dtype=torch.float16
+        )
+
+        # Create mask tokens for future positions
+        D = context_features.shape[-1]
+        mask_tokens = torch.zeros(
+            1, n_future_tokens, D,
+            device=self._scene_torch_device, dtype=torch.float16,
+        )
+
+        with torch.no_grad():
+            try:
+                predicted = self._scene_predictor(context_tensor, mask_tokens)
+                return predicted.squeeze(0).cpu().float().numpy()
+            except Exception as e:
+                logger.warning("Predictor forward pass failed: %s", e)
+                return None
 
     def _ensure_model(self) -> None:
         """Lazily load the SigLIP2 model on first use."""
