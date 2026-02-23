@@ -587,6 +587,7 @@ class VideoIndexer:
 
             # 5. Caption each segment (if a caption function was provided)
             if caption_fn is not None or frame_caption_fn is not None:
+                logger.info("[pipeline] captioning: starting for %d segments", len(segment_infos))
                 # Prepare all segments first (skip near-duplicates)
                 caption_tasks = []
                 for seg in segment_infos:
@@ -655,6 +656,9 @@ class VideoIndexer:
                 for seg in segment_infos:
                     seg.pop("_frames", None)
 
+            captioned = sum(1 for s in segment_infos if s.get("caption"))
+            logger.info("[pipeline] captioning: %d segments captioned", captioned)
+
             # 5c. Propagate captions from representatives to skipped duplicates
             for seg in segment_infos:
                 src_idx = seg.get("_caption_source")
@@ -692,6 +696,7 @@ class VideoIndexer:
             )
 
         # 7. Embed captions
+        logger.info("[pipeline] Gemma: embedding captions for %d segments", len(segment_infos))
         embeddings, action_embeddings = self._embed_captions(segment_infos)
 
         # 7b. Smooth embeddings to reduce noise across adjacent segments
@@ -701,6 +706,7 @@ class VideoIndexer:
             action_embeddings = self._smooth_embeddings(action_embeddings, window=3)
 
         quality = self._check_embedding_quality(embeddings, label="caption")
+        logger.info("[pipeline] Gemma: caption embeddings complete")
 
         # 7b2. Semantic deduplication via k-means clustering (optional)
         if semantic_dedup:
@@ -722,10 +728,12 @@ class VideoIndexer:
             else:
                 rep_frames.append(frames[0])  # fallback
 
+        logger.info("[pipeline] SigLIP2: building frame embeddings for %d segments", len(rep_frames))
         self._ensure_model()
         frame_embeddings = self._encode_frames(rep_frames)
         frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
         self._check_embedding_quality(frame_embeddings, label="frame")
+        logger.info("[pipeline] SigLIP2: %d frame embeddings built", len(rep_frames))
 
         # 7d. Aggregate V-JEPA 2 temporal embeddings per segment
         temporal_embeddings: np.ndarray | None = None

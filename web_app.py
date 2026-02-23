@@ -213,6 +213,14 @@ class _QueueLogHandler(logging.Handler):
                 self._emit_step("whisper", "done", detail)
             else:
                 self._emit_step("whisper", "running", detail)
+        elif "[pipeline] captioning:" in msg:
+            detail = msg.split("[pipeline] ")[-1]
+            if "starting" in msg:
+                self._emit_step("caption", "running", detail)
+            elif "segments captioned" in msg:
+                self._emit_step("caption", "done", detail)
+            else:
+                self._emit_step("caption", "running", detail)
         elif "Gemini caption" in msg or "caption_fn" in msg:
             if "failed" in msg:
                 self._emit_step("caption", "running", "retrying...")
