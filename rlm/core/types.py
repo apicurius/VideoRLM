@@ -203,9 +203,15 @@ class RLMMetadata:
     environment_type: str
     environment_kwargs: dict[str, Any]
     other_backends: list[str] | None = None
+    # Optional video fields (set by VideoRLM)
+    video_path: str | None = None
+    fps: float | None = None
+    num_segments: int | None = None
+    max_frames_per_segment: int | None = None
+    resize: tuple[int, int] | None = None
 
     def to_dict(self):
-        return {
+        d = {
             "root_model": self.root_model,
             "max_depth": self.max_depth,
             "max_iterations": self.max_iterations,
@@ -217,6 +223,17 @@ class RLMMetadata:
             },
             "other_backends": self.other_backends,
         }
+        if self.video_path is not None:
+            d["video_path"] = self.video_path
+        if self.fps is not None:
+            d["fps"] = self.fps
+        if self.num_segments is not None:
+            d["num_segments"] = self.num_segments
+        if self.max_frames_per_segment is not None:
+            d["max_frames_per_segment"] = self.max_frames_per_segment
+        if self.resize is not None:
+            d["resize"] = list(self.resize)
+        return d
 
 
 ########################################################

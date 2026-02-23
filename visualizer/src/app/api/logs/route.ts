@@ -59,10 +59,13 @@ export async function GET() {
         try {
           const obj = JSON.parse(line);
           if (!model) {
-            model = obj.model ?? obj.metadata?.model ?? null;
+            // KUAVi: session_start has "model"; RLM metadata has "root_model"
+            model = obj.model ?? obj.root_model ?? obj.metadata?.model ?? null;
           }
-          if (!videoPath && obj.tool_input?.video_path) {
-            videoPath = obj.tool_input.video_path;
+          if (!videoPath) {
+            // KUAVi: tool_input.video_path on index_video calls
+            // RLM: top-level video_path on metadata lines
+            videoPath = obj.tool_input?.video_path ?? obj.video_path ?? null;
           }
         } catch {}
         if (model && videoPath) break;
