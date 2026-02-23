@@ -3,12 +3,10 @@
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from kuavi.indexer import VideoIndexer
 from kuavi.scene_detection import detect_scenes_perframe
 from kuavi.types import KUAViConfig
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -18,7 +16,7 @@ from kuavi.types import KUAViConfig
 def _make_fake_clip_embeddings(windows, D=8):
     """Return deterministic L2-normalized embeddings for each window."""
     embs = []
-    for i, w in enumerate(windows):
+    for i, _w in enumerate(windows):
         rng = np.random.default_rng(i + 1)
         e = rng.standard_normal(D).astype(np.float32)
         e /= np.linalg.norm(e)

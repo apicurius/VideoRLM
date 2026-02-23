@@ -469,7 +469,7 @@ class VideoIndexer:
 
             if self._hierarchical:
                 levels = []
-                for thresh, min_dur in zip((0.10, 0.20, 0.35), (0.5, 2.0, 4.0)):
+                for thresh, min_dur in zip((0.10, 0.20, 0.35), (0.5, 2.0, 4.0), strict=False):
                     scenes_level = detect_scenes_perframe(
                         per_frame_embs, timestamps, threshold=thresh, min_duration=min_dur
                     )
@@ -1664,7 +1664,6 @@ class VideoIndexer:
 
             best_annotation = seg.get("annotation", {})
             best_caption = seg.get("caption", "")
-            best_score = seg.get("quality_score", 0.0)
 
             for _ in range(num_retries):
                 try:
@@ -2598,7 +2597,7 @@ class VideoIndexer:
                 # region that are better covered by the previous chunk.
                 transcript: list[dict] = []
                 for chunk_idx, (asr_result, offset) in enumerate(
-                    zip(all_results, chunk_offsets)
+                    zip(all_results, chunk_offsets, strict=False)
                 ):
                     skip_before = (
                         offset + overlap / 2 if chunk_idx > 0 and overlap > 0 else 0.0

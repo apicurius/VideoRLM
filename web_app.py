@@ -1187,7 +1187,6 @@ def _full_pipeline(
 
     caption_fn = None
     frame_caption_fn = None
-    refine_fn = None
 
     gemini_key = os.getenv("GEMINI_API_KEY") or (api_key if use_gemini else None)
     if gemini_key:
@@ -1195,12 +1194,10 @@ def _full_pipeline(
             from kuavi.captioning import (
                 make_gemini_caption_fn,
                 make_gemini_frame_caption_fn,
-                make_gemini_refine_fn,
             )
             caption_model_name = "gemini-3.1-pro-preview"
             caption_fn = make_gemini_caption_fn(model=caption_model_name, api_key=gemini_key)
             frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model_name, api_key=gemini_key)
-            refine_fn = make_gemini_refine_fn(model=caption_model_name, api_key=gemini_key)
             emit_step("caption", "pending", f"using {caption_model_name}")
         except ImportError:
             gemini_key = None

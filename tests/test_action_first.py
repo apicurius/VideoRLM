@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from kuavi.indexer import VideoIndex, VideoIndexer
 
@@ -36,7 +35,9 @@ def _make_loaded_video(num_frames=6, fps=2.0):
     return mock_video
 
 
-def _patch_indexer(indexer, embed_captions_rv=(np.eye(2, dtype=np.float32), None)):
+def _patch_indexer(indexer, embed_captions_rv=None):
+    if embed_captions_rv is None:
+        embed_captions_rv = (np.eye(2, dtype=np.float32), None)
     """Context manager stack that mocks heavy dependencies on VideoIndexer."""
     from contextlib import ExitStack
     stack = ExitStack()

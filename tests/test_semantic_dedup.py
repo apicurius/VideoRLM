@@ -4,11 +4,9 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from kuavi.indexer import VideoIndex, VideoIndexer
 from kuavi.search import _round_robin_from_clusters, make_search_video
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,7 +40,9 @@ def _fake_encode(frames, **kw):
     return embs / np.maximum(norms, 1e-10)
 
 
-def _patch_indexer(indexer, embed_captions_rv=(np.eye(5, dtype=np.float32), None)):
+def _patch_indexer(indexer, embed_captions_rv=None):
+    if embed_captions_rv is None:
+        embed_captions_rv = (np.eye(5, dtype=np.float32), None)
     stack = ExitStack()
     stack.enter_context(patch.object(indexer, "_ensure_model"))
     stack.enter_context(patch.object(indexer, "_get_transcript", return_value=[]))

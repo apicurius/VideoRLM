@@ -3,11 +3,9 @@
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from kuavi.indexer import VideoIndex, VideoIndexer
 from kuavi.search import make_anticipate_action
-
 
 # ---------------------------------------------------------------------------
 # Helpers
