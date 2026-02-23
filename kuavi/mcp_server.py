@@ -1071,39 +1071,26 @@ def kuavi_index_video(
         scene_model_preset=scene_model_preset,
     )
 
-    # Build captioning functions when captioning is enabled
+    # Build captioning function when captioning is enabled
     caption_fn = None
-    frame_caption_fn = None
-    refine_fn = None
     if not no_caption:
         try:
             gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
             if caption_preset is not None:
                 from kuavi.captioners import create_captioner
 
-                captioner, aggregator = create_captioner(caption_preset, api_key=gemini_key)
+                captioner, _aggregator = create_captioner(caption_preset, api_key=gemini_key)
                 caption_fn = captioner.caption_segment
-                frame_caption_fn = captioner.caption_frame
-                if aggregator is not None:
-                    refine_fn = aggregator.refine
             else:
-                from kuavi.captioning import (
-                    make_gemini_caption_fn,
-                    make_gemini_frame_caption_fn,
-                    make_gemini_refine_fn,
-                )
+                from kuavi.captioning import make_gemini_caption_fn
 
                 caption_fn = make_gemini_caption_fn(api_key=gemini_key)
-                frame_caption_fn = make_gemini_frame_caption_fn(api_key=gemini_key)
-                refine_fn = make_gemini_refine_fn(api_key=gemini_key)
         except Exception:
             logger.warning("Failed to initialize captioning; indexing without captions.")
 
     index = indexer.index_video(
         loaded_video,
         caption_fn=caption_fn,
-        frame_caption_fn=frame_caption_fn,
-        refine_fn=refine_fn,
         asr_model=asr_model,
         transcript_path=transcript_path,
         mode=mode,
@@ -2738,20 +2725,12 @@ def kuavi_index_corpus(
 
     # Optionally set up Gemini captioning
     caption_fn = None
-    frame_caption_fn = None
-    refine_fn = None
     if mode == "full":
         try:
             gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-            from kuavi.captioning import (
-                make_gemini_caption_fn,
-                make_gemini_frame_caption_fn,
-                make_gemini_refine_fn,
-            )
+            from kuavi.captioning import make_gemini_caption_fn
 
             caption_fn = make_gemini_caption_fn(api_key=gemini_key)
-            frame_caption_fn = make_gemini_frame_caption_fn(api_key=gemini_key)
-            refine_fn = make_gemini_refine_fn(api_key=gemini_key)
         except Exception:
             logger.warning("Failed to initialize captioning for corpus; using fast mode.")
 
@@ -2759,8 +2738,6 @@ def kuavi_index_corpus(
         paths,
         mode=mode,
         caption_fn=caption_fn,
-        frame_caption_fn=frame_caption_fn,
-        refine_fn=refine_fn,
     )
 
     _state["corpus"] = {"index": corpus}

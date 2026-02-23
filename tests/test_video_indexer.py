@@ -247,6 +247,7 @@ class TestVideoIndexerIndexVideo:
                             loaded,
                             caption_fn=caption_fn,
                             refine_fn=refine_fn,
+                            refine_rounds=3,
                         )
 
         # 3 rounds × 1 segment = 3 calls
@@ -813,7 +814,6 @@ class TestEmbeddingGemmaTextEncoder:
                 segments,
                 loaded_video_frames=frames,
                 timestamps=timestamps,
-                caption_fn=None,
             )
 
         # Score should NOT be computed (skipped due to cross-space mismatch)
@@ -1080,7 +1080,6 @@ class TestEmbeddingGemmaIntegration:
                 segments,
                 loaded_video_frames=frames,
                 timestamps=timestamps,
-                caption_fn=None,
             )
 
         for seg in segments:
@@ -1114,7 +1113,6 @@ class TestEmbeddingGemmaIntegration:
                         segments,
                         loaded_video_frames=frames,
                         timestamps=timestamps,
-                        caption_fn=None,
                     )
 
         assert "caption_quality_score" in segments[0], (

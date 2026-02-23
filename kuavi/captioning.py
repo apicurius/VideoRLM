@@ -89,6 +89,10 @@ def make_gemini_caption_fn(
         "- action.brief: Imperative verb phrase (2-5 words). Use 'N/A' if no action.\n"
         "- Do NOT hallucinate. Only describe what is visually observable.\n"
         "- Do NOT infer speech content, names, or internal states.\n"
+        "- Only describe what is consistently visible across multiple frames.\n"
+        "- Do not add claims not supported by at least 2 frame observations.\n"
+        "- Verify action.brief is truly an imperative verb phrase.\n"
+        "- If frames conflict, describe only what is consistently observed.\n"
     )
 
     def caption_fn(frames: list) -> dict:

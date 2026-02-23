@@ -366,7 +366,7 @@ class VideoIndexer:
         refine_fn: Callable | None = None,
         asr_model: str = "Qwen/Qwen3-ASR-0.6B",
         transcript_path: str | None = None,
-        refine_rounds: int = 3,
+        refine_rounds: int = 0,
         mode: str = "full",
         store_feature_maps: bool = False,
         overlapping_vjepa: bool = False,
@@ -384,10 +384,11 @@ class VideoIndexer:
                 used for Self-Refine.
             asr_model: Qwen3-ASR model name for speech transcription.
             transcript_path: Path to a pre-existing transcript JSON/SRT file.
-            mode: Indexing mode — ``"full"`` (default) runs the complete
-                Tree-of-Captions + Self-Refine pipeline; ``"fast"`` skips
-                segment captioning and Self-Refine, using only midpoint
-                frame captions to produce a quickly searchable index.
+            refine_rounds: Number of Self-Refine iterations. Default 0 (single-pass
+                captioning). Set to 3 for the original multi-round refinement.
+            mode: Indexing mode — ``"full"`` (default) runs the captioning
+                pipeline; ``"fast"`` skips segment captioning, using only
+                midpoint frame captions to produce a quickly searchable index.
 
         Returns:
             A :class:`VideoIndex` ready for use with the search functions in
@@ -600,32 +601,7 @@ class VideoIndexer:
                         seg_frames = [f"[transcript] {transcript_text}"] + seg_frames
                     caption_tasks.append((seg, seg_frames))
 
-                # 5a. Frame-level captioning (Tree-of-Captions leaf level)
-                if frame_caption_fn is not None:
-
-                    def _frame_caption_one(args):
-                        seg, seg_frames = args
-                        # Extract midpoint keyframe (skip string context tokens)
-                        real_frames = [f for f in seg_frames if not isinstance(f, str)]
-                        if real_frames:
-                            mid_idx = len(real_frames) // 2
-                            mid_frame = real_frames[mid_idx]
-                            result = frame_caption_fn([mid_frame])
-                            return seg, result if isinstance(result, str) else str(result)
-                        return seg, ""
-
-                    with ThreadPoolExecutor(max_workers=8) as pool:
-                        futures = [pool.submit(_frame_caption_one, task) for task in caption_tasks]
-                        for future in as_completed(futures):
-                            try:
-                                seg, frame_cap = future.result()
-                                seg["frame_caption"] = frame_cap
-                            except Exception:
-                                logger.warning(
-                                    "Frame caption future raised an exception", exc_info=True
-                                )
-
-                # 5b. Segment-level captioning (Tree-of-Captions node level)
+                # 5b. Segment-level captioning
                 if caption_fn is not None:
 
                     def _caption_segment(args):
@@ -648,10 +624,6 @@ class VideoIndexer:
                                 else:
                                     resized.append(cv2.resize(f, self._caption_resize))
                             seg_frames = resized
-                        # Inject frame caption as context if available
-                        frame_cap = seg.get("frame_caption", "")
-                        if frame_cap:
-                            seg_frames = [f"[frame_caption] {frame_cap}"] + seg_frames
                         result = caption_fn(seg_frames)
                         # Backward compat: wrap plain strings into structured annotation
                         if isinstance(result, str):
@@ -669,7 +641,6 @@ class VideoIndexer:
                             try:
                                 seg, annotation = future.result()
                                 seg["annotation"] = annotation
-                                seg["annotation"]["frame_caption"] = seg.get("frame_caption", "")
                                 seg["caption"] = annotation.get("summary", {}).get("brief", "")
                                 action_brief = (
                                     annotation.get("action", {}).get("brief", "").strip()
@@ -711,12 +682,11 @@ class VideoIndexer:
             # 6c. Global dedup: find duplicates anywhere (non-adjacent)
             self._global_deduplicate(segment_infos)
 
-            # 6.5 Score annotations and re-caption low-quality ones
+            # 6.5 Score annotation quality
             self._score_annotations(
                 segment_infos,
                 loaded_video_frames=frames,
                 timestamps=timestamps,
-                caption_fn=caption_fn,
             )
 
         # 7. Embed captions
@@ -1564,11 +1534,9 @@ class VideoIndexer:
         segments: list[dict],
         loaded_video_frames: list[np.ndarray],
         timestamps: list[float],
-        caption_fn: Callable | None = None,
-        num_retries: int = 3,
         min_similarity: float = 0.3,
     ) -> None:
-        """Score and optionally re-caption segments with low embedding consistency."""
+        """Score annotation quality using model-free signals."""
         self._ensure_model()
 
         # Signal 2: Format compliance — no model needed
@@ -1628,46 +1596,6 @@ class VideoIndexer:
                         seg["coherence_score"] = round(coherence, 4)
                     except AttributeError:
                         pass
-
-            if similarity < min_similarity and caption_fn is not None:
-                best_score = similarity
-                best_annotation = seg.get("annotation", {})
-                best_caption = caption
-
-                for _ in range(num_retries):
-                    try:
-                        result = caption_fn(seg_frames)
-                        if isinstance(result, str):
-                            new_annotation = {
-                                "summary": {"brief": result, "detailed": result},
-                                "action": {"brief": "", "detailed": "", "actor": None},
-                            }
-                            new_caption = result
-                        else:
-                            new_annotation = result
-                            new_caption = result.get("summary", {}).get("brief", "")
-
-                        if new_caption:
-                            new_emb = self._encode_texts([new_caption])
-                            new_sim = float(np.dot(new_emb[0], mean_frame_emb[0]))
-                            if new_sim > best_score:
-                                best_score = new_sim
-                                best_annotation = new_annotation
-                                best_caption = new_caption
-                    except Exception:
-                        logger.warning("Re-caption attempt failed", exc_info=True)
-
-                if best_score > similarity:
-                    seg["annotation"] = best_annotation
-                    seg["caption"] = best_caption
-                    seg["caption_quality_score"] = round(best_score, 4)
-                    logger.info(
-                        "Re-captioned segment %.1f-%.1fs: score %.4f -> %.4f",
-                        seg["start_time"],
-                        seg["end_time"],
-                        similarity,
-                        best_score,
-                    )
 
         # Signal 4: Temporal consistency (needs all caption embeddings)
         for idx, seg in enumerate(segments):
