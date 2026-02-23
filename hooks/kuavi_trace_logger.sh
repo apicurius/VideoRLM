@@ -40,17 +40,17 @@ case "$EVENT" in
     if [[ "$TOOL_NAME" == *index_video* ]]; then
       # MCP server creates a new trace file on index_video. Wait briefly for it.
       sleep 0.3
-      LOG_FILE=$(mcp_trace)
-
-      if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
-        # Carry forward any stashed question into the new trace
-        if [ -f "$QUESTION_STASH" ]; then
-          cat "$QUESTION_STASH" >> "$LOG_FILE" 2>/dev/null
-        fi
-      fi
-
       # Reset final_answer guard for new run
       rm -f "$FINAL_GUARD"
+    fi
+
+    # Carry forward any stashed question into the current trace file.
+    # UserPromptSubmit fires before any tool call, so the trace file may not
+    # exist yet — the stash bridges that gap for ANY first tool call.
+    LOG_FILE=$(mcp_trace)
+    if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ] && [ -f "$QUESTION_STASH" ]; then
+      cat "$QUESTION_STASH" >> "$LOG_FILE" 2>/dev/null
+      rm -f "$QUESTION_STASH"
     fi
     ;;
 
@@ -76,13 +76,13 @@ case "$EVENT" in
         "$TIMESTAMP" \
         "$(echo "$PROMPT" | jq -Rs '.')")
 
-      # Stash for carry-forward (in case index_video creates a new trace later)
-      echo "$QUESTION_EVENT" > "$QUESTION_STASH"
-
-      # Append to current MCP trace if one exists
+      # Append to current MCP trace if one exists; otherwise stash for
+      # carry-forward on the first PostToolUse (trace file doesn't exist yet).
       LOG_FILE=$(mcp_trace)
       if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
         echo "$QUESTION_EVENT" >> "$LOG_FILE" 2>/dev/null
+      else
+        echo "$QUESTION_EVENT" > "$QUESTION_STASH"
       fi
     fi
     ;;
