@@ -170,6 +170,8 @@ class VideoIndexer:
         self._scene_model = None
         self._scene_processor = None
         self._scene_predictor = None
+        self._asr_model = None
+        self._asr_model_name: str | None = None
 
         if scene_model_preset is not None:
             if scene_model_preset not in VJEPA2_PRESETS:
@@ -2528,108 +2530,187 @@ class VideoIndexer:
             logger.warning("Audio extraction failed for %s (ffmpeg may be missing).", video_path)
             return False
 
-    def _run_asr(self, video_path: str, model_name: str) -> list[dict]:
-        """Transcribe audio using Qwen3-ASR with word-level timestamps."""
+    _ASR_BATCH_CPU = 4
+    _ASR_BATCH_CUDA = 16
+    _ASR_CHUNK_SEC = 30
+
+    def _ensure_asr_model(self, model_name: str) -> None:
+        """Lazily load and cache the Qwen3-ASR model."""
+        if self._asr_model is not None and self._asr_model_name == model_name:
+            return
+
         try:
             from qwen_asr import Qwen3ASRModel
         except ImportError:
             logger.info("qwen_asr not installed; skipping ASR.")
+            return
+
+        import torch
+
+        device = (
+            "mps"
+            if torch.backends.mps.is_available()
+            else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        batch_size = self._ASR_BATCH_CUDA if device == "cuda" else self._ASR_BATCH_CPU
+        logger.info("[pipeline] Qwen3-ASR: loading model on %s (batch=%d)", device, batch_size)
+
+        try:
+            self._asr_model = Qwen3ASRModel.from_pretrained(
+                model_name,
+                dtype=torch.float16,
+                device_map=device,
+                max_inference_batch_size=batch_size,
+                forced_aligner="Qwen/Qwen3-ForcedAligner-0.6B",
+                forced_aligner_kwargs=dict(
+                    dtype=torch.float16,
+                    device_map=device,
+                ),
+            )
+        except Exception:
+            logger.info(
+                "Qwen3-ForcedAligner-0.6B unavailable; "
+                "proceeding without word-level alignment."
+            )
+            self._asr_model = Qwen3ASRModel.from_pretrained(
+                model_name,
+                dtype=torch.float16,
+                device_map=device,
+                max_inference_batch_size=batch_size,
+            )
+        self._asr_model_name = model_name
+        logger.info("[pipeline] Qwen3-ASR: model loaded")
+
+    @staticmethod
+    def _split_audio_chunks(
+        wav_path: str, chunk_sec: int, tmp_dir: str
+    ) -> list[tuple[str, float]]:
+        """Split a WAV file into fixed-duration chunks using ffmpeg."""
+        import wave
+
+        with wave.open(wav_path, "rb") as wf:
+            duration = wf.getnframes() / wf.getframerate()
+
+        if duration <= chunk_sec:
+            return [(wav_path, 0.0)]
+
+        chunks: list[tuple[str, float]] = []
+        offset = 0.0
+        idx = 0
+        while offset < duration:
+            chunk_path = str(Path(tmp_dir) / f"chunk_{idx:04d}.wav")
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-ss", str(offset),
+                        "-t", str(chunk_sec),
+                        "-i", wav_path,
+                        "-acodec", "pcm_s16le",
+                        "-ar", "16000",
+                        "-ac", "1",
+                        chunk_path,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                chunks.append((chunk_path, offset))
+            except subprocess.CalledProcessError:
+                logger.warning("Failed to split audio chunk at offset %.1f", offset)
+                break
+            offset += chunk_sec
+            idx += 1
+
+        return chunks if chunks else [(wav_path, 0.0)]
+
+    def _run_asr(self, video_path: str, model_name: str) -> list[dict]:
+        """Transcribe audio using Qwen3-ASR with word-level timestamps.
+
+        Splits audio into short chunks (default 30s) before transcription.
+        """
+        self._ensure_asr_model(model_name)
+        if self._asr_model is None:
             return []
 
-        logger.info("[pipeline] Qwen3-ASR: starting ASR transcription")
         with tempfile.TemporaryDirectory() as tmp:
             wav_path = str(Path(tmp) / "audio.wav")
             if not self._extract_audio(video_path, wav_path):
                 return []
 
+            chunks = self._split_audio_chunks(wav_path, self._ASR_CHUNK_SEC, tmp)
+            chunk_paths = [c[0] for c in chunks]
+            chunk_offsets = [c[1] for c in chunks]
+            logger.info(
+                "[pipeline] Qwen3-ASR: transcribing %d chunk(s) of %ds",
+                len(chunks), self._ASR_CHUNK_SEC,
+            )
+
             try:
-                import torch
-
-                device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
-
-                # Pass ForcedAligner as a string; Qwen3ASRModel loads it internally.
-                # If loading fails (e.g. 404, missing class), fall back to no aligner.
-                try:
-                    model = Qwen3ASRModel.from_pretrained(
-                        model_name,
-                        dtype=torch.float16,
-                        device_map=device,
-                        forced_aligner="Qwen/Qwen3-ForcedAligner-0.6B",
-                        forced_aligner_kwargs=dict(
-                            dtype=torch.float16,
-                            device_map=device,
-                        ),
-                    )
-                except Exception:
-                    logger.info(
-                        "Qwen3-ForcedAligner-0.6B unavailable; "
-                        "proceeding without word-level alignment."
-                    )
-                    model = Qwen3ASRModel.from_pretrained(
-                        model_name,
-                        dtype=torch.float16,
-                        device_map=device,
-                    )
-                results = model.transcribe(audio=wav_path, return_time_stamps=True)
+                results = self._asr_model.transcribe(
+                    audio=chunk_paths, return_time_stamps=True,
+                )
 
                 if not results:
                     return []
-                asr_result = results[0]
 
-                # Group word-level timestamps into sentence-level segments,
-                # preserving word-level detail in a ``words`` list per segment.
-                # Split on sentence-ending punctuation or gaps > 1s between words.
                 transcript: list[dict] = []
-                if asr_result.time_stamps is not None and asr_result.time_stamps.items:
-                    items = asr_result.time_stamps.items
-                    seg_words: list[dict] = []
-                    seg_start: float | None = None
-                    seg_end: float = 0.0
+                for asr_result, offset in zip(results, chunk_offsets):
+                    self._collect_transcript_segments(asr_result, offset, transcript)
 
-                    def _flush_segment() -> None:
-                        nonlocal seg_words, seg_start, seg_end
-                        if not seg_words:
-                            return
-                        text = " ".join(w["text"] for w in seg_words).strip()
-                        if text:
-                            transcript.append({
-                                "start_time": round(seg_start, 3),
-                                "end_time": round(seg_end, 3),
-                                "text": text,
-                                "words": seg_words,
-                            })
-                        seg_words = []
-                        seg_start = None
-
-                    for idx, item in enumerate(items):
-                        # Detect gap > 1s from previous word — flush before adding
-                        if seg_start is not None and (item.start_time - seg_end) > 1.0:
-                            _flush_segment()
-
-                        if seg_start is None:
-                            seg_start = item.start_time
-                        seg_words.append({
-                            "text": item.text,
-                            "start_time": round(item.start_time, 3),
-                            "end_time": round(item.end_time, 3),
-                        })
-                        seg_end = item.end_time
-
-                        # Split on sentence-ending punctuation
-                        is_sentence_end = item.text.rstrip().endswith((".", "!", "?"))
-                        at_end = idx == len(items) - 1
-                        if is_sentence_end or at_end:
-                            _flush_segment()
-
-                elif asr_result.text.strip():
-                    transcript.append({
-                        "start_time": 0.0,
-                        "end_time": 0.0,
-                        "text": asr_result.text.strip(),
-                        "words": [],
-                    })
-
+                logger.info("[pipeline] Qwen3-ASR: %d segments transcribed", len(transcript))
                 return transcript
             except Exception:
                 logger.warning("Qwen3-ASR transcription failed.", exc_info=True)
                 return []
+
+    @staticmethod
+    def _collect_transcript_segments(
+        asr_result, offset: float, transcript: list[dict],
+    ) -> None:
+        """Extract sentence-level segments from one ASR chunk result."""
+        if asr_result.time_stamps is not None and asr_result.time_stamps.items:
+            items = asr_result.time_stamps.items
+            seg_words: list[dict] = []
+            seg_start: float | None = None
+            seg_end: float = 0.0
+
+            def _flush_segment() -> None:
+                nonlocal seg_words, seg_start, seg_end
+                if not seg_words:
+                    return
+                text = " ".join(w["text"] for w in seg_words).strip()
+                if text:
+                    transcript.append({
+                        "start_time": round(seg_start + offset, 3),
+                        "end_time": round(seg_end + offset, 3),
+                        "text": text,
+                        "words": seg_words,
+                    })
+                seg_words = []
+                seg_start = None
+
+            for idx, item in enumerate(items):
+                if seg_start is not None and (item.start_time - seg_end) > 1.0:
+                    _flush_segment()
+
+                if seg_start is None:
+                    seg_start = item.start_time
+                seg_words.append({
+                    "text": item.text,
+                    "start_time": round(item.start_time + offset, 3),
+                    "end_time": round(item.end_time + offset, 3),
+                })
+                seg_end = item.end_time
+
+                is_sentence_end = item.text.rstrip().endswith((".", "!", "?"))
+                at_end = idx == len(items) - 1
+                if is_sentence_end or at_end:
+                    _flush_segment()
+
+        elif asr_result.text.strip():
+            transcript.append({
+                "start_time": round(offset, 3),
+                "end_time": round(offset, 3),
+                "text": asr_result.text.strip(),
+                "words": [],
+            })
