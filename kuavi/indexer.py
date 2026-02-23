@@ -586,6 +586,7 @@ class VideoIndexer:
             # Full mode: Tree-of-Captions + Self-Refine (original behavior)
 
             # 5. Caption each segment (if a caption function was provided)
+            logger.info("[pipeline] captioning: starting segment captioning")
             if caption_fn is not None or frame_caption_fn is not None:
                 # Prepare all segments first (skip near-duplicates)
                 caption_tasks = []
@@ -692,6 +693,9 @@ class VideoIndexer:
             )
 
         # 7. Embed captions
+        captioned = sum(1 for s in segment_infos if s.get("caption"))
+        logger.info("[pipeline] captioning: %d/%d segments captioned", captioned, len(segment_infos))
+        logger.info("[pipeline] Gemma: embedding captions for %d segments", len(segment_infos))
         embeddings, action_embeddings = self._embed_captions(segment_infos)
 
         # 7b. Smooth embeddings to reduce noise across adjacent segments
@@ -710,7 +714,9 @@ class VideoIndexer:
                 action_embeddings=action_embeddings,
             )
 
+        logger.info("[pipeline] Gemma: caption embeddings complete")
         # 7c. Embed representative frame per segment for visual search
+        logger.info("[pipeline] SigLIP2: building frame embeddings for %d segments", len(segment_infos))
         rep_frames = []
         for seg in segment_infos:
             seg_frames_list = [
@@ -726,6 +732,7 @@ class VideoIndexer:
         frame_embeddings = self._encode_frames(rep_frames)
         frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
         self._check_embedding_quality(frame_embeddings, label="frame")
+        logger.info("[pipeline] SigLIP2: %d frame embeddings built", len(rep_frames))
 
         # 7d. Aggregate V-JEPA 2 temporal embeddings per segment
         temporal_embeddings: np.ndarray | None = None
@@ -842,6 +849,7 @@ class VideoIndexer:
                 segment_hierarchy.append(coarse_segs)
                 hierarchy_embeddings.append(coarse_embs)
 
+        logger.info("[pipeline] search index: building index with %d segments", len(segment_infos))
         index = VideoIndex(
             segments=segment_infos,
             embeddings=embeddings,

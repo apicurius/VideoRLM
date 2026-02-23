@@ -209,11 +209,15 @@ class _QueueLogHandler(logging.Handler):
             self._emit_step("whisper", "skip", "qwen_asr not installed")
         elif "[pipeline] Qwen3-ASR:" in msg:
             detail = msg.split("[pipeline] ")[-1]
-            if "segments transcribed" in msg:
+            if "segments transcribed" in msg or "transcript segments" in msg:
                 self._emit_step("whisper", "done", detail)
             else:
                 # loading model, model loaded, transcribing — all still "running"
                 self._emit_step("whisper", "running", detail)
+        elif "[pipeline] captioning: starting" in msg:
+            self._emit_step("caption", "running", "captioning segments...")
+        elif "[pipeline] captioning:" in msg:
+            self._emit_step("caption", "done", msg.split("[pipeline] ")[-1])
         elif "Gemini caption" in msg or "caption_fn" in msg:
             if "failed" in msg:
                 self._emit_step("caption", "running", "retrying...")
@@ -222,7 +226,7 @@ class _QueueLogHandler(logging.Handler):
         elif "Re-captioned segment" in msg:
             self._emit_step("caption", "running", msg)
         elif "[pipeline] search index:" in msg:
-            self._emit_step("index", "done", msg.split("[pipeline] ")[-1])
+            self._emit_step("index", "running", msg.split("[pipeline] ")[-1])
         elif "Returning in-memory cached index" in msg or "Loading cached index" in msg:
             for sid in ["vjepa", "whisper", "caption", "gemma", "siglip"]:
                 self._emit_step(sid, "cached", "loaded from cache")
