@@ -104,7 +104,7 @@ class VideoRLM:
         custom_sub_tools: dict[str, Any] | None = None,
         enable_search: bool = True,
         embedding_model: str | None = None,
-        asr_model: str = "Qwen/Qwen3-ASR-1.7B",
+        asr_model: str = "Qwen/Qwen3-ASR-0.6B",
         transcript_path: str | None = None,
         refine_fn: Callable | None = None,
         caption_fn: Callable | None = None,
@@ -180,6 +180,9 @@ class VideoRLM:
             RLMChatCompletion with the analysis result.
         """
         loaded_video = self._load_video(video_path)
+
+        # Emit supplemental video metadata so the visualizer can show video info
+        self._log_video_metadata(video_path, loaded_video)
 
         # Route to sharded completion for long videos
         if (
@@ -626,6 +629,22 @@ class VideoRLM:
                 ),
             },
         }
+
+    def _log_video_metadata(self, video_path: str | Path, loaded_video: LoadedVideo) -> None:
+        """Emit supplemental metadata with video-specific fields.
+
+        Written as a second ``type: "metadata"`` JSONL line so the visualizer
+        can merge it with the initial RLM config metadata.
+        """
+        if self.rlm.logger is None:
+            return
+        self.rlm.logger.log_supplemental_metadata(
+            video_path=str(Path(video_path).resolve()),
+            fps=self.loader.fps,
+            num_segments=len(loaded_video.segments) if loaded_video.segments else 0,
+            max_frames_per_segment=self.max_frames_per_segment,
+            resize=list(self.context_builder.resize) if self.context_builder.resize else None,
+        )
 
     def _load_video(self, video_path: str | Path) -> LoadedVideo:
         """Load and optionally segment a video."""

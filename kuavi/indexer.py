@@ -170,6 +170,8 @@ class VideoIndexer:
         self._scene_model = None
         self._scene_processor = None
         self._scene_predictor = None
+        self._asr_model = None
+        self._asr_model_name: str | None = None
 
         if scene_model_preset is not None:
             if scene_model_preset not in VJEPA2_PRESETS:
@@ -364,9 +366,9 @@ class VideoIndexer:
         caption_fn: Callable | None = None,
         frame_caption_fn: Callable | None = None,
         refine_fn: Callable | None = None,
-        asr_model: str = "Qwen/Qwen3-ASR-1.7B",
+        asr_model: str = "Qwen/Qwen3-ASR-0.6B",
         transcript_path: str | None = None,
-        refine_rounds: int = 3,
+        refine_rounds: int = 0,
         mode: str = "full",
         store_feature_maps: bool = False,
         overlapping_vjepa: bool = False,
@@ -384,10 +386,11 @@ class VideoIndexer:
                 used for Self-Refine.
             asr_model: Qwen3-ASR model name for speech transcription.
             transcript_path: Path to a pre-existing transcript JSON/SRT file.
-            mode: Indexing mode — ``"full"`` (default) runs the complete
-                Tree-of-Captions + Self-Refine pipeline; ``"fast"`` skips
-                segment captioning and Self-Refine, using only midpoint
-                frame captions to produce a quickly searchable index.
+            refine_rounds: Number of Self-Refine iterations. Default 0 (single-pass
+                captioning). Set to 3 for the original multi-round refinement.
+            mode: Indexing mode — ``"full"`` (default) runs the captioning
+                pipeline; ``"fast"`` skips segment captioning, using only
+                midpoint frame captions to produce a quickly searchable index.
 
         Returns:
             A :class:`VideoIndex` ready for use with the search functions in
@@ -600,32 +603,7 @@ class VideoIndexer:
                         seg_frames = [f"[transcript] {transcript_text}"] + seg_frames
                     caption_tasks.append((seg, seg_frames))
 
-                # 5a. Frame-level captioning (Tree-of-Captions leaf level)
-                if frame_caption_fn is not None:
-
-                    def _frame_caption_one(args):
-                        seg, seg_frames = args
-                        # Extract midpoint keyframe (skip string context tokens)
-                        real_frames = [f for f in seg_frames if not isinstance(f, str)]
-                        if real_frames:
-                            mid_idx = len(real_frames) // 2
-                            mid_frame = real_frames[mid_idx]
-                            result = frame_caption_fn([mid_frame])
-                            return seg, result if isinstance(result, str) else str(result)
-                        return seg, ""
-
-                    with ThreadPoolExecutor(max_workers=8) as pool:
-                        futures = [pool.submit(_frame_caption_one, task) for task in caption_tasks]
-                        for future in as_completed(futures):
-                            try:
-                                seg, frame_cap = future.result()
-                                seg["frame_caption"] = frame_cap
-                            except Exception:
-                                logger.warning(
-                                    "Frame caption future raised an exception", exc_info=True
-                                )
-
-                # 5b. Segment-level captioning (Tree-of-Captions node level)
+                # 5b. Segment-level captioning
                 if caption_fn is not None:
 
                     def _caption_segment(args):
@@ -648,10 +626,6 @@ class VideoIndexer:
                                 else:
                                     resized.append(cv2.resize(f, self._caption_resize))
                             seg_frames = resized
-                        # Inject frame caption as context if available
-                        frame_cap = seg.get("frame_caption", "")
-                        if frame_cap:
-                            seg_frames = [f"[frame_caption] {frame_cap}"] + seg_frames
                         result = caption_fn(seg_frames)
                         # Backward compat: wrap plain strings into structured annotation
                         if isinstance(result, str):
@@ -669,7 +643,6 @@ class VideoIndexer:
                             try:
                                 seg, annotation = future.result()
                                 seg["annotation"] = annotation
-                                seg["annotation"]["frame_caption"] = seg.get("frame_caption", "")
                                 seg["caption"] = annotation.get("summary", {}).get("brief", "")
                                 action_brief = (
                                     annotation.get("action", {}).get("brief", "").strip()
@@ -711,12 +684,11 @@ class VideoIndexer:
             # 6c. Global dedup: find duplicates anywhere (non-adjacent)
             self._global_deduplicate(segment_infos)
 
-            # 6.5 Score annotations and re-caption low-quality ones
+            # 6.5 Score annotation quality
             self._score_annotations(
                 segment_infos,
                 loaded_video_frames=frames,
                 timestamps=timestamps,
-                caption_fn=caption_fn,
             )
 
         # 7. Embed captions
@@ -1564,11 +1536,9 @@ class VideoIndexer:
         segments: list[dict],
         loaded_video_frames: list[np.ndarray],
         timestamps: list[float],
-        caption_fn: Callable | None = None,
-        num_retries: int = 3,
         min_similarity: float = 0.3,
     ) -> None:
-        """Score and optionally re-caption segments with low embedding consistency."""
+        """Score annotation quality using model-free signals."""
         self._ensure_model()
 
         # Signal 2: Format compliance — no model needed
@@ -1628,46 +1598,6 @@ class VideoIndexer:
                         seg["coherence_score"] = round(coherence, 4)
                     except AttributeError:
                         pass
-
-            if similarity < min_similarity and caption_fn is not None:
-                best_score = similarity
-                best_annotation = seg.get("annotation", {})
-                best_caption = caption
-
-                for _ in range(num_retries):
-                    try:
-                        result = caption_fn(seg_frames)
-                        if isinstance(result, str):
-                            new_annotation = {
-                                "summary": {"brief": result, "detailed": result},
-                                "action": {"brief": "", "detailed": "", "actor": None},
-                            }
-                            new_caption = result
-                        else:
-                            new_annotation = result
-                            new_caption = result.get("summary", {}).get("brief", "")
-
-                        if new_caption:
-                            new_emb = self._encode_texts([new_caption])
-                            new_sim = float(np.dot(new_emb[0], mean_frame_emb[0]))
-                            if new_sim > best_score:
-                                best_score = new_sim
-                                best_annotation = new_annotation
-                                best_caption = new_caption
-                    except Exception:
-                        logger.warning("Re-caption attempt failed", exc_info=True)
-
-                if best_score > similarity:
-                    seg["annotation"] = best_annotation
-                    seg["caption"] = best_caption
-                    seg["caption_quality_score"] = round(best_score, 4)
-                    logger.info(
-                        "Re-captioned segment %.1f-%.1fs: score %.4f -> %.4f",
-                        seg["start_time"],
-                        seg["end_time"],
-                        similarity,
-                        best_score,
-                    )
 
         # Signal 4: Temporal consistency (needs all caption embeddings)
         for idx, seg in enumerate(segments):
@@ -2438,7 +2368,7 @@ class VideoIndexer:
         self,
         video_path: str,
         *,
-        asr_model: str = "Qwen/Qwen3-ASR-1.7B",
+        asr_model: str = "Qwen/Qwen3-ASR-0.6B",
         transcript_path: str | None = None,
     ) -> list[dict]:
         """Return ASR transcript as a list of ``{start_time, end_time, text}`` dicts."""
@@ -2486,12 +2416,117 @@ class VideoIndexer:
             logger.warning("Audio extraction failed for %s (ffmpeg may be missing).", video_path)
             return False
 
-    def _run_asr(self, video_path: str, model_name: str) -> list[dict]:
-        """Transcribe audio using Qwen3-ASR with word-level timestamps."""
+    # Batch size for ASR inference.  On CPU/MPS the autoregressive decoder is
+    # memory-bound; small batches avoid excessive padding.  On CUDA, larger
+    # batches saturate the GPU.
+    _ASR_BATCH_CPU = 4
+    _ASR_BATCH_CUDA = 16
+    # Duration (seconds) of each audio chunk we feed to qwen_asr.  Shorter
+    # chunks decode faster (less autoregressive steps) and produce less padding
+    # waste when batched.  30s is a sweet spot — short enough to keep decoding
+    # fast, long enough to avoid excessive chunk overhead.
+    _ASR_CHUNK_SEC = 30
+
+    def _ensure_asr_model(self, model_name: str) -> None:
+        """Lazily load and cache the Qwen3-ASR model."""
+        if self._asr_model is not None and self._asr_model_name == model_name:
+            return
+
         try:
             from qwen_asr import Qwen3ASRModel
         except ImportError:
             logger.info("qwen_asr not installed; skipping ASR.")
+            return
+
+        import torch
+
+        device = (
+            "mps"
+            if torch.backends.mps.is_available()
+            else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        batch_size = self._ASR_BATCH_CUDA if device == "cuda" else self._ASR_BATCH_CPU
+        logger.info("[pipeline] Qwen3-ASR: loading model on %s (batch=%d)", device, batch_size)
+
+        try:
+            self._asr_model = Qwen3ASRModel.from_pretrained(
+                model_name,
+                dtype=torch.bfloat16,
+                device_map=device,
+                max_inference_batch_size=batch_size,
+                forced_aligner="Qwen/Qwen3-ForcedAligner-0.6B",
+                forced_aligner_kwargs=dict(
+                    dtype=torch.bfloat16,
+                    device_map=device,
+                ),
+            )
+        except Exception:
+            logger.info(
+                "Qwen3-ForcedAligner-0.6B unavailable; "
+                "proceeding without word-level alignment."
+            )
+            self._asr_model = Qwen3ASRModel.from_pretrained(
+                model_name,
+                dtype=torch.bfloat16,
+                device_map=device,
+                max_inference_batch_size=batch_size,
+            )
+        self._asr_model_name = model_name
+        logger.info("[pipeline] Qwen3-ASR: model loaded")
+
+    @staticmethod
+    def _split_audio_chunks(
+        wav_path: str, chunk_sec: int, tmp_dir: str
+    ) -> list[tuple[str, float]]:
+        """Split a WAV file into fixed-duration chunks using ffmpeg.
+
+        Returns list of (chunk_path, offset_seconds) tuples.
+        """
+        import wave
+
+        with wave.open(wav_path, "rb") as wf:
+            duration = wf.getnframes() / wf.getframerate()
+
+        if duration <= chunk_sec:
+            return [(wav_path, 0.0)]
+
+        chunks: list[tuple[str, float]] = []
+        offset = 0.0
+        idx = 0
+        while offset < duration:
+            chunk_path = str(Path(tmp_dir) / f"chunk_{idx:04d}.wav")
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-ss", str(offset),
+                        "-t", str(chunk_sec),
+                        "-i", wav_path,
+                        "-acodec", "pcm_s16le",
+                        "-ar", "16000",
+                        "-ac", "1",
+                        chunk_path,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                chunks.append((chunk_path, offset))
+            except subprocess.CalledProcessError:
+                logger.warning("Failed to split audio chunk at offset %.1f", offset)
+                break
+            offset += chunk_sec
+            idx += 1
+
+        return chunks if chunks else [(wav_path, 0.0)]
+
+    def _run_asr(self, video_path: str, model_name: str) -> list[dict]:
+        """Transcribe audio using Qwen3-ASR with word-level timestamps.
+
+        Splits audio into short chunks (default 30s) before transcription.
+        Shorter chunks decode faster and produce less padding waste when batched.
+        """
+        self._ensure_asr_model(model_name)
+        if self._asr_model is None:
             return []
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2499,78 +2534,87 @@ class VideoIndexer:
             if not self._extract_audio(video_path, wav_path):
                 return []
 
-            logger.info("[pipeline] Qwen3-ASR: starting")
+            # Split into short chunks for faster decoding
+            chunks = self._split_audio_chunks(wav_path, self._ASR_CHUNK_SEC, tmp)
+            chunk_paths = [c[0] for c in chunks]
+            chunk_offsets = [c[1] for c in chunks]
+            logger.info(
+                "[pipeline] Qwen3-ASR: transcribing %d chunk(s) of %ds",
+                len(chunks), self._ASR_CHUNK_SEC,
+            )
+
             try:
-                import torch
+                results = self._asr_model.transcribe(
+                    audio=chunk_paths, return_time_stamps=True,
+                )
 
-                # Pass ForcedAligner as a string; Qwen3ASRModel loads it internally.
-                # If loading fails (e.g. 404, missing class), fall back to no aligner.
-                try:
-                    model = Qwen3ASRModel.from_pretrained(
-                        model_name,
-                        dtype=torch.bfloat16,
-                        device_map="auto",
-                        forced_aligner="Qwen/Qwen3-ForcedAligner-0.6B",
-                        forced_aligner_kwargs=dict(
-                            dtype=torch.bfloat16,
-                            device_map="auto",
-                        ),
-                    )
-                except Exception:
-                    logger.info(
-                        "Qwen3-ForcedAligner-0.6B unavailable; "
-                        "proceeding without word-level alignment."
-                    )
-                    model = Qwen3ASRModel.from_pretrained(
-                        model_name,
-                        dtype=torch.bfloat16,
-                        device_map="auto",
-                    )
-                results = model.transcribe(audio=wav_path, return_time_stamps=True)
-
-                # results is List[ASRTranscription]; we have one audio input
                 if not results:
                     return []
-                asr_result = results[0]
 
-                # Group word-level timestamps into sentence-level segments.
-                # Split on sentence-ending punctuation or on gaps > 1s between words.
+                # Merge results from all chunks, offsetting timestamps
                 transcript: list[dict] = []
-                if asr_result.time_stamps is not None and asr_result.time_stamps.items:
-                    items = asr_result.time_stamps.items
-                    seg_words: list[str] = []
-                    seg_start: float | None = None
-                    seg_end: float = 0.0
-
-                    for item in items:
-                        if seg_start is None:
-                            seg_start = item.start_time
-                        seg_words.append(item.text)
-                        seg_end = item.end_time
-
-                        # Split on sentence-ending punctuation or long pauses
-                        is_sentence_end = item.text.rstrip().endswith((".", "!", "?"))
-                        at_end = item is items[-1]
-                        if is_sentence_end or at_end:
-                            text = " ".join(seg_words).strip()
-                            if text:
-                                transcript.append({
-                                    "start_time": round(seg_start, 2),
-                                    "end_time": round(seg_end, 2),
-                                    "text": text,
-                                })
-                            seg_words = []
-                            seg_start = None
-                elif asr_result.text.strip():
-                    # Fallback: no timestamps, return the full text as a single segment
-                    transcript.append({
-                        "start_time": 0.0,
-                        "end_time": 0.0,
-                        "text": asr_result.text.strip(),
-                    })
+                for asr_result, offset in zip(results, chunk_offsets):
+                    self._collect_transcript_segments(
+                        asr_result, offset, transcript,
+                    )
 
                 logger.info("[pipeline] Qwen3-ASR: %d segments transcribed", len(transcript))
                 return transcript
             except Exception:
                 logger.warning("Qwen3-ASR transcription failed.", exc_info=True)
                 return []
+
+    @staticmethod
+    def _collect_transcript_segments(
+        asr_result, offset: float, transcript: list[dict],
+    ) -> None:
+        """Extract sentence-level segments from one ASR chunk result.
+
+        Appends to *transcript* in-place, adding *offset* to all timestamps.
+        """
+        if asr_result.time_stamps is not None and asr_result.time_stamps.items:
+            items = asr_result.time_stamps.items
+            seg_words: list[dict] = []
+            seg_start: float | None = None
+            seg_end: float = 0.0
+
+            def _flush_segment() -> None:
+                nonlocal seg_words, seg_start, seg_end
+                if not seg_words:
+                    return
+                text = " ".join(w["text"] for w in seg_words).strip()
+                if text:
+                    transcript.append({
+                        "start_time": round(seg_start + offset, 3),
+                        "end_time": round(seg_end + offset, 3),
+                        "text": text,
+                        "words": seg_words,
+                    })
+                seg_words = []
+                seg_start = None
+
+            for idx, item in enumerate(items):
+                if seg_start is not None and (item.start_time - seg_end) > 1.0:
+                    _flush_segment()
+
+                if seg_start is None:
+                    seg_start = item.start_time
+                seg_words.append({
+                    "text": item.text,
+                    "start_time": round(item.start_time + offset, 3),
+                    "end_time": round(item.end_time + offset, 3),
+                })
+                seg_end = item.end_time
+
+                is_sentence_end = item.text.rstrip().endswith((".", "!", "?"))
+                at_end = idx == len(items) - 1
+                if is_sentence_end or at_end:
+                    _flush_segment()
+
+        elif asr_result.text.strip():
+            transcript.append({
+                "start_time": round(offset, 3),
+                "end_time": round(offset, 3),
+                "text": asr_result.text.strip(),
+                "words": [],
+            })

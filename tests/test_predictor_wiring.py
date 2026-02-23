@@ -432,16 +432,14 @@ class TestASRGracefulFallback:
     def test_missing_qwen_asr_returns_empty(self):
         indexer = VideoIndexer()
         with patch.dict("sys.modules", {"qwen_asr": None}):
-            result = indexer._run_asr("/fake/video.mp4", "Qwen/Qwen3-ASR-1.7B")
+            result = indexer._run_asr("/fake/video.mp4", "Qwen/Qwen3-ASR-0.6B")
         assert result == []
 
-    def test_run_asr_imports_only_qwen3asrmodel(self):
-        """_run_asr should import Qwen3ASRModel at top, not Qwen3ForcedAligner."""
+    def test_ensure_asr_model_imports_only_qwen3asrmodel(self):
+        """_ensure_asr_model should import Qwen3ASRModel, not Qwen3ForcedAligner."""
         import inspect
-        source = inspect.getsource(VideoIndexer._run_asr)
-        # The top-level import should be Qwen3ASRModel only
+        source = inspect.getsource(VideoIndexer._ensure_asr_model)
         assert "from qwen_asr import Qwen3ASRModel" in source
-        # Should NOT import Qwen3ForcedAligner at the top level
         lines = source.split("\n")
         top_import_lines = [
             l for l in lines
@@ -449,13 +447,13 @@ class TestASRGracefulFallback:
             and "# noqa" not in l
         ]
         assert len(top_import_lines) == 0, (
-            "Qwen3ForcedAligner should not be imported at top level of _run_asr"
+            "Qwen3ForcedAligner should not be imported at top level of _ensure_asr_model"
         )
 
     def test_uses_correct_aligner_model_name(self):
-        """_run_asr should reference Qwen/Qwen3-ForcedAligner-0.6B, not the old 404 name."""
+        """_ensure_asr_model should reference Qwen/Qwen3-ForcedAligner-0.6B, not the old 404 name."""
         import inspect
-        source = inspect.getsource(VideoIndexer._run_asr)
+        source = inspect.getsource(VideoIndexer._ensure_asr_model)
         assert "Qwen/Qwen3-ForcedAligner-0.6B" in source
         assert "Qwen/Qwen3-ASR-ForcedAligner" not in source
 
@@ -502,11 +500,11 @@ class TestRLMMirrorPredictorWiring:
         assert indexer._scene_predictor is None
 
     def test_rlm_asr_uses_correct_aligner_name(self):
-        """RLM mirror _run_asr should reference Qwen/Qwen3-ForcedAligner-0.6B."""
+        """RLM mirror _ensure_asr_model should reference Qwen/Qwen3-ForcedAligner-0.6B."""
         import inspect
 
         from rlm.video.video_indexer import VideoIndexer as RLMVideoIndexer
 
-        source = inspect.getsource(RLMVideoIndexer._run_asr)
+        source = inspect.getsource(RLMVideoIndexer._ensure_asr_model)
         assert "Qwen/Qwen3-ForcedAligner-0.6B" in source
         assert "Qwen/Qwen3-ASR-ForcedAligner" not in source

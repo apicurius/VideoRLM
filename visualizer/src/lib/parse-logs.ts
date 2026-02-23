@@ -44,28 +44,31 @@ export function parseJSONL(content: string): ParsedJSONL {
   const lines = content.trim().split('\n').filter(line => line.trim());
   const iterations: RLMIteration[] = [];
   let config: RLMConfigMetadata = getDefaultConfig();
-  
+
   for (const line of lines) {
     try {
       const parsed = JSON.parse(line);
-      
-      // Check if this is a metadata entry
+
+      // Check if this is a metadata entry.
+      // VideoRLM may emit a second metadata line with video-specific fields
+      // (video_path, fps, etc.) — merge rather than overwrite so initial
+      // RLM config fields (root_model, backend, …) are preserved.
       if (parsed.type === 'metadata') {
         config = {
-          timestamp: parsed.timestamp ?? null,
-          root_model: parsed.root_model ?? null,
-          max_depth: parsed.max_depth ?? null,
-          max_iterations: parsed.max_iterations ?? null,
-          backend: parsed.backend ?? null,
-          backend_kwargs: parsed.backend_kwargs ?? null,
-          environment_type: parsed.environment_type ?? null,
-          environment_kwargs: parsed.environment_kwargs ?? null,
-          other_backends: parsed.other_backends ?? null,
-          video_path: parsed.video_path ?? null,
-          fps: parsed.fps ?? null,
-          num_segments: parsed.num_segments ?? null,
-          max_frames_per_segment: parsed.max_frames_per_segment ?? null,
-          resize: parsed.resize ?? null,
+          timestamp: parsed.timestamp ?? config.timestamp,
+          root_model: parsed.root_model ?? config.root_model,
+          max_depth: parsed.max_depth ?? config.max_depth,
+          max_iterations: parsed.max_iterations ?? config.max_iterations,
+          backend: parsed.backend ?? config.backend,
+          backend_kwargs: parsed.backend_kwargs ?? config.backend_kwargs,
+          environment_type: parsed.environment_type ?? config.environment_type,
+          environment_kwargs: parsed.environment_kwargs ?? config.environment_kwargs,
+          other_backends: parsed.other_backends ?? config.other_backends,
+          video_path: parsed.video_path ?? config.video_path,
+          fps: parsed.fps ?? config.fps,
+          num_segments: parsed.num_segments ?? config.num_segments,
+          max_frames_per_segment: parsed.max_frames_per_segment ?? config.max_frames_per_segment,
+          resize: parsed.resize ?? config.resize,
         };
       } else if (parsed.type === 'iteration' || parsed.iteration != null) {
         // This is an iteration entry
@@ -74,7 +77,7 @@ export function parseJSONL(content: string): ParsedJSONL {
     } catch (e) {
     }
   }
-  
+
   return { iterations, config };
 }
 
@@ -648,7 +651,14 @@ export function parseLogFile(fileName: string, content: string): LogFile {
   try {
     const first = JSON.parse(firstLine);
 
-    // KUAVi format detection
+    // KUAVi format detection.
+    // Distinguish KUAVi metadata (has video_path but no root_model) from
+    // RLM metadata (has root_model, may also have video_path for VideoRLM).
+    const isKUAViMetadata =
+      first.type === 'metadata' &&
+      first.video_path != null &&
+      first.root_model == null;
+
     if (
       first.type === 'tool_call' ||
       first.type === 'session_start' ||
@@ -660,9 +670,7 @@ export function parseLogFile(fileName: string, content: string): LogFile {
       first.type === 'reasoning' ||
       first.type === 'system_prompt' ||
       first.type === 'question' ||
-      // metadata-only files from MCP server (session_start comes first normally,
-      // but guard against edge cases where metadata could appear early)
-      (first.type === 'metadata' && first.video_path != null)
+      isKUAViMetadata
     ) {
       const events = parseKUAViJSONL(content);
       const logStem = fileName.replace(/\.jsonl$/, '');

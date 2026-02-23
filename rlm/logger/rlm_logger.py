@@ -8,9 +8,14 @@ RLMChatCompletion.metadata. Optionally writes the same data to JSON-lines files.
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from rlm.core.types import RLMIteration, RLMMetadata
+
+
+def _utc_timestamp() -> str:
+    """Return a UTC ISO-8601 timestamp with millisecond precision, matching KUAVi format."""
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 class RLMLogger:
@@ -49,8 +54,27 @@ class RLMLogger:
         if self._save_to_disk and self.log_file_path:
             entry = {
                 "type": "metadata",
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": _utc_timestamp(),
                 **self._run_metadata,
+            }
+            with open(self.log_file_path, "a") as f:
+                json.dump(entry, f)
+                f.write("\n")
+
+    def log_supplemental_metadata(self, **kwargs: object) -> None:
+        """Log additional metadata fields (e.g. video info) after initial metadata.
+
+        Merges into the in-memory run_metadata and appends a supplemental
+        metadata line to the JSONL file so the visualizer can accumulate fields.
+        """
+        if self._run_metadata is not None:
+            self._run_metadata.update(kwargs)
+
+        if self._save_to_disk and self.log_file_path:
+            entry = {
+                "type": "metadata",
+                "timestamp": _utc_timestamp(),
+                **kwargs,
             }
             with open(self.log_file_path, "a") as f:
                 json.dump(entry, f)
@@ -62,7 +86,7 @@ class RLMLogger:
         entry = {
             "type": "iteration",
             "iteration": self._iteration_count,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": _utc_timestamp(),
             **iteration.to_dict(),
         }
         self._iterations.append(entry)
