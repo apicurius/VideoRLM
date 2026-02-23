@@ -33,6 +33,7 @@ def main():
     parser.add_argument("--num-segments", type=int, default=5, help="Number of segments (default: 5)")
     parser.add_argument("--max-frames-per-segment", type=int, default=3, help="Max frames per segment (default: 3)")
     parser.add_argument("--max-iterations", type=int, default=15, help="Max REPL iterations (default: 15)")
+    parser.add_argument("--cost-budget", type=float, default=None, help="Max estimated cost in USD (default: no limit)")
     parser.add_argument("--no-search", action="store_true", help="Disable semantic search tools")
     parser.add_argument("--no-scene-model", action="store_true", help="Disable V-JEPA 2 scene detection")
     parser.add_argument("--no-text-embedding", action="store_true", help="Disable separate text embedding model")
@@ -52,6 +53,7 @@ def main():
         max_frames_per_segment=args.max_frames_per_segment,
         resize=(640, 480),
         max_iterations=args.max_iterations,
+        cost_budget=args.cost_budget,
         logger=logger,
         verbose=True,
         enable_search=not args.no_search,
