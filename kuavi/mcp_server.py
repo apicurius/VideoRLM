@@ -166,12 +166,22 @@ class _TraceLogger:
             logger.warning("Failed to write trace event to %s", path)
 
     def _emit_session_start(self) -> None:
-        """Write a session_start event on first tool call."""
+        """Write a session_start event on first tool call, followed by a system_prompt event."""
         if not self._session_started:
+            ts = datetime.now(UTC).isoformat(timespec="milliseconds")
             self._write_event({
                 "type": "session_start",
-                "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
+                "timestamp": ts,
                 "source": "mcp-server",
+            })
+            # Emit system_prompt so the visualizer can display the analysis instructions
+            # (mirrors RLM's system message captured in the first iteration's prompt)
+            from kuavi.prompts import VIDEO_ANALYSIS_PROMPT
+
+            self._write_event({
+                "type": "system_prompt",
+                "timestamp": ts,
+                "text": VIDEO_ANALYSIS_PROMPT,
             })
             self._session_started = True
 
