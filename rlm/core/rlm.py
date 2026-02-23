@@ -28,6 +28,20 @@ from rlm.utils.prompts import (
 )
 from rlm.utils.rlm_utils import filter_sensitive_keys
 
+# Approximate per-token costs in USD (input, output) per 1M tokens.
+# Conservative estimates — actual costs vary by model and provider.
+_DEFAULT_COST_PER_M_TOKENS = (3.0, 15.0)  # $3/M input, $15/M output
+
+
+def _estimate_cost(usage) -> float:
+    """Estimate cost in USD from a UsageSummary using approximate per-token pricing."""
+    input_cost, output_cost = _DEFAULT_COST_PER_M_TOKENS
+    total = 0.0
+    for m in usage.model_usage_summaries.values():
+        total += m.total_input_tokens * input_cost / 1_000_000
+        total += m.total_output_tokens * output_cost / 1_000_000
+    return total
+
 
 class RLM:
     """
@@ -47,6 +61,7 @@ class RLM:
         max_depth: int = 1,
         max_iterations: int = 30,
         token_budget: int | None = None,
+        cost_budget: float | None = None,
         custom_system_prompt: str | None = None,
         other_backends: list[ClientBackend] | None = None,
         other_backend_kwargs: list[dict[str, Any]] | None = None,
@@ -67,6 +82,8 @@ class RLM:
             max_iterations: The maximum number of iterations of the RLM.
             token_budget: Maximum total tokens (input + output) before injecting a wrap-up
                 signal. None means no budget (default, backward compatible).
+            cost_budget: Maximum estimated cost in USD before injecting a wrap-up signal.
+                Uses approximate per-token pricing. None means no budget (default).
             custom_system_prompt: The custom system prompt to use for the RLM.
             other_backends: A list of other client backends that the environments can use to make sub-calls.
             other_backend_kwargs: The kwargs to pass to the other client backends (ordered to match other_backends).
@@ -105,6 +122,7 @@ class RLM:
         self.max_depth = max_depth
         self.max_iterations = max_iterations
         self.token_budget = token_budget
+        self.cost_budget = cost_budget
         self.system_prompt = custom_system_prompt if custom_system_prompt else RLM_SYSTEM_PROMPT
         self.logger = logger
         self.verbose = VerbosePrinter(enabled=verbose)
@@ -281,19 +299,26 @@ class RLM:
                 else:
                     consecutive_no_code = 0
 
-                # Budget-aware early stopping: inject wrap-up signal when token budget exceeded
-                if self.token_budget is not None:
+                # Budget-aware early stopping: inject wrap-up signal when token or cost budget exceeded
+                if self.token_budget is not None or self.cost_budget is not None:
                     usage = lm_handler.get_usage_summary()
                     total_tokens = sum(
                         m.total_input_tokens + m.total_output_tokens
                         for m in usage.model_usage_summaries.values()
                     )
-                    if total_tokens >= self.token_budget:
+                    budget_exceeded = False
+                    if self.token_budget is not None and total_tokens >= self.token_budget:
+                        budget_exceeded = True
+                    if self.cost_budget is not None:
+                        estimated_cost = _estimate_cost(usage)
+                        if estimated_cost >= self.cost_budget:
+                            budget_exceeded = True
+                    if budget_exceeded:
                         message_history.append(
                             {
                                 "role": "user",
                                 "content": (
-                                    "TOKEN BUDGET REACHED. You must provide your final answer NOW. "
+                                    "BUDGET REACHED. You must provide your final answer NOW. "
                                     "Use FINAL(your answer) or FINAL_VAR(variable_name) immediately."
                                 ),
                             }
