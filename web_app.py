@@ -257,6 +257,10 @@ class _EventRLMLogger:
         self._emit({"type": "iteration", "n": self._iter, "tools": tools_used, "errors": repl_errors})
         self._iterations.append({"type": "iteration", "iteration": self._iter, **iteration.to_dict()})
 
+    def log_supplemental_metadata(self, **kwargs: object) -> None:
+        if self._run_metadata is not None:
+            self._run_metadata.update(kwargs)
+
     def clear_iterations(self) -> None:
         self._iterations = []
         self._iter = 0
