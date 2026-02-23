@@ -471,14 +471,23 @@ def make_search_transcript(index: VideoIndex) -> dict[str, Any]:
             if query_lower in entry["text"].lower():
                 context_entries = index.transcript[max(0, i - 1) : i + 2]
                 context = " ".join(e["text"] for e in context_entries)
-                results.append(
-                    {
-                        "start_time": entry["start_time"],
-                        "end_time": entry["end_time"],
-                        "text": entry["text"],
-                        "context": context,
-                    }
-                )
+                hit: dict[str, Any] = {
+                    "start_time": entry["start_time"],
+                    "end_time": entry["end_time"],
+                    "text": entry["text"],
+                    "context": context,
+                }
+                # Narrow to word-level timestamps for the matched span
+                words = entry.get("words")
+                if words:
+                    matched = [
+                        w for w in words if query_lower in w["text"].lower()
+                    ]
+                    if matched:
+                        hit["word_start_time"] = matched[0]["start_time"]
+                        hit["word_end_time"] = matched[-1]["end_time"]
+                        hit["matched_words"] = matched
+                results.append(hit)
         return results
 
     return {
@@ -502,6 +511,18 @@ def make_get_transcript(index: VideoIndex) -> dict[str, Any]:
         lines = []
         for entry in index.transcript:
             if entry["end_time"] >= start_time and entry["start_time"] <= end_time:
+                # Use word-level timestamps for tighter time display when available
+                words = entry.get("words")
+                if words:
+                    relevant = [
+                        w
+                        for w in words
+                        if w["end_time"] >= start_time and w["start_time"] <= end_time
+                    ]
+                    if relevant:
+                        text = " ".join(w["text"] for w in relevant)
+                        lines.append(f"[{relevant[0]['start_time']:.2f}s] {text}")
+                        continue
                 lines.append(f"[{entry['start_time']:.1f}s] {entry['text']}")
         return "\n".join(lines)
 

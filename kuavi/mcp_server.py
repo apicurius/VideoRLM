@@ -991,7 +991,7 @@ def kuavi_index_video(
     embedding_model: str = "google/siglip2-base-patch16-256",
     scene_model: str | None = "facebook/vjepa2-vitl-fpc64-256",
     text_embedding_model: str | None = None,
-    asr_model: str = "Qwen/Qwen3-ASR-1.7B",
+    asr_model: str = "Qwen/Qwen3-ASR-0.6B",
     cache_dir: str | None = None,
     no_scene_model: bool = False,
     no_text_embedding: bool = False,

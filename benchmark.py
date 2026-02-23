@@ -405,7 +405,7 @@ def _index_video_in_process(
         caption_fn=caption_fn,
         frame_caption_fn=frame_caption_fn,
         refine_fn=refine_fn,
-        asr_model="Qwen/Qwen3-ASR-1.7B",
+        asr_model="Qwen/Qwen3-ASR-0.6B",
         mode="full",
     )
 

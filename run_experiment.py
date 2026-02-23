@@ -985,7 +985,7 @@ def run_kuavi(
         caption_fn=caption_fn,
         frame_caption_fn=frame_caption_fn,
         refine_fn=refine_fn,
-        asr_model="Qwen/Qwen3-ASR-1.7B",
+        asr_model="Qwen/Qwen3-ASR-0.6B",
     )
     index_time = time.monotonic() - t0
     printer.print_step_done(

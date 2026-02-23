@@ -104,7 +104,7 @@ class VideoRLM:
         custom_sub_tools: dict[str, Any] | None = None,
         enable_search: bool = True,
         embedding_model: str | None = None,
-        asr_model: str = "Qwen/Qwen3-ASR-1.7B",
+        asr_model: str = "Qwen/Qwen3-ASR-0.6B",
         transcript_path: str | None = None,
         refine_fn: Callable | None = None,
         caption_fn: Callable | None = None,

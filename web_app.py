@@ -337,7 +337,7 @@ def _kuavi_pipeline(
         )
         index = indexer.index_video(
             loaded,
-            asr_model="Qwen/Qwen3-ASR-1.7B",
+            asr_model="Qwen/Qwen3-ASR-0.6B",
             caption_fn=caption_fn,
             frame_caption_fn=frame_caption_fn,
             refine_fn=refine_fn,
@@ -831,10 +831,10 @@ def _full_pipeline(
             scene_model=SCENE_MODEL,
             embedding_model=VISUAL_EMBED_MODEL,
             text_embedding_model=TEXT_EMBED_MODEL,
-            asr_model="Qwen/Qwen3-ASR-1.7B",
+            asr_model="Qwen/Qwen3-ASR-0.6B",
             caption_fn=caption_fn,
             frame_caption_fn=frame_caption_fn,
-            refine_fn=refine_fn,
+            refine_fn=None,  # Disabled to speed up Stage 3 flow
             auto_fps=True,
             num_segments=8,
             max_frames_per_segment=4,

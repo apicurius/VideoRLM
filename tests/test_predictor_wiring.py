@@ -432,7 +432,7 @@ class TestASRGracefulFallback:
     def test_missing_qwen_asr_returns_empty(self):
         indexer = VideoIndexer()
         with patch.dict("sys.modules", {"qwen_asr": None}):
-            result = indexer._run_asr("/fake/video.mp4", "Qwen/Qwen3-ASR-1.7B")
+            result = indexer._run_asr("/fake/video.mp4", "Qwen/Qwen3-ASR-0.6B")
         assert result == []
 
     def test_run_asr_imports_only_qwen3asrmodel(self):

@@ -56,7 +56,7 @@ class KUAViConfig:
     auto_fps: bool = False
     target_frames: int = 120
     cache_dir: str | Path | None = None
-    asr_model: str = "Qwen/Qwen3-ASR-1.7B"
+    asr_model: str = "Qwen/Qwen3-ASR-0.6B"
     max_frames_per_segment: int = 32
     resize: tuple[int, int] | None = None
     hierarchical: bool = False

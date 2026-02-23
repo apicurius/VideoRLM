@@ -449,7 +449,7 @@ def main() -> None:
         help="Separate text embedding model"
     )
     p_index.add_argument("--no-text-embedding", action="store_true")
-    p_index.add_argument("--asr-model", default="Qwen/Qwen3-ASR-1.7B", help="Qwen3-ASR model name")
+    p_index.add_argument("--asr-model", default="Qwen/Qwen3-ASR-0.6B", help="Qwen3-ASR model name")
     p_index.add_argument("--cache-dir", default=None, help="Cache directory")
 
     # --- search ---

@@ -361,7 +361,7 @@ class VideoIndexer:
         caption_fn: Callable | None = None,
         frame_caption_fn: Callable | None = None,
         refine_fn: Callable | None = None,
-        asr_model: str = "Qwen/Qwen3-ASR-1.7B",
+        asr_model: str = "Qwen/Qwen3-ASR-0.6B",
         transcript_path: str | None = None,
         refine_rounds: int = 3,
         mode: str = "full",
@@ -2551,7 +2551,7 @@ class VideoIndexer:
         self,
         video_path: str,
         *,
-        asr_model: str = "Qwen/Qwen3-ASR-1.7B",
+        asr_model: str = "Qwen/Qwen3-ASR-0.6B",
         transcript_path: str | None = None,
     ) -> list[dict]:
         """Return ASR transcript as a list of ``{start_time, end_time, text}`` dicts."""
@@ -2649,37 +2649,57 @@ class VideoIndexer:
                     return []
                 asr_result = results[0]
 
-                # Group word-level timestamps into sentence-level segments.
+                # Group word-level timestamps into sentence-level segments,
+                # preserving word-level detail in a ``words`` list per segment.
+                # Split on sentence-ending punctuation or gaps > 1s between words.
                 transcript: list[dict] = []
                 if asr_result.time_stamps is not None and asr_result.time_stamps.items:
                     items = asr_result.time_stamps.items
-                    seg_words: list[str] = []
+                    seg_words: list[dict] = []
                     seg_start: float | None = None
                     seg_end: float = 0.0
 
-                    for item in items:
+                    def _flush_segment() -> None:
+                        nonlocal seg_words, seg_start, seg_end
+                        if not seg_words:
+                            return
+                        text = " ".join(w["text"] for w in seg_words).strip()
+                        if text:
+                            transcript.append({
+                                "start_time": round(seg_start, 3),
+                                "end_time": round(seg_end, 3),
+                                "text": text,
+                                "words": seg_words,
+                            })
+                        seg_words = []
+                        seg_start = None
+
+                    for idx, item in enumerate(items):
+                        # Detect gap > 1s from previous word — flush before adding
+                        if seg_start is not None and (item.start_time - seg_end) > 1.0:
+                            _flush_segment()
+
                         if seg_start is None:
                             seg_start = item.start_time
-                        seg_words.append(item.text)
+                        seg_words.append({
+                            "text": item.text,
+                            "start_time": round(item.start_time, 3),
+                            "end_time": round(item.end_time, 3),
+                        })
                         seg_end = item.end_time
 
+                        # Split on sentence-ending punctuation
                         is_sentence_end = item.text.rstrip().endswith((".", "!", "?"))
-                        at_end = item is items[-1]
+                        at_end = idx == len(items) - 1
                         if is_sentence_end or at_end:
-                            text = " ".join(seg_words).strip()
-                            if text:
-                                transcript.append({
-                                    "start_time": round(seg_start, 2),
-                                    "end_time": round(seg_end, 2),
-                                    "text": text,
-                                })
-                            seg_words = []
-                            seg_start = None
+                            _flush_segment()
+
                 elif asr_result.text.strip():
                     transcript.append({
                         "start_time": 0.0,
                         "end_time": 0.0,
                         "text": asr_result.text.strip(),
+                        "words": [],
                     })
 
                 return transcript
