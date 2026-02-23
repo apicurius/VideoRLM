@@ -193,9 +193,9 @@ class _QueueLogHandler(logging.Handler):
 
     def emit(self, record):
         msg = record.getMessage()
-        if "[pipeline] V-JEPA 2: detecting scenes" in msg:
+        if "[pipeline] V-JEPA 2" in msg and "detecting scenes" in msg:
             self._emit_step("vjepa", "running", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] V-JEPA 2:" in msg:
+        elif "[pipeline] V-JEPA 2" in msg and "scenes detected" in msg:
             self._emit_step("vjepa", "done", msg.split("[pipeline] ")[-1])
         elif "[pipeline] SigLIP2: building" in msg:
             self._emit_step("siglip", "running", msg.split("[pipeline] ")[-1])
@@ -205,11 +205,14 @@ class _QueueLogHandler(logging.Handler):
             self._emit_step("gemma", "running", msg.split("[pipeline] ")[-1])
         elif "[pipeline] Gemma:" in msg:
             self._emit_step("gemma", "done", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] Qwen3-ASR: starting" in msg:
-            self._emit_step("whisper", "running", msg.split("[pipeline] ")[-1])
         elif "[pipeline] Qwen3-ASR:" in msg or "qwen_asr not installed" in msg:
-            status = "skip" if "not installed" in msg else "done"
-            self._emit_step("whisper", status, msg.split("[pipeline] ")[-1])
+            detail = msg.split("[pipeline] ")[-1] if "[pipeline] " in msg else msg
+            if "not installed" in msg:
+                self._emit_step("whisper", "skip", detail)
+            elif "segments transcribed" in msg or "transcript segments" in msg:
+                self._emit_step("whisper", "done", detail)
+            else:
+                self._emit_step("whisper", "running", detail)
         elif "Gemini caption" in msg or "caption_fn" in msg:
             if "failed" in msg:
                 self._emit_step("caption", "running", "retrying...")
@@ -519,6 +522,13 @@ def _kuavi_pipeline(
             completed.add(step_id)
         emit(event)
 
+    # Attach log handler so pipeline stages emit real-time progress
+    log_handler = _QueueLogHandler(emit, completed)
+    log_handler.setLevel(logging.INFO)
+    kuavi_logger = logging.getLogger("kuavi.indexer")
+    kuavi_logger.setLevel(logging.INFO)
+    kuavi_logger.addHandler(log_handler)
+
     try:
         emit_step("vjepa", "running", "loading video...")
         loader = VideoLoader(fps=0.5)
@@ -588,20 +598,27 @@ def _kuavi_pipeline(
         n_scenes = len(index.scene_boundaries)
         n_segs = len(index.segments)
 
-        # Emit done in actual execution order: vjepa → whisper → caption → gemma → siglip → index
-        emit_step("vjepa", "done", f"{n_scenes} scene boundaries detected")
+        # Emit done for any steps the log handler didn't already mark
+        if "vjepa" not in completed:
+            emit_step("vjepa", "done", f"{n_scenes} scene boundaries detected")
 
-        if index.transcript:
-            emit_step("whisper", "done", f"{len(index.transcript)} transcript entries")
-        else:
-            emit_step("whisper", "skip", "no transcript")
+        if "whisper" not in completed:
+            if index.transcript:
+                emit_step("whisper", "done", f"{len(index.transcript)} transcript entries")
+            else:
+                emit_step("whisper", "skip", "no transcript")
 
-        if use_gemini and caption_fn is not None:
-            captioned = sum(1 for s in index.segments if s.get("caption"))
-            emit_step("caption", "done", f"{captioned}/{n_segs} segments captioned")
+        if "caption" not in completed:
+            if caption_fn is not None:
+                captioned = sum(1 for s in index.segments if s.get("caption"))
+                emit_step("caption", "done", f"{captioned}/{n_segs} segments captioned")
+            else:
+                emit_step("caption", "skip", "no captioning available")
 
-        emit_step("gemma", "done", "text embeddings ready")
-        emit_step("siglip", "done", f"{n_segs} segments embedded")
+        if "gemma" not in completed:
+            emit_step("gemma", "done", "text embeddings ready")
+        if "siglip" not in completed:
+            emit_step("siglip", "done", f"{n_segs} segments embedded")
         emit_step("index", "done", f"{n_segs} segments, {n_scenes} scenes")
 
         # Emit index stats for frontend
@@ -650,6 +667,8 @@ def _kuavi_pipeline(
         short = str(exc)[:200]
         _mark_pending_as_error(PIPELINE_STEPS, completed, emit, short)
         emit({"type": "error", "message": str(exc)})
+    finally:
+        kuavi_logger.removeHandler(log_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -1269,7 +1288,16 @@ def _full_pipeline(
             "6. Cite moments with [TS: X.X] (seconds) right after each claim."
         )
         result = video_rlm.completion(video_path, prompt=augmented)
-        emit_step("caption", "done")
+
+        # Emit done for any steps the log handler didn't already mark
+        for step_id in ("vjepa", "whisper", "caption", "gemma", "siglip"):
+            if step_id not in completed:
+                if step_id == "caption" and caption_fn is None:
+                    emit_step(step_id, "skip", "no captioning available")
+                elif step_id == "whisper":
+                    emit_step(step_id, "done", "transcript complete")
+                else:
+                    emit_step(step_id, "done")
         emit_step("agent", "done")
         timestamps = _parse_timestamps(result.response)
         answer_html = _render_answer_html(result.response)
