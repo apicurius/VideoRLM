@@ -642,7 +642,7 @@ class VideoRLM:
             video_path=str(Path(video_path).resolve()),
             fps=self.loader.fps,
             num_segments=len(loaded_video.segments) if loaded_video.segments else 0,
-            max_frames_per_segment=self.max_frames_per_segment,
+            max_frames_per_segment=self.context_builder.max_frames_per_segment,
             resize=list(self.context_builder.resize) if self.context_builder.resize else None,
         )
 
