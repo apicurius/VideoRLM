@@ -85,6 +85,7 @@ export default function VideoRLMInterface() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const timerRef = useRef<NodeJS.Timeout>(null);
+  const sseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
@@ -165,6 +166,14 @@ export default function VideoRLMInterface() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let gotResult = false;
+
+      // Timeout: if no events arrive within 30s, warn the user
+      sseTimeoutRef.current = setTimeout(() => {
+        setError("No response from backend after 30s. Check that the server is running.");
+        stopTimer();
+        setIsLoading(false);
+      }, 30000);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -182,8 +191,17 @@ export default function VideoRLMInterface() {
               if (!eventStr) continue;
               const event = JSON.parse(eventStr);
 
+              // Clear connection timeout on first event
+              if (sseTimeoutRef.current) {
+                clearTimeout(sseTimeoutRef.current);
+                sseTimeoutRef.current = null;
+              }
+
               if (event.type === "init") {
-                setSteps(event.steps);
+                setSteps(event.steps.map((s: any) => ({
+                  ...s,
+                  status: s.status || "pending",
+                })));
               } else if (event.type === "step") {
                 setSteps((prev) =>
                   prev.map((s) =>
@@ -212,11 +230,13 @@ export default function VideoRLMInterface() {
                   { tool: event.tool, count: event.count, timestamps: event.timestamps || [] },
                 ]);
               } else if (event.type === "result") {
+                gotResult = true;
                 setAnswerHtml({ __html: event.answer_html });
                 setTimestamps(event.timestamps || []);
                 stopTimer();
                 setIsLoading(false);
               } else if (event.type === "error") {
+                gotResult = true;
                 setError(event.message || "Pipeline error");
                 stopTimer();
                 setIsLoading(false);
@@ -229,7 +249,18 @@ export default function VideoRLMInterface() {
           }
         }
       }
+
+      // If the stream ended without a result or error, the connection was lost
+      if (!gotResult) {
+        setError("Connection to server lost. The backend may have restarted.");
+        stopTimer();
+        setIsLoading(false);
+      }
     } catch (err: unknown) {
+      if (sseTimeoutRef.current) {
+        clearTimeout(sseTimeoutRef.current);
+        sseTimeoutRef.current = null;
+      }
       const message = err instanceof Error ? err.message : "An unknown error occurred";
       console.error(err);
       setError(message);

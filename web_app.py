@@ -116,13 +116,13 @@ VISUAL_EMBED_MODEL = "google/siglip2-base-patch16-256"
 TEXT_EMBED_MODEL = "google/embeddinggemma-300m"
 
 PIPELINE_STEPS = [
-    {"id": "vjepa",   "label": "V-JEPA 2 Scene Detection"},
-    {"id": "whisper", "label": "Qwen3-ASR"},
-    {"id": "caption", "label": "Segment Captioning"},
-    {"id": "gemma",   "label": "Gemma Text Embeddings"},
-    {"id": "siglip",  "label": "SigLIP2 Visual Embeddings"},
-    {"id": "index",   "label": "Search Index"},
-    {"id": "agent",   "label": "Recursive Agent Loop"},
+    {"id": "vjepa",   "label": "V-JEPA 2 Scene Detection", "status": "pending"},
+    {"id": "whisper", "label": "Qwen3-ASR", "status": "pending"},
+    {"id": "caption", "label": "Segment Captioning", "status": "pending"},
+    {"id": "gemma",   "label": "Gemma Text Embeddings", "status": "pending"},
+    {"id": "siglip",  "label": "SigLIP2 Visual Embeddings", "status": "pending"},
+    {"id": "index",   "label": "Search Index", "status": "pending"},
+    {"id": "agent",   "label": "Recursive Agent Loop", "status": "pending"},
 ]
 
 _AGENT_TOOLS = [
@@ -205,11 +205,15 @@ class _QueueLogHandler(logging.Handler):
             self._emit_step("gemma", "running", msg.split("[pipeline] ")[-1])
         elif "[pipeline] Gemma:" in msg:
             self._emit_step("gemma", "done", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] Qwen3-ASR: starting" in msg:
-            self._emit_step("whisper", "running", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] Qwen3-ASR:" in msg or "qwen_asr not installed" in msg:
-            status = "skip" if "not installed" in msg else "done"
-            self._emit_step("whisper", status, msg.split("[pipeline] ")[-1])
+        elif "qwen_asr not installed" in msg:
+            self._emit_step("whisper", "skip", "qwen_asr not installed")
+        elif "[pipeline] Qwen3-ASR:" in msg:
+            detail = msg.split("[pipeline] ")[-1]
+            if "segments transcribed" in msg:
+                self._emit_step("whisper", "done", detail)
+            else:
+                # loading model, model loaded, transcribing — all still "running"
+                self._emit_step("whisper", "running", detail)
         elif "Gemini caption" in msg or "caption_fn" in msg:
             if "failed" in msg:
                 self._emit_step("caption", "running", "retrying...")
@@ -572,37 +576,53 @@ def _kuavi_pipeline(
             except ImportError:
                 emit_step("caption", "skip", "no captioning available")
 
-        indexer = VideoIndexer(
-            embedding_model=VISUAL_EMBED_MODEL,
-            text_embedding_model=TEXT_EMBED_MODEL,
-            scene_model=SCENE_MODEL,
-        )
-        index = indexer.index_video(
-            loaded,
-            asr_model="Qwen/Qwen3-ASR-0.6B",
-            caption_fn=caption_fn,
-            frame_caption_fn=frame_caption_fn,
-            refine_fn=refine_fn,
-        )
+        # Attach log handler to intercept real-time indexer progress
+        log_handler = _QueueLogHandler(emit, completed)
+        log_handler.setLevel(logging.INFO)
+        kuavi_logger = logging.getLogger("kuavi.indexer")
+        kuavi_logger.setLevel(logging.INFO)
+        kuavi_logger.addHandler(log_handler)
+
+        try:
+            indexer = VideoIndexer(
+                embedding_model=VISUAL_EMBED_MODEL,
+                text_embedding_model=TEXT_EMBED_MODEL,
+                scene_model=SCENE_MODEL,
+            )
+            index = indexer.index_video(
+                loaded,
+                asr_model="Qwen/Qwen3-ASR-0.6B",
+                caption_fn=caption_fn,
+                frame_caption_fn=frame_caption_fn,
+                refine_fn=refine_fn,
+            )
+        finally:
+            kuavi_logger.removeHandler(log_handler)
 
         n_scenes = len(index.scene_boundaries)
         n_segs = len(index.segments)
 
-        # Emit done in actual execution order: vjepa → whisper → caption → gemma → siglip → index
-        emit_step("vjepa", "done", f"{n_scenes} scene boundaries detected")
+        # Emit final done for any steps the log handler didn't already mark
+        if "vjepa" not in completed:
+            emit_step("vjepa", "done", f"{n_scenes} scene boundaries detected")
 
-        if index.transcript:
-            emit_step("whisper", "done", f"{len(index.transcript)} transcript entries")
-        else:
-            emit_step("whisper", "skip", "no transcript")
+        if "whisper" not in completed:
+            if index.transcript:
+                emit_step("whisper", "done", f"{len(index.transcript)} transcript entries")
+            else:
+                emit_step("whisper", "skip", "no transcript")
 
-        if use_gemini and caption_fn is not None:
-            captioned = sum(1 for s in index.segments if s.get("caption"))
-            emit_step("caption", "done", f"{captioned}/{n_segs} segments captioned")
+        if "caption" not in completed:
+            if use_gemini and caption_fn is not None:
+                captioned = sum(1 for s in index.segments if s.get("caption"))
+                emit_step("caption", "done", f"{captioned}/{n_segs} segments captioned")
 
-        emit_step("gemma", "done", "text embeddings ready")
-        emit_step("siglip", "done", f"{n_segs} segments embedded")
-        emit_step("index", "done", f"{n_segs} segments, {n_scenes} scenes")
+        if "gemma" not in completed:
+            emit_step("gemma", "done", "text embeddings ready")
+        if "siglip" not in completed:
+            emit_step("siglip", "done", f"{n_segs} segments embedded")
+        if "index" not in completed:
+            emit_step("index", "done", f"{n_segs} segments, {n_scenes} scenes")
 
         # Emit index stats for frontend
         emit({"type": "index_stats", "segments": n_segs, "scenes": n_scenes,
