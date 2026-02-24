@@ -124,6 +124,17 @@ def _cache_key(video_path: str) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+def _is_faster_whisper_model(model_name: str) -> bool:
+    """Check if model_name refers to a faster-whisper model."""
+    if model_name.startswith("faster-whisper/"):
+        return True
+    # Also accept bare whisper size names
+    return model_name in (
+        "tiny", "base", "small", "medium",
+        "large-v1", "large-v2", "large-v3", "turbo", "large",
+    )
+
+
 class VideoIndexer:
     """Build a searchable :class:`VideoIndex` from a loaded video.
 
@@ -2654,11 +2665,80 @@ class VideoIndexer:
 
         return chunks if chunks else [(wav_path, 0.0)]
 
+    def _run_faster_whisper(self, video_path: str, model_name: str) -> list[dict]:
+        """Run faster-whisper ASR on a video file."""
+        model_size = model_name.removeprefix("faster-whisper/")
+
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            logger.info("faster-whisper not installed — skipping ASR")
+            return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav_path = os.path.join(tmp, "audio.wav")
+            if not self._extract_audio(video_path, wav_path):
+                return []
+
+            # Device selection
+            import torch
+
+            if torch.cuda.is_available():
+                device, compute_type = "cuda", "float16"
+            else:
+                device, compute_type = "cpu", "int8"
+
+            # Cache model instance to avoid reloading on repeated calls
+            cached = getattr(self, "_faster_whisper_model", None)
+            cached_size = getattr(self, "_faster_whisper_model_size", None)
+            if cached is not None and cached_size == model_size:
+                model = cached
+                logger.info("[pipeline] faster-whisper: reusing cached %s model", model_size)
+            else:
+                logger.info("[pipeline] faster-whisper: loading model %s", model_size)
+                model = WhisperModel(model_size, device=device, compute_type=compute_type)
+                self._faster_whisper_model = model
+                self._faster_whisper_model_size = model_size
+
+            logger.info("[pipeline] faster-whisper: transcribing audio")
+            segments_gen, _info = model.transcribe(
+                wav_path,
+                word_timestamps=False,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
+
+            # Convert to KUAVi transcript format
+            transcript: list[dict] = []
+            for segment in segments_gen:
+                entry: dict[str, Any] = {
+                    "start_time": round(segment.start, 3),
+                    "end_time": round(segment.end, 3),
+                    "text": segment.text.strip(),
+                }
+                if segment.words:
+                    entry["words"] = [
+                        {
+                            "text": w.word.strip(),
+                            "start_time": round(w.start, 3),
+                            "end_time": round(w.end, 3),
+                        }
+                        for w in segment.words
+                    ]
+                transcript.append(entry)
+
+            logger.info("[pipeline] faster-whisper: %d transcript segments", len(transcript))
+            return transcript
+
     def _run_asr(self, video_path: str, model_name: str) -> list[dict]:
         """Transcribe audio using Qwen3-ASR with word-level timestamps.
 
         Splits audio into short chunks (default 30s) before transcription.
         """
+        # Route to faster-whisper if appropriate
+        if _is_faster_whisper_model(model_name):
+            return self._run_faster_whisper(video_path, model_name)
+
         self._ensure_asr_model(model_name)
         if self._asr_model is None:
             return []

@@ -47,7 +47,7 @@ type PanelTab = "pipeline" | "traces";
 
 const DEFAULT_PIPELINE_STEPS: PipelineStep[] = [
   { id: "vjepa", label: "V-JEPA 2 Scene Detection", status: "pending" },
-  { id: "whisper", label: "Qwen3-ASR", status: "pending" },
+  { id: "whisper", label: "Speech Recognition", status: "pending" },
   { id: "caption", label: "Segment Captioning", status: "pending" },
   { id: "gemma", label: "Gemma Text Embeddings", status: "pending" },
   { id: "siglip", label: "SigLIP2 Visual Embeddings", status: "pending" },
@@ -68,6 +68,7 @@ export default function VideoRLMInterface() {
   // Pipeline state
   const [pipeline, setPipeline] = useState("kuavi");
   const [indexMode, setIndexMode] = useState("fast");
+  const [asrModel, setAsrModel] = useState("faster-whisper/base");
   const [backend, setBackend] = useState("openrouter");
   const [model, setModel] = useState("openai/gpt-4o");
   const [apiKey, setApiKey] = useState("");
@@ -150,6 +151,7 @@ export default function VideoRLMInterface() {
     formData.append("model", model);
     formData.append("pipeline", pipeline);
     formData.append("index_mode", indexMode);
+    formData.append("asr_model", asrModel);
     formData.append("custom_api_key", apiKey);
 
     try {
@@ -352,6 +354,21 @@ export default function VideoRLMInterface() {
                       <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white">
                         <SelectItem value="fast">Fast (Embeddings Only)</SelectItem>
                         <SelectItem value="captioned">Captioned (+ Gemini Descriptions)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-3">
+                    <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">ASR Model</Label>
+                    <Select value={asrModel} onValueChange={setAsrModel}>
+                      <SelectTrigger className="bg-white/5 border-white/10 h-11 text-sm rounded-xl focus:ring-amber-500/30 text-white">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white">
+                        <SelectItem value="faster-whisper/base">Faster Whisper Base (Fast)</SelectItem>
+                        <SelectItem value="faster-whisper/small">Faster Whisper Small</SelectItem>
+                        <SelectItem value="faster-whisper/medium">Faster Whisper Medium</SelectItem>
+                        <SelectItem value="faster-whisper/large-v3">Faster Whisper Large v3</SelectItem>
+                        <SelectItem value="Qwen/Qwen3-ASR-0.6B">Qwen3-ASR</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>

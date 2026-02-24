@@ -59,7 +59,9 @@ def _seconds_to_label(seconds: float) -> str:
     return f"{m}:{s:02d}{frac_str}"
 
 
-def _parse_timestamps(text: str) -> list[dict]:
+def _parse_timestamps(text: str | None) -> list[dict]:
+    if not text:
+        return []
     found: list[float] = []
 
     for m in re.finditer(r"\[TS:\s*(\d+(?:\.\d+)?)\s*(?:s)?\]", text, re.IGNORECASE):
@@ -117,7 +119,7 @@ TEXT_EMBED_MODEL = "google/embeddinggemma-300m"
 
 PIPELINE_STEPS = [
     {"id": "vjepa",   "label": "V-JEPA 2 Scene Detection"},
-    {"id": "whisper", "label": "Qwen3-ASR"},
+    {"id": "whisper", "label": "Speech Recognition"},
     {"id": "caption", "label": "Segment Captioning"},
     {"id": "gemma",   "label": "Gemma Text Embeddings"},
     {"id": "siglip",  "label": "SigLIP2 Visual Embeddings"},
@@ -207,9 +209,17 @@ class _QueueLogHandler(logging.Handler):
             self._emit_step("gemma", "done", msg.split("[pipeline] ")[-1])
         elif "[pipeline] Qwen3-ASR: loading" in msg or "[pipeline] Qwen3-ASR: starting" in msg:
             self._emit_step("whisper", "running", msg.split("[pipeline] ")[-1])
-        elif "qwen_asr not installed" in msg:
-            self._emit_step("whisper", "skip", "qwen_asr not installed")
+        elif "[pipeline] faster-whisper: loading" in msg or "[pipeline] faster-whisper: starting" in msg:
+            self._emit_step("whisper", "running", msg.split("[pipeline] ")[-1])
+        elif "qwen_asr not installed" in msg or "faster_whisper not installed" in msg:
+            self._emit_step("whisper", "skip", msg.split("[pipeline] ")[-1] if "[pipeline] " in msg else msg)
         elif "[pipeline] Qwen3-ASR:" in msg:
+            detail = msg.split("[pipeline] ")[-1]
+            if "segments transcribed" in msg or "transcript segments" in msg:
+                self._emit_step("whisper", "done", detail)
+            else:
+                self._emit_step("whisper", "running", detail)
+        elif "[pipeline] faster-whisper:" in msg:
             detail = msg.split("[pipeline] ")[-1]
             if "segments transcribed" in msg or "transcript segments" in msg:
                 self._emit_step("whisper", "done", detail)
@@ -509,6 +519,7 @@ def _kuavi_pipeline(
     emit,
     *,
     index_mode: str = "fast",
+    asr_model: str = "faster-whisper/base",
 ) -> None:
     """KUAVi pipeline: VideoIndexer + search tools + tool-calling agent."""
     try:
@@ -606,7 +617,7 @@ def _kuavi_pipeline(
         )
         index = indexer.index_video(
             loaded,
-            asr_model="Qwen/Qwen3-ASR-0.6B",
+            asr_model=asr_model,
             caption_fn=caption_fn,
             frame_caption_fn=frame_caption_fn,
             refine_fn=refine_fn,
@@ -636,7 +647,10 @@ def _kuavi_pipeline(
                 emit_step("caption", "skip", "no captioning available")
 
         if "gemma" not in completed:
-            emit_step("gemma", "done", "text embeddings ready")
+            if use_captioning:
+                emit_step("gemma", "done", "text embeddings ready")
+            else:
+                emit_step("gemma", "skip", "no captions to embed")
         if "siglip" not in completed:
             emit_step("siglip", "done", f"{n_segs} segments embedded")
         emit_step("index", "done", f"{n_segs} segments, {n_scenes} scenes")
@@ -1205,6 +1219,7 @@ def _full_pipeline(
     backend: str,
     emit,
     index_mode: str = "fast",
+    asr_model: str = "faster-whisper/base",
 ) -> None:
     from rlm.video.video_rlm import VideoRLM
 
@@ -1302,7 +1317,7 @@ def _full_pipeline(
             scene_model=SCENE_MODEL,
             embedding_model=VISUAL_EMBED_MODEL,
             text_embedding_model=TEXT_EMBED_MODEL,
-            asr_model="Qwen/Qwen3-ASR-0.6B",
+            asr_model=asr_model,
             caption_fn=caption_fn,
             frame_caption_fn=frame_caption_fn,
             refine_fn=None,  # Disabled to speed up Stage 3 flow
@@ -1360,6 +1375,7 @@ async def analyze(
     model: str = Form(default="openai/gpt-4o"),
     pipeline: str = Form(default="rlm"),
     index_mode: str = Form(default="fast"),
+    asr_model: str = Form(default="faster-whisper/base"),
     custom_api_key: str = Form(default=""),
 ):
     suffix = Path(video.filename or "upload.mp4").suffix or ".mp4"
@@ -1387,9 +1403,9 @@ async def analyze(
 
     def run() -> None:
         if pipeline == "kuavi":
-            _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode)
+            _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode, asr_model=asr_model)
         else:
-            _full_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode)
+            _full_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode, asr_model=asr_model)
         event_q.put(None)
 
     threading.Thread(target=run, daemon=True).start()

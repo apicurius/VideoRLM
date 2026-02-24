@@ -49,6 +49,9 @@ embeddings = [
 asr = [
     "qwen-asr>=0.0.6",
 ]
+whisper = [
+    "faster-whisper>=1.0.0",
+]
 gemini = [
     "google-genai>=1.0.0",
 ]
@@ -85,7 +88,7 @@ daytona = [
     "flask>=2.0.0",
 ]
 all = [
-    "kuavi[embeddings,asr,gemini,openai,anthropic,web]",
+    "kuavi[embeddings,asr,whisper,gemini,openai,anthropic,web]",
 ]
 
 [project.scripts]
