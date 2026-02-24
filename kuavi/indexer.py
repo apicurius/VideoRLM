@@ -234,6 +234,18 @@ class VideoIndexer:
             self._text_model_type,
         )
 
+    def _free_scene_model(self) -> None:
+        """Unload V-JEPA 2 from GPU to free VRAM before loading the ASR model."""
+        if self._scene_model is None:
+            return
+        import torch
+
+        self._scene_model = None
+        self._scene_processor = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("[pipeline] V-JEPA 2: unloaded from GPU (freeing VRAM for ASR)")
+
     def _ensure_scene_model(self) -> None:
         """Lazily load V-JEPA 2 for scene detection."""
         if self._scene_model is not None:
@@ -544,7 +556,10 @@ class VideoIndexer:
             segment_infos = self._segments_from_scenes(scenes, frames, timestamps)
 
         # 4. Transcript (Qwen3-ASR or pre-existing file) — run before captioning
-        #    so ASR context can be injected into caption prompts
+        #    so ASR context can be injected into caption prompts.
+        #    Free V-JEPA 2 from GPU first — it stays loaded after scene detection
+        #    and leaves too little VRAM for the ASR model on 11-12 GiB GPUs.
+        self._free_scene_model()
         transcript = self._get_transcript(
             loaded_video.metadata.path,
             asr_model=asr_model,

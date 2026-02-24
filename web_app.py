@@ -240,6 +240,10 @@ class _EventRLMLogger:
         self._run_metadata = metadata.to_dict()
         self._metadata_logged = True
 
+    def log_supplemental_metadata(self, **kwargs: object) -> None:
+        if self._run_metadata is not None:
+            self._run_metadata.update(kwargs)
+
     def log(self, iteration) -> None:
         if self._iter == 0:
             self._emit({"type": "step", "id": "agent", "status": "running"})
