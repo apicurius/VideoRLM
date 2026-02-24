@@ -567,6 +567,7 @@ class VideoIndexer:
         if mode == "fast":
             # Fast mode: use midpoint frame captions only — skip Tree-of-Captions and Self-Refine.
             # 5 (fast). Action-first pass: frame captions for non-skipped segments
+            logger.info("[pipeline] captioning: starting fast-mode for %d segments", len(segment_infos))
             self._action_first_pass(segment_infos, frame_caption_fn)
 
             # 5c (fast). Propagate captions from representatives to skipped duplicates
@@ -577,6 +578,9 @@ class VideoIndexer:
                     for key in ("caption", "annotation", "frame_caption", "is_non_action"):
                         if key in src:
                             seg[key] = src[key]
+
+            captioned = sum(1 for s in segment_infos if s.get("caption"))
+            logger.info("[pipeline] captioning: %d segments captioned", captioned)
 
             # Clean up temporary dedup keys
             for seg in segment_infos:

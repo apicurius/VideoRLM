@@ -70,6 +70,7 @@ export default function VideoRLMInterface() {
   const [backend, setBackend] = useState("openrouter");
   const [model, setModel] = useState("openai/gpt-4o");
   const [apiKey, setApiKey] = useState("");
+  const [indexMode, setIndexMode] = useState("full");
 
   // Progress/Results State
   const [steps, setSteps] = useState<PipelineStep[]>([]);
@@ -148,6 +149,7 @@ export default function VideoRLMInterface() {
     formData.append("backend", backend);
     formData.append("model", model);
     formData.append("pipeline", pipeline);
+    formData.append("index_mode", indexMode);
     formData.append("custom_api_key", apiKey);
 
     try {
@@ -338,6 +340,18 @@ export default function VideoRLMInterface() {
                       <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white">
                         <SelectItem value="kuavi">KUAVi (Agentic Vision Intelligence)</SelectItem>
                         <SelectItem value="rlm">RLM (Recursive Language Models)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-3">
+                    <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Index Mode</Label>
+                    <Select value={indexMode} onValueChange={setIndexMode}>
+                      <SelectTrigger className="bg-white/5 border-white/10 h-11 text-sm rounded-xl focus:ring-amber-500/30 text-white">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white">
+                        <SelectItem value="full">Full (Tree-of-Captions + Self-Refine)</SelectItem>
+                        <SelectItem value="fast">Fast (Frame Captions Only)</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>

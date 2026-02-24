@@ -503,6 +503,8 @@ def _kuavi_pipeline(
     api_key: str,
     backend: str,
     emit,
+    *,
+    index_mode: str = "full",
 ) -> None:
     """KUAVi pipeline: VideoIndexer + search tools + tool-calling agent."""
     try:
@@ -556,7 +558,7 @@ def _kuavi_pipeline(
                     make_gemini_frame_caption_fn,
                     make_gemini_refine_fn,
                 )
-                caption_model = "gemini-3.1-pro-preview"
+                caption_model = "gemini-2.5-flash"
                 caption_fn = make_gemini_caption_fn(model=caption_model, api_key=gemini_key)
                 frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model, api_key=gemini_key)
                 refine_fn = make_gemini_refine_fn(model=caption_model, api_key=gemini_key)
@@ -601,6 +603,7 @@ def _kuavi_pipeline(
             caption_fn=caption_fn,
             frame_caption_fn=frame_caption_fn,
             refine_fn=refine_fn,
+            mode=index_mode,
         )
 
         n_scenes = len(index.scene_boundaries)
@@ -672,6 +675,7 @@ def _kuavi_pipeline(
             "timestamps": timestamps,
         })
     except Exception as exc:
+        _log.exception("KUAVi pipeline error")
         short = str(exc)[:200]
         _mark_pending_as_error(PIPELINE_STEPS, completed, emit, short)
         emit({"type": "error", "message": str(exc)})
@@ -1013,16 +1017,23 @@ def _run_kuavi_agent_gemini(
 
         text_parts = []
         function_calls = []
-        if response.candidates and response.candidates[0].content:
-            for part in response.candidates[0].content.parts or []:
+        if not response.candidates:
+            _log.warning("Gemini agent: no candidates in response (iter %d)", i)
+            return " ".join(text_parts) or "(No response from model)"
+        candidate = response.candidates[0]
+        if candidate.content and candidate.content.parts:
+            for part in candidate.content.parts:
                 if hasattr(part, "thought") and part.thought:
                     continue
                 if hasattr(part, "text") and part.text:
                     text_parts.append(part.text)
                 if hasattr(part, "function_call") and part.function_call:
                     function_calls.append(part.function_call)
-
-        contents.append(response.candidates[0].content)
+            contents.append(candidate.content)
+        else:
+            _log.warning("Gemini agent: empty content, finish_reason=%s (iter %d)",
+                         getattr(candidate, "finish_reason", "unknown"), i)
+            return " ".join(text_parts) or "(Model returned empty response)"
 
         if not function_calls:
             return " ".join(text_parts) or ""
@@ -1222,7 +1233,7 @@ def _full_pipeline(
                 make_gemini_caption_fn,
                 make_gemini_frame_caption_fn,
             )
-            caption_model_name = "gemini-3.1-pro-preview"
+            caption_model_name = "gemini-2.5-flash"
             caption_fn = make_gemini_caption_fn(model=caption_model_name, api_key=gemini_key)
             frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model_name, api_key=gemini_key)
             emit_step("caption", "pending", f"using {caption_model_name}")
@@ -1331,6 +1342,7 @@ async def analyze(
     backend: str = Form(default="openrouter"),
     model: str = Form(default="openai/gpt-4o"),
     pipeline: str = Form(default="rlm"),
+    index_mode: str = Form(default="full"),
     custom_api_key: str = Form(default=""),
 ):
     suffix = Path(video.filename or "upload.mp4").suffix or ".mp4"
@@ -1358,7 +1370,7 @@ async def analyze(
 
     def run() -> None:
         if pipeline == "kuavi":
-            _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit)
+            _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode)
         else:
             _full_pipeline(str(video_path), question, model, api_key, backend, emit)
         event_q.put(None)
