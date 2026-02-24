@@ -67,11 +67,10 @@ export default function VideoRLMInterface() {
 
   // Pipeline state
   const [pipeline, setPipeline] = useState("kuavi");
-  const [indexMode, setIndexMode] = useState("full");
+  const [indexMode, setIndexMode] = useState("fast");
   const [backend, setBackend] = useState("openrouter");
   const [model, setModel] = useState("openai/gpt-4o");
   const [apiKey, setApiKey] = useState("");
-  const [indexMode, setIndexMode] = useState("full");
 
   // Progress/Results State
   const [steps, setSteps] = useState<PipelineStep[]>([]);
@@ -351,8 +350,8 @@ export default function VideoRLMInterface() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white">
-                        <SelectItem value="full">Full (Tree-of-Captions + Self-Refine)</SelectItem>
-                        <SelectItem value="fast">Fast (Frame Captions Only)</SelectItem>
+                        <SelectItem value="fast">Fast (Embeddings Only)</SelectItem>
+                        <SelectItem value="captioned">Captioned (+ Gemini Descriptions)</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>

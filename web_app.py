@@ -461,7 +461,7 @@ def _make_compound_tools(index, tools_map):
     def search_all(query, fields=None, top_k=5, transcript_query=None):
         """Multi-field search + transcript search in parallel."""
         if fields is None:
-            fields = ["summary", "visual"]
+            fields = ["visual", "temporal"]
 
         results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
@@ -508,7 +508,7 @@ def _kuavi_pipeline(
     backend: str,
     emit,
     *,
-    index_mode: str = "full",
+    index_mode: str = "fast",
 ) -> None:
     """KUAVi pipeline: VideoIndexer + search tools + tool-calling agent."""
     try:
@@ -548,53 +548,56 @@ def _kuavi_pipeline(
         loader = VideoLoader(fps=0.5)
         loaded = loader.load(video_path)
 
-        # Wire Gemini captioning when appropriate
+        # Wire captioning only when user explicitly selects "captioned" mode
         caption_fn = None
         frame_caption_fn = None
         refine_fn = None
-        use_gemini = _use_gemini_captioning(backend, model)
+        use_captioning = index_mode == "captioned"
 
-        gemini_key = os.getenv("GEMINI_API_KEY") or (api_key if use_gemini else None)
-        if gemini_key:
-            try:
-                from kuavi.captioning import (
-                    make_gemini_caption_fn,
-                    make_gemini_frame_caption_fn,
-                    make_gemini_refine_fn,
-                )
-                caption_model = "gemini-2.5-flash"
-                caption_fn = make_gemini_caption_fn(model=caption_model, api_key=gemini_key)
-                frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model, api_key=gemini_key)
-                refine_fn = make_gemini_refine_fn(model=caption_model, api_key=gemini_key)
-                emit_step("caption", "pending", f"using {caption_model}")
-            except ImportError:
-                gemini_key = None
+        if use_captioning:
+            gemini_key = os.getenv("GEMINI_API_KEY") or (api_key if _use_gemini_captioning(backend, model) else None)
+            if gemini_key:
+                try:
+                    from kuavi.captioning import (
+                        make_gemini_caption_fn,
+                        make_gemini_frame_caption_fn,
+                        make_gemini_refine_fn,
+                    )
+                    caption_model = "gemini-2.5-flash"
+                    caption_fn = make_gemini_caption_fn(model=caption_model, api_key=gemini_key)
+                    frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model, api_key=gemini_key)
+                    refine_fn = make_gemini_refine_fn(model=caption_model, api_key=gemini_key)
+                    emit_step("caption", "pending", f"using {caption_model}")
+                except ImportError:
+                    gemini_key = None
 
-        if not gemini_key:
-            try:
-                from rlm.clients.openai import OpenAIClient
-                cap_model = "openai/gpt-4o-mini" if backend == "openrouter" else model
-                cap_lm = OpenAIClient(
-                    model_name=cap_model,
-                    api_key=api_key,
-                    base_url="https://openrouter.ai/api/v1" if backend == "openrouter" else None,
-                )
+            if not gemini_key:
+                try:
+                    from rlm.clients.openai import OpenAIClient
+                    cap_model = "openai/gpt-4o-mini" if backend == "openrouter" else model
+                    cap_lm = OpenAIClient(
+                        model_name=cap_model,
+                        api_key=api_key,
+                        base_url="https://openrouter.ai/api/v1" if backend == "openrouter" else None,
+                    )
 
-                def caption_fn(frames):
-                    parts: list = [
-                        "Describe this video segment in 1-2 sentences. "
-                        "Focus on what is shown visually, who/what is present, and any actions. "
-                        "Be specific and concise."
-                    ]
-                    parts.extend(frames[:3])
-                    try:
-                        return cap_lm.completion(parts)
-                    except Exception:
-                        return ""
+                    def caption_fn(frames):
+                        parts: list = [
+                            "Describe this video segment in 1-2 sentences. "
+                            "Focus on what is shown visually, who/what is present, and any actions. "
+                            "Be specific and concise."
+                        ]
+                        parts.extend(frames[:3])
+                        try:
+                            return cap_lm.completion(parts)
+                        except Exception:
+                            return ""
 
-                emit_step("caption", "pending", f"using {cap_model}")
-            except ImportError:
-                emit_step("caption", "skip", "no captioning available")
+                    emit_step("caption", "pending", f"using {cap_model}")
+                except ImportError:
+                    emit_step("caption", "skip", "no captioning available")
+        else:
+            emit_step("caption", "skip", "fast mode — embeddings only")
 
         indexer = VideoIndexer(
             embedding_model=VISUAL_EMBED_MODEL,
@@ -607,7 +610,7 @@ def _kuavi_pipeline(
             caption_fn=caption_fn,
             frame_caption_fn=frame_caption_fn,
             refine_fn=refine_fn,
-            mode=index_mode,
+            mode="full" if index_mode == "captioned" else "fast",
         )
 
         n_scenes = len(index.scene_boundaries)
@@ -624,9 +627,11 @@ def _kuavi_pipeline(
                 emit_step("whisper", "skip", "no transcript")
 
         if "caption" not in completed:
-            if caption_fn is not None:
+            if use_captioning and caption_fn is not None:
                 captioned = sum(1 for s in index.segments if s.get("caption"))
                 emit_step("caption", "done", f"{captioned}/{n_segs} segments captioned")
+            elif not use_captioning:
+                pass  # already emitted "skip" above
             else:
                 emit_step("caption", "skip", "no captioning available")
 
@@ -712,7 +717,7 @@ _TOOL_SCHEMAS = [
                     "fields": {
                         "type": "array",
                         "items": {"type": "string", "enum": ["summary", "action", "visual", "all"]},
-                        "description": "Search fields to query (default: summary, visual)",
+                        "description": "Search fields to query (default: visual, temporal)",
                     },
                     "top_k": {"type": "integer", "default": 5},
                     "transcript_query": {"type": "string", "description": "Optional different query for transcript search"},
@@ -935,7 +940,7 @@ _AGENT_SYSTEM = (
 _AGENT_STRATEGY = (
     "\n\nANALYSIS STRATEGY (follow this order for efficiency):\n"
     "1. Call orient() to see video structure, scenes, and timestamps.\n"
-    "2. Use search_all(query, fields=['summary', 'visual']) for broad search.\n"
+    "2. Use search_all(query, fields=['visual', 'temporal']) for broad search.\n"
     "3. Use inspect_segment(start, end) to get frames + transcript for top hits.\n"
     "4. For fine-grained detail, use crop_frame, diff_frames, or frame_info.\n"
     "5. Use discriminative_vqa(question, candidates) for multiple-choice questions.\n"
@@ -1199,7 +1204,7 @@ def _full_pipeline(
     api_key: str,
     backend: str,
     emit,
-    index_mode: str = "full",
+    index_mode: str = "fast",
 ) -> None:
     from rlm.video.video_rlm import VideoRLM
 
@@ -1230,46 +1235,53 @@ def _full_pipeline(
 
     caption_fn = None
     frame_caption_fn = None
+    refine_fn = None
+    use_captioning = index_mode == "captioned"
 
-    gemini_key = os.getenv("GEMINI_API_KEY") or (api_key if use_gemini else None)
-    if gemini_key:
-        try:
-            from kuavi.captioning import (
-                make_gemini_caption_fn,
-                make_gemini_frame_caption_fn,
-            )
-            caption_model_name = "gemini-2.5-flash"
-            caption_fn = make_gemini_caption_fn(model=caption_model_name, api_key=gemini_key)
-            frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model_name, api_key=gemini_key)
-            emit_step("caption", "pending", f"using {caption_model_name}")
-        except ImportError:
-            gemini_key = None
+    if use_captioning:
+        gemini_key = os.getenv("GEMINI_API_KEY") or (api_key if use_gemini else None)
+        if gemini_key:
+            try:
+                from kuavi.captioning import (
+                    make_gemini_caption_fn,
+                    make_gemini_frame_caption_fn,
+                    make_gemini_refine_fn,
+                )
+                caption_model_name = "gemini-2.5-flash"
+                caption_fn = make_gemini_caption_fn(model=caption_model_name, api_key=gemini_key)
+                frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model_name, api_key=gemini_key)
+                refine_fn = make_gemini_refine_fn(model=caption_model_name, api_key=gemini_key)
+                emit_step("caption", "pending", f"using {caption_model_name}")
+            except ImportError:
+                gemini_key = None
 
-    if not gemini_key:
-        try:
-            from rlm.clients.openai import OpenAIClient
-            caption_model_name = "openai/gpt-4o-mini" if backend == "openrouter" else model
-            caption_lm = OpenAIClient(
-                model_name=caption_model_name,
-                api_key=api_key,
-                base_url="https://openrouter.ai/api/v1" if backend == "openrouter" else None,
-            )
+        if not gemini_key:
+            try:
+                from rlm.clients.openai import OpenAIClient
+                caption_model_name = "openai/gpt-4o-mini" if backend == "openrouter" else model
+                caption_lm = OpenAIClient(
+                    model_name=caption_model_name,
+                    api_key=api_key,
+                    base_url="https://openrouter.ai/api/v1" if backend == "openrouter" else None,
+                )
 
-            def caption_fn(frames):
-                parts: list = [
-                    "Describe this video segment in 1-2 sentences. "
-                    "Focus on what is shown visually, who/what is present, and any actions. "
-                    "Be specific and concise."
-                ]
-                parts.extend(frames[:3])
-                try:
-                    return caption_lm.completion(parts)
-                except Exception:
-                    return ""
+                def caption_fn(frames):
+                    parts: list = [
+                        "Describe this video segment in 1-2 sentences. "
+                        "Focus on what is shown visually, who/what is present, and any actions. "
+                        "Be specific and concise."
+                    ]
+                    parts.extend(frames[:3])
+                    try:
+                        return caption_lm.completion(parts)
+                    except Exception:
+                        return ""
 
-            emit_step("caption", "pending", f"using {caption_model_name}")
-        except ImportError:
-            emit_step("caption", "skip", "no captioning available")
+                emit_step("caption", "pending", f"using {caption_model_name}")
+            except ImportError:
+                emit_step("caption", "skip", "no captioning available")
+    else:
+        emit_step("caption", "skip", "fast mode — embeddings only")
 
     log_handler = _QueueLogHandler(emit, completed)
     log_handler.setLevel(logging.INFO)
@@ -1347,9 +1359,8 @@ async def analyze(
     backend: str = Form(default="openrouter"),
     model: str = Form(default="openai/gpt-4o"),
     pipeline: str = Form(default="rlm"),
-    index_mode: str = Form(default="full"),
+    index_mode: str = Form(default="fast"),
     custom_api_key: str = Form(default=""),
-    index_mode: str = Form(default="full"),
 ):
     suffix = Path(video.filename or "upload.mp4").suffix or ".mp4"
     video_id = str(uuid.uuid4())

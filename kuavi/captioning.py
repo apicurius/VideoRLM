@@ -9,11 +9,30 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from typing import Any
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 3
+_BACKOFF_BASE = 2.0  # seconds
+
+
+def _call_with_retry(fn, *args, **kwargs):
+    """Call fn with exponential backoff on 429/resource-exhausted errors."""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            err_str = str(e).lower()
+            if ("429" in err_str or "resource_exhausted" in err_str) and attempt < _MAX_RETRIES - 1:
+                wait = _BACKOFF_BASE * (2 ** attempt)
+                logger.info("Rate limited, retrying in %.1fs (attempt %d/%d)", wait, attempt + 1, _MAX_RETRIES)
+                time.sleep(wait)
+            else:
+                raise
 
 
 def _frame_to_image_dict(frame: np.ndarray) -> dict[str, str]:
@@ -114,7 +133,9 @@ def make_gemini_caption_fn(
 
         try:
             client = genai.Client(api_key=api_key) if api_key else genai.Client()
-            response = client.models.generate_content(model=model, contents=gemini_parts)
+            response = _call_with_retry(
+                client.models.generate_content, model=model, contents=gemini_parts
+            )
             text = response.text.strip()
             # Strip markdown code fences if present
             if text.startswith("```"):
@@ -156,7 +177,9 @@ def make_gemini_frame_caption_fn(
         gemini_parts = _build_gemini_parts([prompt_text, frame])
         try:
             client = genai.Client(api_key=api_key) if api_key else genai.Client()
-            response = client.models.generate_content(model=model, contents=gemini_parts)
+            response = _call_with_retry(
+                client.models.generate_content, model=model, contents=gemini_parts
+            )
             return response.text.strip()
         except Exception as e:
             logger.warning("Gemini frame_caption_fn failed: %s", e)
@@ -186,7 +209,9 @@ def make_gemini_refine_fn(
         )
         try:
             client = genai.Client(api_key=api_key) if api_key else genai.Client()
-            response = client.models.generate_content(model=model, contents=prompt)
+            response = _call_with_retry(
+                client.models.generate_content, model=model, contents=prompt
+            )
             text = response.text.strip()
             # Strip markdown code fences if present
             if text.startswith("```"):
