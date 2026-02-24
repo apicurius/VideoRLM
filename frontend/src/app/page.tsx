@@ -734,9 +734,9 @@ export default function VideoRLMInterface() {
                                           <div className="mt-4 border-l-2 border-amber-500/20 pl-4 py-1 space-y-4">
                                             <div className="space-y-3">
                                               <div className="flex items-center gap-2">
-                                                <RotateCw className="w-3.5 h-3.5 text-amber-500/70 animate-spin" />
-                                                <p className="font-mono text-[10px] tracking-widest uppercase text-amber-500/70 py-0.5 px-2 bg-amber-500/10 rounded border border-amber-500/20">
-                                                  Agent Loop // Iteration {currentIteration}
+                                                <RotateCw className={`w-3.5 h-3.5 ${step.status === "done" ? "text-green-500" : "text-amber-500/70 animate-spin"}`} />
+                                                <p className={`font-mono text-[10px] tracking-widest uppercase py-0.5 px-2 rounded border ${step.status === "done" ? "text-green-500/70 bg-green-500/10 border-green-500/20" : "text-amber-500/70 bg-amber-500/10 border-amber-500/20"}`}>
+                                                  Agent Loop // {step.status === "done" ? `Complete (${agentIterations.filter(Boolean).length} iterations)` : `Iteration ${currentIteration}`}
                                                 </p>
                                               </div>
 
