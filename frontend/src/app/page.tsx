@@ -69,6 +69,7 @@ export default function VideoRLMInterface() {
   const [pipeline, setPipeline] = useState("kuavi");
   const [indexMode, setIndexMode] = useState("fast");
   const [asrModel, setAsrModel] = useState("faster-whisper/base");
+  const [sceneModel, setSceneModel] = useState("facebook/vjepa2-vitl-fpc64-256");
   const [backend, setBackend] = useState("openrouter");
   const [model, setModel] = useState("openai/gpt-4o");
   const [apiKey, setApiKey] = useState("");

@@ -154,13 +154,22 @@ def cmd_search(args: argparse.Namespace) -> None:
         printer.print_transcript_results(t_results)
 
 
-def _build_analyze_prompt(video_path: str, question: str) -> str:
+def _build_analyze_prompt(
+    video_path: str,
+    question: str,
+    mode: str = "fast",
+    asr_model: str = "faster-whisper/base",
+    no_scene_model: bool = False,
+) -> str:
     """Build the analysis prompt for a single video."""
+    index_args = f'video_path="{video_path}", mode="{mode}", asr_model="{asr_model}"'
+    if no_scene_model:
+        index_args += ", no_scene_model=True"
     return (
         f"Use the KUAVi MCP tools to analyze this video: {video_path}\n\n"
         f"Question: {question}\n\n"
         "Steps:\n"
-        "1. Call kuavi_index_video to index the video\n"
+        f"1. Call kuavi_index_video({index_args})\n"
         "2. Call kuavi_get_scene_list to understand the structure\n"
         "3. Use kuavi_search_video and kuavi_search_transcript to find relevant content\n"
         "4. Use kuavi_extract_frames for visual evidence\n"
@@ -232,7 +241,12 @@ def cmd_analyze(args: argparse.Namespace) -> None:
             printer.print_error(f"Video file not found: {video_path}")
             sys.exit(1)
         # Single-video mode: preserve original behavior (no capture, stream output)
-        prompt = _build_analyze_prompt(video_path, question)
+        prompt = _build_analyze_prompt(
+            video_path, question,
+            mode=getattr(args, "mode", "fast"),
+            asr_model=getattr(args, "asr_model", "faster-whisper/base"),
+            no_scene_model=getattr(args, "no_scene_model", False),
+        )
         cmd = ["claude", "-p", prompt]
         printer.print_header("Analyze Video", {
             "Video": Path(video_path).name,
@@ -477,6 +491,15 @@ def main() -> None:
         "--max-parallel", type=int, default=1, metavar="N",
         help="Max parallel analyses (default: 1)"
     )
+    p_analyze.add_argument(
+        "--mode", choices=["fast", "full"], default="fast",
+        help="Indexing mode: fast (embeddings only) or full (with captioning)"
+    )
+    p_analyze.add_argument(
+        "--asr-model", default="faster-whisper/base",
+        help="ASR model (default: faster-whisper/base)"
+    )
+    p_analyze.add_argument("--no-scene-model", action="store_true", help="Disable V-JEPA 2 scene model")
 
     # --- corpus ---
     p_corpus = subparsers.add_parser("corpus", help="Multi-video corpus operations")

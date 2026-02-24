@@ -85,7 +85,9 @@ def _parse_timestamps(text: str | None) -> list[dict]:
     return sorted(unique, key=lambda x: x["seconds"])
 
 
-def _render_answer_html(text: str) -> str:
+def _render_answer_html(text: str | None) -> str:
+    if not text:
+        return ""
     def replacer(m: re.Match) -> str:
         raw = m.group(0)
         try:
@@ -689,6 +691,7 @@ def _kuavi_pipeline(
         )
 
         emit_step("agent", "done")
+        answer = answer or ""
         timestamps = _parse_timestamps(answer)
         answer_html = _render_answer_html(answer)
         emit({
