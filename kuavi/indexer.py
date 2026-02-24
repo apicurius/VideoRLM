@@ -581,6 +581,7 @@ class VideoIndexer:
 
         if mode == "fast":
             # Fast mode: use midpoint frame captions only — skip Tree-of-Captions and Self-Refine.
+            logger.info("[pipeline] captioning: starting fast-mode frame captioning")
             # 5 (fast). Action-first pass: frame captions for non-skipped segments
             self._action_first_pass(segment_infos, frame_caption_fn)
 
@@ -597,10 +598,13 @@ class VideoIndexer:
             for seg in segment_infos:
                 seg.pop("_skip_caption", None)
                 seg.pop("_caption_source", None)
+            captioned_count = sum(1 for s in segment_infos if s.get("caption") or s.get("frame_caption"))
+            logger.info("[pipeline] captioning: %d segments captioned", captioned_count)
         else:
             # Full mode: Tree-of-Captions + Self-Refine (original behavior)
 
             # 5. Caption each segment (if a caption function was provided)
+            logger.info("[pipeline] captioning: starting segment captioning")
             if caption_fn is not None or frame_caption_fn is not None:
                 # Prepare all segments first (skip near-duplicates)
                 caption_tasks = []
@@ -684,6 +688,9 @@ class VideoIndexer:
                 seg.pop("_skip_caption", None)
                 seg.pop("_caption_source", None)
 
+            captioned_count = sum(1 for s in segment_infos if s.get("caption"))
+            logger.info("[pipeline] captioning: %d segments captioned", captioned_count)
+
             # 6. Self-Refine annotations
             self._refine_annotations(
                 segment_infos,
@@ -707,6 +714,9 @@ class VideoIndexer:
             )
 
         # 7. Embed captions
+        if self._text_embedding_model is not None:
+            logger.info("[pipeline] Gemma: embedding captions")
+        logger.info("[pipeline] SigLIP2: building frame embeddings")
         embeddings, action_embeddings = self._embed_captions(segment_infos)
 
         # 7b. Smooth embeddings to reduce noise across adjacent segments
@@ -716,6 +726,9 @@ class VideoIndexer:
             action_embeddings = self._smooth_embeddings(action_embeddings, window=3)
 
         quality = self._check_embedding_quality(embeddings, label="caption")
+        if self._text_embedding_model is not None:
+            logger.info("[pipeline] Gemma: caption embeddings complete")
+        logger.info("[pipeline] SigLIP2: %d frame embeddings built", len(segment_infos))
 
         # 7b2. Semantic deduplication via k-means clustering (optional)
         if semantic_dedup:
@@ -856,6 +869,12 @@ class VideoIndexer:
             if coarse_segs:
                 segment_hierarchy.append(coarse_segs)
                 hierarchy_embeddings.append(coarse_embs)
+
+        logger.info(
+            "[pipeline] search index: %d segments, %d scenes",
+            len(segment_infos),
+            len(scene_boundaries),
+        )
 
         index = VideoIndex(
             segments=segment_infos,

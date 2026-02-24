@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p 4000",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 4000",
     "lint": "eslint"
   },
   "dependencies": {
+    "@tailwindcss/typography": "^0.5.19",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.34.3",

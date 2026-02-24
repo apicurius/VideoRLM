@@ -32,14 +32,19 @@
 
 ## Overview
 
-This repository contains two tightly integrated systems:
+**Recursive Language Models (RLMs)** replace single-shot `llm.completion(prompt)` with a REPL-augmented loop: the language model writes code, executes it, inspects results, and recursively calls sub-LMs — offloading arbitrarily long context as REPL variables and enabling near-infinite context handling.
 
-**Recursive Language Models (RLMs)** are a task-agnostic inference paradigm that replaces `llm.completion(prompt)` with a REPL-loop where the language model *programmatically* examines, decomposes, and recursively calls itself over its input. RLMs offload context as a variable in a REPL environment, enabling near-infinite context handling through code execution and sub-LM calls.
+**KUAVi (Agentic Vision Intelligence)** extends RLMs to video. A three-model indexing pipeline (V-JEPA 2 + SigLIP2 + Gemma) converts raw video into a searchable neural index, exposed to LM agents as 30+ callable tools via MCP or RLM's REPL injection. A five-agent orchestration layer decomposes complex video questions into parallel temporal analyses.
 
-**KUAVi (Agentic Vision Intelligence)** extends RLMs to video understanding through a multi-model indexing pipeline, MCP tool server, and multi-agent orchestration system. KUAVi builds a searchable neural index from raw video and exposes it to LM agents as callable tools — whether through RLM's REPL injection (VideoRLM) or Claude Code's MCP protocol.
+> **Highlights**
+> - **Task-agnostic inference**: RLMs work with any prompt — code generation, math, video, retrieval — by letting the LM decide how to decompose the problem at runtime
+> - **Three-model video pipeline**: V-JEPA 2 (scene detection + temporal dynamics), SigLIP2 (vision-language embeddings), Qwen3-ASR (transcription) — with Tree-of-Captions and 3-round Self-Refine for anti-hallucination
+> - **30 MCP tools**: Semantic search across 4 embedding spaces, pixel-level frame analysis, persistent Python REPL with `llm_query()`, parallel shard analysis, corpus-level multi-video search
+> - **5-agent orchestration**: Triage → Decompose → Analyze (parallel) → Synthesize, with Haiku fast-path and Sonnet deep analysis
+> - **780 tests** across 30 test files
 
 > [!NOTE]
-> This repository is maintained by the authors of the paper from the MIT OASYS lab. Open-source contributions are welcome.
+> Maintained by the authors of the paper from the MIT OASYS lab. Open-source contributions welcome.
 
 ---
 
@@ -197,7 +202,7 @@ All providers support multimodal content (base64 images), usage tracking, and as
 
 ## VideoRLM
 
-VideoRLM extends the RLM paradigm to video understanding by **injecting video analysis tools directly into the REPL environment**. The LM can search, extract frames, and reason about video content using the same code-execution loop.
+VideoRLM injects video analysis tools directly into the REPL environment — the LM searches, extracts frames, and reasons about video content using the same code-execution loop, with parallel shard analysis for long videos.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -234,7 +239,7 @@ VideoRLM extends the RLM paradigm to video understanding by **injecting video an
 └──────────────────────────────────────────────────────────┘
 ```
 
-**Sharded analysis for long videos**: VideoRLM divides long videos into temporal shards, encodes each shard's frames as multimodal content, and runs `llm_query_batched()` for parallel analysis across all shards simultaneously.
+For long videos, VideoRLM divides content into temporal shards and runs `llm_query_batched()` for parallel multimodal analysis across all shards simultaneously.
 
 ```bash
 # Run VideoRLM
@@ -246,7 +251,7 @@ uv run python run_video.py --video path/to/video.mp4 \
 
 ## KUAVi: Agentic Vision Intelligence
 
-KUAVi re-exposes the VideoRLM tool set as an **MCP (Model Context Protocol) server**, enabling Claude Code agents to call the same video analysis tools via structured tool calls rather than REPL code injection. On top of this, KUAVi adds a **multi-agent orchestration layer** for complex video questions.
+KUAVi exposes the VideoRLM tool set as an **MCP server** for Claude Code, adding a **multi-agent orchestration layer** that decomposes complex video questions into parallel temporal analyses with anti-hallucination enforcement.
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -272,7 +277,7 @@ KUAVi re-exposes the VideoRLM tool set as an **MCP (Model Context Protocol) serv
 │                        │ MCP Protocol (stdio)       │
 │  ┌───────────────────────▼───────────────────────┐  │
 │  │             KUAVi MCP Tool Server             │  │
-│  │  30 tools: search, extract, pixel, compound   │  │
+│  │  31 tools: search, extract, pixel, compound   │  │
 │  │  Result caching, budget gates, tracing        │  │
 │  └───────────────────────┬───────────────────────┘  │
 │                        │                            │
@@ -397,7 +402,7 @@ Indexes are cached by content hash (`MD5(path|size|mtime)`) — repeated queries
 
 ### MCP Tool Server
 
-KUAVi exposes 30 MCP tools via a FastMCP stdio server, organized into six categories:
+KUAVi exposes 31 MCP tools via a FastMCP stdio server, organized into six categories:
 
 #### Search Tools
 
@@ -472,6 +477,7 @@ Compound tools batch common multi-call patterns into single MCP calls, reducing 
 | `kuavi_orient` | Get video overview: `get_index_info` + `get_scene_list` in one call. Cached per video. |
 | `kuavi_search_all` | Multi-field search + transcript search in parallel via `ThreadPoolExecutor`. Cached by query parameters. |
 | `kuavi_inspect_segment` | Extract frames + get transcript for a time range in one call. Supports zoom level presets (1-3). |
+| `kuavi_quick_answer` | One-shot `search_all` + `inspect_segment` for top hits. Ideal for targeted factual questions needing frame evidence. |
 
 ### Multi-Agent Orchestration
 
@@ -805,7 +811,7 @@ visualizer/                     # Next.js trajectory viewer
 
 ## V-JEPA 2 + Action100M Integration
 
-The unified integration plan merged insights from three research papers — [V-JEPA 2](https://arxiv.org/abs/2506.09985), [VL-JEPA](https://arxiv.org/abs/2410.07538), and [Action100M](https://arxiv.org/abs/2506.15686) — into KUAVi's indexing and search pipeline across 13 work items:
+Insights from [V-JEPA 2](https://arxiv.org/abs/2506.09985), [VL-JEPA](https://arxiv.org/abs/2410.07538), and [Action100M](https://arxiv.org/abs/2506.15686) were integrated into KUAVi across 13 work items:
 
 | Commit | Work Items | Description |
 |--------|-----------|-------------|
