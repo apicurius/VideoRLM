@@ -67,6 +67,7 @@ export default function VideoRLMInterface() {
 
   // Pipeline state
   const [pipeline, setPipeline] = useState("kuavi");
+  const [indexMode, setIndexMode] = useState("full");
   const [backend, setBackend] = useState("openrouter");
   const [model, setModel] = useState("openai/gpt-4o");
   const [apiKey, setApiKey] = useState("");
