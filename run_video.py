@@ -5,12 +5,17 @@ Usage:
     uv run python run_video.py --video test_video.mp4 \
         --question "What is the OOLONG score of RLM shown in this video?"
     uv run python run_video.py --video test_video.mp4 --no-search --fps 1.0
+    uv run python run_video.py --video test_video.mp4 --mode fast
 """
 
 import argparse
+import logging
+import os
 
 from rlm.logger import RLMLogger
 from rlm.video import VideoRLM
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PROMPT = (
     "Respond in English. Provide a comprehensive analysis of this video. "
@@ -21,6 +26,37 @@ DEFAULT_PROMPT = (
     "overall narrative. Finally, summarize the video's thesis and the evidence "
     "used to support it."
 )
+
+
+def _build_caption_fns(no_caption: bool) -> tuple:
+    """Build caption and refine functions for full-mode indexing.
+
+    Returns (caption_fn, frame_caption_fn, refine_fn).  All are None when
+    captioning is disabled (fast mode or --no-caption).
+    """
+    if no_caption:
+        return None, None, None
+
+    caption_fn = None
+    frame_caption_fn = None
+    refine_fn = None
+
+    try:
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        from kuavi.captioning import (
+            make_gemini_caption_fn,
+            make_gemini_frame_caption_fn,
+            make_gemini_refine_fn,
+        )
+
+        caption_fn = make_gemini_caption_fn(api_key=api_key)
+        frame_caption_fn = make_gemini_frame_caption_fn(api_key=api_key)
+        refine_fn = make_gemini_refine_fn(api_key=api_key)
+        logger.info("Gemini captioner initialized for full-mode indexing")
+    except Exception as exc:
+        logger.warning("Failed to initialize captioner (%s); running without captions.", exc)
+
+    return caption_fn, frame_caption_fn, refine_fn
 
 
 def main():
@@ -40,10 +76,17 @@ def main():
     parser.add_argument("--embedding-model", default="google/siglip2-base-patch16-256", help="Vision-text embedding model (default: google/siglip2-base-patch16-256)")
     parser.add_argument("--cache-dir", default=None, help="Directory to cache video indexes")
     parser.add_argument("--auto-fps", action="store_true", help="Auto-compute FPS based on video duration")
+    parser.add_argument("--asr-model", default="Qwen/Qwen3-ASR-0.6B", help="ASR model (default: Qwen/Qwen3-ASR-0.6B, or faster-whisper/base)")
+    parser.add_argument("--mode", default="full", choices=["fast", "full"], help="Indexing mode: fast (embeddings only) or full (with captioning)")
+    parser.add_argument("--no-caption", action="store_true", help="Disable captioning even in full mode")
     parser.add_argument("--thinking-level", default="LOW", choices=["NONE", "LOW", "MEDIUM", "HIGH"], help="Gemini thinking level (default: LOW)")
     args = parser.parse_args()
 
-    logger = RLMLogger(log_dir="./logs")
+    rlm_logger = RLMLogger(log_dir="./logs")
+
+    # Build caption functions for full mode
+    no_caption = args.no_caption or args.mode == "fast"
+    caption_fn, frame_caption_fn, refine_fn = _build_caption_fns(no_caption)
 
     vrlm = VideoRLM(
         backend=args.backend,
@@ -54,7 +97,7 @@ def main():
         resize=(640, 480),
         max_iterations=args.max_iterations,
         cost_budget=args.cost_budget,
-        logger=logger,
+        logger=rlm_logger,
         verbose=True,
         enable_search=not args.no_search,
         embedding_model=args.embedding_model,
@@ -62,6 +105,11 @@ def main():
         auto_fps=args.auto_fps,
         scene_model=None if args.no_scene_model else "facebook/vjepa2-vitl-fpc64-256",
         text_embedding_model=None if args.no_text_embedding else "google/embeddinggemma-300m",
+        asr_model=args.asr_model,
+        caption_fn=caption_fn,
+        frame_caption_fn=frame_caption_fn,
+        refine_fn=refine_fn,
+        index_mode=args.mode,
     )
 
     result = vrlm.completion(args.video, prompt=args.question)

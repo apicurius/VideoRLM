@@ -112,6 +112,7 @@ class VideoRLM:
         refine_fn: Callable | None = None,
         caption_fn: Callable | None = None,
         frame_caption_fn: Callable | None = None,
+        index_mode: str = "full",
         enable_sharding: bool = False,
         shard_max_segments: int = 5,
         auto_fps: bool = False,
@@ -146,6 +147,7 @@ class VideoRLM:
         self.refine_fn = refine_fn
         self.caption_fn = caption_fn
         self.frame_caption_fn = frame_caption_fn
+        self.index_mode = index_mode
         self.enable_sharding = enable_sharding
         self.shard_max_segments = shard_max_segments
 
@@ -260,6 +262,7 @@ class VideoRLM:
                 asr_model=self.asr_model,
                 transcript_path=self.transcript_path,
                 store_feature_maps=self.store_feature_maps,
+                mode=self.index_mode,
             )
 
             for factory in [
