@@ -36,6 +36,8 @@ class VideoRLM:
         max_iterations: Maximum REPL iterations per completion.
         token_budget: Maximum total tokens (input + output) before injecting a
             wrap-up signal. None means no budget (default).
+        cost_budget: Maximum estimated cost in USD before injecting a wrap-up
+            signal. None means no budget (default).
         environment: RLM environment type.
         environment_kwargs: Extra kwargs for the environment.
         other_backends: Additional backends for sub-LLM calls.
@@ -94,6 +96,7 @@ class VideoRLM:
         max_depth: int = 1,
         max_iterations: int = 30,
         token_budget: int | None = None,
+        cost_budget: float | None = None,
         environment: EnvironmentType = "local",
         environment_kwargs: dict[str, Any] | None = None,
         other_backends: list[ClientBackend] | None = None,
@@ -154,6 +157,7 @@ class VideoRLM:
             max_depth=max_depth,
             max_iterations=max_iterations,
             token_budget=token_budget,
+            cost_budget=cost_budget,
             custom_system_prompt=VIDEO_SYSTEM_PROMPT,
             other_backends=other_backends,
             other_backend_kwargs=other_backend_kwargs,

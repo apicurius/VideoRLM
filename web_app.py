@@ -205,22 +205,22 @@ class _QueueLogHandler(logging.Handler):
             self._emit_step("gemma", "running", msg.split("[pipeline] ")[-1])
         elif "[pipeline] Gemma:" in msg:
             self._emit_step("gemma", "done", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] Qwen3-ASR:" in msg or "qwen_asr not installed" in msg:
-            detail = msg.split("[pipeline] ")[-1] if "[pipeline] " in msg else msg
-            if "not installed" in msg:
-                self._emit_step("whisper", "skip", detail)
-            elif "segments transcribed" in msg or "transcript segments" in msg:
+        elif "[pipeline] Qwen3-ASR: loading" in msg or "[pipeline] Qwen3-ASR: starting" in msg:
+            self._emit_step("whisper", "running", msg.split("[pipeline] ")[-1])
+        elif "qwen_asr not installed" in msg:
+            self._emit_step("whisper", "skip", "qwen_asr not installed")
+        elif "[pipeline] Qwen3-ASR:" in msg:
+            detail = msg.split("[pipeline] ")[-1]
+            if "segments transcribed" in msg or "transcript segments" in msg:
                 self._emit_step("whisper", "done", detail)
             else:
                 self._emit_step("whisper", "running", detail)
+        elif "[pipeline] captioning: starting" in msg:
+            self._emit_step("caption", "running", msg.split("[pipeline] ")[-1])
+        elif "[pipeline] captioning:" in msg and "segments captioned" in msg:
+            self._emit_step("caption", "done", msg.split("[pipeline] ")[-1])
         elif "[pipeline] captioning:" in msg:
-            detail = msg.split("[pipeline] ")[-1]
-            if "starting" in msg:
-                self._emit_step("caption", "running", detail)
-            elif "segments captioned" in msg:
-                self._emit_step("caption", "done", detail)
-            else:
-                self._emit_step("caption", "running", detail)
+            self._emit_step("caption", "running", msg.split("[pipeline] ")[-1])
         elif "Gemini caption" in msg or "caption_fn" in msg:
             if "failed" in msg:
                 self._emit_step("caption", "running", "retrying...")
@@ -250,6 +250,10 @@ class _EventRLMLogger:
             return
         self._run_metadata = metadata.to_dict()
         self._metadata_logged = True
+
+    def log_supplemental_metadata(self, **kwargs: object) -> None:
+        if self._run_metadata is not None:
+            self._run_metadata.update(kwargs)
 
     def log(self, iteration) -> None:
         if self._iter == 0:
@@ -446,7 +450,7 @@ def _make_compound_tools(index, tools_map):
         """Get video overview: index info + scene list in one call."""
         info = {
             "segments": len(index.segments),
-            "duration": index.segments[-1]["end"] if index.segments else 0,
+            "duration": index.segments[-1]["end_time"] if index.segments else 0,
             "scene_boundaries": len(index.scene_boundaries),
             "has_transcript": bool(index.transcript),
             "transcript_entries": len(index.transcript) if index.transcript else 0,
@@ -635,7 +639,7 @@ def _kuavi_pipeline(
         # Emit index stats for frontend
         emit({"type": "index_stats", "segments": n_segs, "scenes": n_scenes,
               "transcript_entries": len(index.transcript) if index.transcript else 0,
-              "duration": index.segments[-1]["end"] if index.segments else 0})
+              "duration": index.segments[-1]["end_time"] if index.segments else 0})
 
         # Build basic tools map
         raw_extract = make_extract_frames(video_path)

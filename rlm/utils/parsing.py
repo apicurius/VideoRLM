@@ -69,16 +69,19 @@ def find_final_answer(text: str, environment: "BaseEnv | None" = None) -> str | 
 
 
 def format_iteration(
-    iteration: RLMIteration, max_character_length: int = 20000
+    iteration: RLMIteration, max_character_length: int = 5000
 ) -> list[dict[str, str]]:
     """
     Format an RLM iteration (including all code blocks) to append to the message history for
     the prompt of the LM in the next iteration. We also truncate code execution results
     that exceed the max_character_length.
 
+    Truncation keeps the **tail** of the output (last N chars) since REPL results
+    and final values typically appear at the end, while setup noise is at the top.
+
     Args:
         iteration: The iteration to format
-        max_character_length: The maximum character length of the result
+        max_character_length: The maximum character length of the result (default 5000)
 
     Returns:
         A list of messages to add to the next prompt
@@ -91,8 +94,8 @@ def format_iteration(
         result = format_execution_result(result)
         if len(result) > max_character_length:
             result = (
-                result[:max_character_length]
-                + f"... + [{len(result) - max_character_length} chars...]"
+                f"[TRUNCATED: last {max_character_length} of {len(result)} chars shown]\n"
+                + result[-max_character_length:]
             )
 
         execution_message = {

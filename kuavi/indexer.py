@@ -234,6 +234,18 @@ class VideoIndexer:
             self._text_model_type,
         )
 
+    def _free_scene_model(self) -> None:
+        """Unload V-JEPA 2 from GPU to free VRAM before loading the ASR model."""
+        if self._scene_model is None:
+            return
+        import torch
+
+        self._scene_model = None
+        self._scene_processor = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("[pipeline] V-JEPA 2: unloaded from GPU (freeing VRAM for ASR)")
+
     def _ensure_scene_model(self) -> None:
         """Lazily load V-JEPA 2 for scene detection."""
         if self._scene_model is not None:
@@ -544,7 +556,10 @@ class VideoIndexer:
             segment_infos = self._segments_from_scenes(scenes, frames, timestamps)
 
         # 4. Transcript (Qwen3-ASR or pre-existing file) — run before captioning
-        #    so ASR context can be injected into caption prompts
+        #    so ASR context can be injected into caption prompts.
+        #    Free V-JEPA 2 from GPU first — it stays loaded after scene detection
+        #    and leaves too little VRAM for the ASR model on 11-12 GiB GPUs.
+        self._free_scene_model()
         transcript = self._get_transcript(
             loaded_video.metadata.path,
             asr_model=asr_model,
@@ -566,6 +581,7 @@ class VideoIndexer:
 
         if mode == "fast":
             # Fast mode: use midpoint frame captions only — skip Tree-of-Captions and Self-Refine.
+            logger.info("[pipeline] captioning: starting fast-mode frame captioning")
             # 5 (fast). Action-first pass: frame captions for non-skipped segments
             logger.info("[pipeline] captioning: starting fast-mode for %d segments", len(segment_infos))
             self._action_first_pass(segment_infos, frame_caption_fn)
@@ -586,10 +602,13 @@ class VideoIndexer:
             for seg in segment_infos:
                 seg.pop("_skip_caption", None)
                 seg.pop("_caption_source", None)
+            captioned_count = sum(1 for s in segment_infos if s.get("caption") or s.get("frame_caption"))
+            logger.info("[pipeline] captioning: %d segments captioned", captioned_count)
         else:
             # Full mode: Tree-of-Captions + Self-Refine (original behavior)
 
             # 5. Caption each segment (if a caption function was provided)
+            logger.info("[pipeline] captioning: starting segment captioning")
             if caption_fn is not None or frame_caption_fn is not None:
                 logger.info("[pipeline] captioning: starting for %d segments", len(segment_infos))
                 # Prepare all segments first (skip near-duplicates)
@@ -677,6 +696,9 @@ class VideoIndexer:
                 seg.pop("_skip_caption", None)
                 seg.pop("_caption_source", None)
 
+            captioned_count = sum(1 for s in segment_infos if s.get("caption"))
+            logger.info("[pipeline] captioning: %d segments captioned", captioned_count)
+
             # 6. Self-Refine annotations
             self._refine_annotations(
                 segment_infos,
@@ -700,7 +722,8 @@ class VideoIndexer:
             )
 
         # 7. Embed captions
-        logger.info("[pipeline] Gemma: embedding captions for %d segments", len(segment_infos))
+        if self._text_embedding_model is not None:
+            logger.info("[pipeline] Gemma: embedding captions for %d segments", len(segment_infos))
         embeddings, action_embeddings = self._embed_captions(segment_infos)
 
         # 7b. Smooth embeddings to reduce noise across adjacent segments
@@ -710,7 +733,8 @@ class VideoIndexer:
             action_embeddings = self._smooth_embeddings(action_embeddings, window=3)
 
         quality = self._check_embedding_quality(embeddings, label="caption")
-        logger.info("[pipeline] Gemma: caption embeddings complete")
+        if self._text_embedding_model is not None:
+            logger.info("[pipeline] Gemma: caption embeddings complete")
 
         # 7b2. Semantic deduplication via k-means clustering (optional)
         if semantic_dedup:
@@ -853,6 +877,12 @@ class VideoIndexer:
             if coarse_segs:
                 segment_hierarchy.append(coarse_segs)
                 hierarchy_embeddings.append(coarse_embs)
+
+        logger.info(
+            "[pipeline] search index: %d segments, %d scenes",
+            len(segment_infos),
+            len(scene_boundaries),
+        )
 
         index = VideoIndex(
             segments=segment_infos,
