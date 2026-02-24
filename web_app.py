@@ -501,6 +501,7 @@ def _kuavi_pipeline(
     api_key: str,
     backend: str,
     emit,
+    index_mode: str = "full",
 ) -> None:
     """KUAVi pipeline: VideoIndexer + search tools + tool-calling agent."""
     try:
@@ -592,6 +593,7 @@ def _kuavi_pipeline(
             caption_fn=caption_fn,
             frame_caption_fn=frame_caption_fn,
             refine_fn=refine_fn,
+            mode=index_mode,
         )
 
         n_scenes = len(index.scene_boundaries)
@@ -1166,6 +1168,7 @@ def _full_pipeline(
     api_key: str,
     backend: str,
     emit,
+    index_mode: str = "full",
 ) -> None:
     from rlm.video.video_rlm import VideoRLM
 
@@ -1308,6 +1311,7 @@ async def analyze(
     model: str = Form(default="openai/gpt-4o"),
     pipeline: str = Form(default="rlm"),
     custom_api_key: str = Form(default=""),
+    index_mode: str = Form(default="full"),
 ):
     suffix = Path(video.filename or "upload.mp4").suffix or ".mp4"
     video_id = str(uuid.uuid4())
@@ -1334,9 +1338,9 @@ async def analyze(
 
     def run() -> None:
         if pipeline == "kuavi":
-            _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit)
+            _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode)
         else:
-            _full_pipeline(str(video_path), question, model, api_key, backend, emit)
+            _full_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode)
         event_q.put(None)
 
     threading.Thread(target=run, daemon=True).start()
