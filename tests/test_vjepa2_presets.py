@@ -2,8 +2,8 @@
 
 import pytest
 
-from kuavi.types import VJEPA2_PRESETS, KUAViConfig
 from kuavi.indexer import VideoIndexer
+from kuavi.types import VJEPA2_PRESETS, KUAViConfig
 
 
 class TestVJEPA2Presets:

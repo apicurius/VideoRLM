@@ -1962,7 +1962,7 @@ def _llm_query_with_frames_batched(
     can be a single frame dict or a list of frame dicts.
     """
     prompts: list = []
-    for text, frames in zip(prompt_texts, frames_list):
+    for text, frames in zip(prompt_texts, frames_list, strict=False):
         if isinstance(frames, dict):
             frames = [frames]
         content: list = [text] + [
@@ -2702,7 +2702,7 @@ def kuavi_index_corpus(
     explicit video_paths list. Uses parallel indexing with max_workers threads.
     Results are stored in server state and optionally saved to output_dir.
     """
-    from kuavi.corpus import CorpusIndex, CorpusIndexer, corpus_stats, discover_videos
+    from kuavi.corpus import CorpusIndexer, corpus_stats, discover_videos
 
     _track_tool_call("index")
 

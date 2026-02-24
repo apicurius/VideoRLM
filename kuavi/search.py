@@ -725,7 +725,7 @@ def make_anticipate_action(index: VideoIndex) -> dict[str, Any]:
                     mean_pred = pred_embs.mean(axis=0).reshape(1, -1)
                     cand_scores = cosine_similarity(candidate_embs, mean_pred).flatten()
                     ranking = sorted(
-                        zip(candidates, cand_scores),
+                        zip(candidates, cand_scores, strict=False),
                         key=lambda x: x[1], reverse=True,
                     )
                     result["candidate_ranking"] = [

@@ -193,9 +193,9 @@ class _QueueLogHandler(logging.Handler):
 
     def emit(self, record):
         msg = record.getMessage()
-        if "[pipeline] V-JEPA 2: detecting scenes" in msg:
+        if "[pipeline] V-JEPA 2" in msg and "detecting scenes" in msg:
             self._emit_step("vjepa", "running", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] V-JEPA 2:" in msg:
+        elif "[pipeline] V-JEPA 2" in msg and "scenes detected" in msg:
             self._emit_step("vjepa", "done", msg.split("[pipeline] ")[-1])
         elif "[pipeline] SigLIP2: building" in msg:
             self._emit_step("siglip", "running", msg.split("[pipeline] ")[-1])
@@ -211,14 +211,16 @@ class _QueueLogHandler(logging.Handler):
             self._emit_step("whisper", "skip", "qwen_asr not installed")
         elif "[pipeline] Qwen3-ASR:" in msg:
             detail = msg.split("[pipeline] ")[-1]
-            if "segments transcribed" in msg:
+            if "segments transcribed" in msg or "transcript segments" in msg:
                 self._emit_step("whisper", "done", detail)
             else:
                 self._emit_step("whisper", "running", detail)
         elif "[pipeline] captioning: starting" in msg:
             self._emit_step("caption", "running", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] captioning:" in msg:
+        elif "[pipeline] captioning:" in msg and "segments captioned" in msg:
             self._emit_step("caption", "done", msg.split("[pipeline] ")[-1])
+        elif "[pipeline] captioning:" in msg:
+            self._emit_step("caption", "running", msg.split("[pipeline] ")[-1])
         elif "Gemini caption" in msg or "caption_fn" in msg:
             if "failed" in msg:
                 self._emit_step("caption", "running", "retrying...")
@@ -269,6 +271,10 @@ class _EventRLMLogger:
                 repl_errors.append(err[:400])
         self._emit({"type": "iteration", "n": self._iter, "tools": tools_used, "errors": repl_errors})
         self._iterations.append({"type": "iteration", "iteration": self._iter, **iteration.to_dict()})
+
+    def log_supplemental_metadata(self, **kwargs: object) -> None:
+        if self._run_metadata is not None:
+            self._run_metadata.update(kwargs)
 
     def clear_iterations(self) -> None:
         self._iterations = []
@@ -501,6 +507,7 @@ def _kuavi_pipeline(
     api_key: str,
     backend: str,
     emit,
+    *,
     index_mode: str = "full",
 ) -> None:
     """KUAVi pipeline: VideoIndexer + search tools + tool-calling agent."""
@@ -529,6 +536,13 @@ def _kuavi_pipeline(
             completed.add(step_id)
         emit(event)
 
+    # Attach log handler so pipeline stages emit real-time progress
+    log_handler = _QueueLogHandler(emit, completed)
+    log_handler.setLevel(logging.INFO)
+    kuavi_logger = logging.getLogger("kuavi.indexer")
+    kuavi_logger.setLevel(logging.INFO)
+    kuavi_logger.addHandler(log_handler)
+
     try:
         emit_step("vjepa", "running", "loading video...")
         loader = VideoLoader(fps=0.5)
@@ -548,7 +562,7 @@ def _kuavi_pipeline(
                     make_gemini_frame_caption_fn,
                     make_gemini_refine_fn,
                 )
-                caption_model = "gemini-3.1-pro-preview"
+                caption_model = "gemini-2.5-flash"
                 caption_fn = make_gemini_caption_fn(model=caption_model, api_key=gemini_key)
                 frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model, api_key=gemini_key)
                 refine_fn = make_gemini_refine_fn(model=caption_model, api_key=gemini_key)
@@ -599,20 +613,27 @@ def _kuavi_pipeline(
         n_scenes = len(index.scene_boundaries)
         n_segs = len(index.segments)
 
-        # Emit done in actual execution order: vjepa → whisper → caption → gemma → siglip → index
-        emit_step("vjepa", "done", f"{n_scenes} scene boundaries detected")
+        # Emit done for any steps the log handler didn't already mark
+        if "vjepa" not in completed:
+            emit_step("vjepa", "done", f"{n_scenes} scene boundaries detected")
 
-        if index.transcript:
-            emit_step("whisper", "done", f"{len(index.transcript)} transcript entries")
-        else:
-            emit_step("whisper", "skip", "no transcript")
+        if "whisper" not in completed:
+            if index.transcript:
+                emit_step("whisper", "done", f"{len(index.transcript)} transcript entries")
+            else:
+                emit_step("whisper", "skip", "no transcript")
 
-        if use_gemini and caption_fn is not None:
-            captioned = sum(1 for s in index.segments if s.get("caption"))
-            emit_step("caption", "done", f"{captioned}/{n_segs} segments captioned")
+        if "caption" not in completed:
+            if caption_fn is not None:
+                captioned = sum(1 for s in index.segments if s.get("caption"))
+                emit_step("caption", "done", f"{captioned}/{n_segs} segments captioned")
+            else:
+                emit_step("caption", "skip", "no captioning available")
 
-        emit_step("gemma", "done", "text embeddings ready")
-        emit_step("siglip", "done", f"{n_segs} segments embedded")
+        if "gemma" not in completed:
+            emit_step("gemma", "done", "text embeddings ready")
+        if "siglip" not in completed:
+            emit_step("siglip", "done", f"{n_segs} segments embedded")
         emit_step("index", "done", f"{n_segs} segments, {n_scenes} scenes")
 
         # Emit index stats for frontend
@@ -658,9 +679,12 @@ def _kuavi_pipeline(
             "timestamps": timestamps,
         })
     except Exception as exc:
+        _log.exception("KUAVi pipeline error")
         short = str(exc)[:200]
         _mark_pending_as_error(PIPELINE_STEPS, completed, emit, short)
         emit({"type": "error", "message": str(exc)})
+    finally:
+        kuavi_logger.removeHandler(log_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -997,16 +1021,23 @@ def _run_kuavi_agent_gemini(
 
         text_parts = []
         function_calls = []
-        if response.candidates and response.candidates[0].content:
-            for part in response.candidates[0].content.parts or []:
+        if not response.candidates:
+            _log.warning("Gemini agent: no candidates in response (iter %d)", i)
+            return " ".join(text_parts) or "(No response from model)"
+        candidate = response.candidates[0]
+        if candidate.content and candidate.content.parts:
+            for part in candidate.content.parts:
                 if hasattr(part, "thought") and part.thought:
                     continue
                 if hasattr(part, "text") and part.text:
                     text_parts.append(part.text)
                 if hasattr(part, "function_call") and part.function_call:
                     function_calls.append(part.function_call)
-
-        contents.append(response.candidates[0].content)
+            contents.append(candidate.content)
+        else:
+            _log.warning("Gemini agent: empty content, finish_reason=%s (iter %d)",
+                         getattr(candidate, "finish_reason", "unknown"), i)
+            return " ".join(text_parts) or "(Model returned empty response)"
 
         if not function_calls:
             return " ".join(text_parts) or ""
@@ -1199,7 +1230,6 @@ def _full_pipeline(
 
     caption_fn = None
     frame_caption_fn = None
-    refine_fn = None
 
     gemini_key = os.getenv("GEMINI_API_KEY") or (api_key if use_gemini else None)
     if gemini_key:
@@ -1207,12 +1237,10 @@ def _full_pipeline(
             from kuavi.captioning import (
                 make_gemini_caption_fn,
                 make_gemini_frame_caption_fn,
-                make_gemini_refine_fn,
             )
-            caption_model_name = "gemini-3.1-pro-preview"
+            caption_model_name = "gemini-2.5-flash"
             caption_fn = make_gemini_caption_fn(model=caption_model_name, api_key=gemini_key)
             frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model_name, api_key=gemini_key)
-            refine_fn = make_gemini_refine_fn(model=caption_model_name, api_key=gemini_key)
             emit_step("caption", "pending", f"using {caption_model_name}")
         except ImportError:
             gemini_key = None
@@ -1284,7 +1312,16 @@ def _full_pipeline(
             "6. Cite moments with [TS: X.X] (seconds) right after each claim."
         )
         result = video_rlm.completion(video_path, prompt=augmented)
-        emit_step("caption", "done")
+
+        # Emit done for any steps the log handler didn't already mark
+        for step_id in ("vjepa", "whisper", "caption", "gemma", "siglip"):
+            if step_id not in completed:
+                if step_id == "caption" and caption_fn is None:
+                    emit_step(step_id, "skip", "no captioning available")
+                elif step_id == "whisper":
+                    emit_step(step_id, "done", "transcript complete")
+                else:
+                    emit_step(step_id, "done")
         emit_step("agent", "done")
         timestamps = _parse_timestamps(result.response)
         answer_html = _render_answer_html(result.response)
@@ -1310,6 +1347,7 @@ async def analyze(
     backend: str = Form(default="openrouter"),
     model: str = Form(default="openai/gpt-4o"),
     pipeline: str = Form(default="rlm"),
+    index_mode: str = Form(default="full"),
     custom_api_key: str = Form(default=""),
     index_mode: str = Form(default="full"),
 ):

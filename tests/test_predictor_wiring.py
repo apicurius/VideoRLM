@@ -14,15 +14,13 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
-from kuavi.indexer import VideoIndex, VideoIndexer
+from kuavi.indexer import VideoIndexer
 from kuavi.search import (
     make_anticipate_action,
     make_predict_future,
     make_verify_coherence,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -442,9 +440,9 @@ class TestASRGracefulFallback:
         assert "from qwen_asr import Qwen3ASRModel" in source
         lines = source.split("\n")
         top_import_lines = [
-            l for l in lines
-            if "from qwen_asr import" in l and "Qwen3ForcedAligner" in l
-            and "# noqa" not in l
+            line for line in lines
+            if "from qwen_asr import" in line and "Qwen3ForcedAligner" in line
+            and "# noqa" not in line
         ]
         assert len(top_import_lines) == 0, (
             "Qwen3ForcedAligner should not be imported at top level of _ensure_asr_model"

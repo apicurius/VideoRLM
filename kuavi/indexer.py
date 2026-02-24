@@ -481,7 +481,7 @@ class VideoIndexer:
 
             if self._hierarchical:
                 levels = []
-                for thresh, min_dur in zip((0.10, 0.20, 0.35), (0.5, 2.0, 4.0)):
+                for thresh, min_dur in zip((0.10, 0.20, 0.35), (0.5, 2.0, 4.0), strict=False):
                     scenes_level = detect_scenes_perframe(
                         per_frame_embs, timestamps, threshold=thresh, min_duration=min_dur
                     )
@@ -583,6 +583,7 @@ class VideoIndexer:
             # Fast mode: use midpoint frame captions only — skip Tree-of-Captions and Self-Refine.
             logger.info("[pipeline] captioning: starting fast-mode frame captioning")
             # 5 (fast). Action-first pass: frame captions for non-skipped segments
+            logger.info("[pipeline] captioning: starting fast-mode for %d segments", len(segment_infos))
             self._action_first_pass(segment_infos, frame_caption_fn)
 
             # 5c (fast). Propagate captions from representatives to skipped duplicates
@@ -593,6 +594,9 @@ class VideoIndexer:
                     for key in ("caption", "annotation", "frame_caption", "is_non_action"):
                         if key in src:
                             seg[key] = src[key]
+
+            captioned = sum(1 for s in segment_infos if s.get("caption"))
+            logger.info("[pipeline] captioning: %d segments captioned", captioned)
 
             # Clean up temporary dedup keys
             for seg in segment_infos:
@@ -606,6 +610,7 @@ class VideoIndexer:
             # 5. Caption each segment (if a caption function was provided)
             logger.info("[pipeline] captioning: starting segment captioning")
             if caption_fn is not None or frame_caption_fn is not None:
+                logger.info("[pipeline] captioning: starting for %d segments", len(segment_infos))
                 # Prepare all segments first (skip near-duplicates)
                 caption_tasks = []
                 for seg in segment_infos:
@@ -674,6 +679,9 @@ class VideoIndexer:
                 for seg in segment_infos:
                     seg.pop("_frames", None)
 
+            captioned = sum(1 for s in segment_infos if s.get("caption"))
+            logger.info("[pipeline] captioning: %d segments captioned", captioned)
+
             # 5c. Propagate captions from representatives to skipped duplicates
             for seg in segment_infos:
                 src_idx = seg.get("_caption_source")
@@ -715,8 +723,7 @@ class VideoIndexer:
 
         # 7. Embed captions
         if self._text_embedding_model is not None:
-            logger.info("[pipeline] Gemma: embedding captions")
-        logger.info("[pipeline] SigLIP2: building frame embeddings")
+            logger.info("[pipeline] Gemma: embedding captions for %d segments", len(segment_infos))
         embeddings, action_embeddings = self._embed_captions(segment_infos)
 
         # 7b. Smooth embeddings to reduce noise across adjacent segments
@@ -728,7 +735,6 @@ class VideoIndexer:
         quality = self._check_embedding_quality(embeddings, label="caption")
         if self._text_embedding_model is not None:
             logger.info("[pipeline] Gemma: caption embeddings complete")
-        logger.info("[pipeline] SigLIP2: %d frame embeddings built", len(segment_infos))
 
         # 7b2. Semantic deduplication via k-means clustering (optional)
         if semantic_dedup:
@@ -750,10 +756,12 @@ class VideoIndexer:
             else:
                 rep_frames.append(frames[0])  # fallback
 
+        logger.info("[pipeline] SigLIP2: building frame embeddings for %d segments", len(rep_frames))
         self._ensure_model()
         frame_embeddings = self._encode_frames(rep_frames)
         frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
         self._check_embedding_quality(frame_embeddings, label="frame")
+        logger.info("[pipeline] SigLIP2: %d frame embeddings built", len(rep_frames))
 
         # 7d. Aggregate V-JEPA 2 temporal embeddings per segment
         temporal_embeddings: np.ndarray | None = None
@@ -1698,7 +1706,6 @@ class VideoIndexer:
 
             best_annotation = seg.get("annotation", {})
             best_caption = seg.get("caption", "")
-            best_score = seg.get("quality_score", 0.0)
 
             for _ in range(num_retries):
                 try:
@@ -2632,7 +2639,7 @@ class VideoIndexer:
                 # region that are better covered by the previous chunk.
                 transcript: list[dict] = []
                 for chunk_idx, (asr_result, offset) in enumerate(
-                    zip(all_results, chunk_offsets)
+                    zip(all_results, chunk_offsets, strict=False)
                 ):
                     skip_before = (
                         offset + overlap / 2 if chunk_idx > 0 and overlap > 0 else 0.0

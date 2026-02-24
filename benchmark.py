@@ -317,7 +317,7 @@ def run_rlm_benchmark(
     usage = result.usage_summary
     total_input = 0
     total_output = 0
-    for model_name, model_usage in usage.model_usage_summaries.items():
+    for _model_name, model_usage in usage.model_usage_summaries.items():
         total_input += model_usage.total_input_tokens
         total_output += model_usage.total_output_tokens
 
@@ -744,7 +744,7 @@ def main():
     headers = ["Metric"]
     for s in args.systems:
         headers.append(s.upper())
-    header_fmt = f"{{:<25}}" + f"{{:>20}}" * len(args.systems)
+    header_fmt = "{:<25}" + "{:>20}" * len(args.systems)
     print(header_fmt.format(*headers))
     print("-" * 70)
 

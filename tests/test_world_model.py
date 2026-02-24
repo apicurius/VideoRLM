@@ -6,14 +6,12 @@ and their MCP tool wrappers.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
-import pytest
 
 from kuavi.indexer import VideoIndex
 from kuavi.search import make_predict_future, make_verify_coherence
-
 
 # ---------------------------------------------------------------------------
 # Helpers

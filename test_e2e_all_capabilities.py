@@ -221,7 +221,7 @@ def main():
     check("anticipate_action returns results", "predicted_segments" in ant_result)
     method = ant_result.get("method", "unknown")
     check(
-        f"anticipate_action method",
+        "anticipate_action method",
         method in ("vjepa2_predictor", "embedding_similarity"),
         method,
     )
@@ -238,7 +238,7 @@ def main():
     check("predict_future returns results", "predicted_segments" in pred_result)
     method = pred_result.get("method", "unknown")
     check(
-        f"predict_future method",
+        "predict_future method",
         method in ("vjepa2_predictor", "temporal_continuation"),
         method,
     )
@@ -253,7 +253,7 @@ def main():
     check("verify_coherence has anomalies", "anomalies" in coh_result)
     method = coh_result.get("method", "unknown")
     check(
-        f"verify_coherence method",
+        "verify_coherence method",
         method in ("vjepa2_predictor", "pairwise_similarity"),
         method,
     )
@@ -320,13 +320,13 @@ def main():
     print(f"{'='*60}")
 
     if failed > 0:
-        print(f"\n  Failed tests:")
+        print("\n  Failed tests:")
         for s, name, detail in results:
             if s == FAIL:
                 print(f"    {FAIL} {name}  {detail}")
         sys.exit(1)
     else:
-        print(f"\n  All capabilities verified!")
+        print("\n  All capabilities verified!")
         sys.exit(0)
 
 

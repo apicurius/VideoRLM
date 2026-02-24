@@ -17,7 +17,6 @@ from kuavi.corpus import (
     search_corpus,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -581,7 +580,7 @@ class TestCLICorpusSubcommand:
             ["uv", "run", "python", "-m", "kuavi.cli", "corpus", "--help"],
             capture_output=True,
             text=True,
-            cwd="/Users/oerdogan/LVU",
+            cwd=str(Path(__file__).resolve().parent.parent),
         )
         assert result.returncode == 0
         assert "corpus" in result.stdout.lower() or "subcommand" in result.stdout.lower()
@@ -594,7 +593,7 @@ class TestCLICorpusSubcommand:
             ["uv", "run", "python", "-m", "kuavi.cli", "corpus", "index", "--help"],
             capture_output=True,
             text=True,
-            cwd="/Users/oerdogan/LVU",
+            cwd=str(Path(__file__).resolve().parent.parent),
         )
         assert result.returncode == 0
 
@@ -606,6 +605,6 @@ class TestCLICorpusSubcommand:
             ["uv", "run", "python", "-m", "kuavi.cli", "corpus", "search", "--help"],
             capture_output=True,
             text=True,
-            cwd="/Users/oerdogan/LVU",
+            cwd=str(Path(__file__).resolve().parent.parent),
         )
         assert result.returncode == 0

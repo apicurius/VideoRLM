@@ -129,6 +129,7 @@ class VideoRLM:
         self.target_frames = target_frames
         self.cache_dir = cache_dir
         self.text_embedding_model = text_embedding_model
+        self.max_frames_per_segment = max_frames_per_segment
         self.loader = VideoLoader(fps=fps, max_frames=max_frames, resize=resize)
         self.context_builder = VideoContext(
             format=image_format,
@@ -646,7 +647,7 @@ class VideoRLM:
             video_path=str(Path(video_path).resolve()),
             fps=self.loader.fps,
             num_segments=len(loaded_video.segments) if loaded_video.segments else 0,
-            max_frames_per_segment=self.context_builder.max_frames_per_segment,
+            max_frames_per_segment=self.max_frames_per_segment,
             resize=list(self.loader.resize) if getattr(self.loader, "resize", None) else None,
         )
 

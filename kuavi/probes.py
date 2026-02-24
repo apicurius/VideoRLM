@@ -117,7 +117,7 @@ class AttentiveProbe:
                 self.norm_out = nn.LayerNorm(embed_dim)
                 self.classifier = nn.Linear(embed_dim, num_classes)
 
-            def forward(self, features: "torch.Tensor") -> "torch.Tensor":
+            def forward(self, features: torch.Tensor) -> torch.Tensor:
                 """
                 Args:
                     features: (B, num_patches, D) frozen V-JEPA 2 patch tokens.
@@ -289,7 +289,7 @@ class ProbeRegistry:
         """Create a registry from probe configs, optionally loading weights."""
         registry = cls()
         configs = configs or PROBE_CONFIGS
-        for name, config in configs.items():
+        for _name, config in configs.items():
             probe = AttentiveProbe(config)
             if config.weights_path:
                 probe._build_model()

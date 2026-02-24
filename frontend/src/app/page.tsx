@@ -71,6 +71,7 @@ export default function VideoRLMInterface() {
   const [backend, setBackend] = useState("openrouter");
   const [model, setModel] = useState("openai/gpt-4o");
   const [apiKey, setApiKey] = useState("");
+  const [indexMode, setIndexMode] = useState("full");
 
   // Progress/Results State
   const [steps, setSteps] = useState<PipelineStep[]>([]);
@@ -344,7 +345,7 @@ export default function VideoRLMInterface() {
                     </Select>
                   </div>
                   <div className="space-y-3">
-                    <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Indexing Mode</Label>
+                    <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Index Mode</Label>
                     <Select value={indexMode} onValueChange={setIndexMode}>
                       <SelectTrigger className="bg-white/5 border-white/10 h-11 text-sm rounded-xl focus:ring-amber-500/30 text-white">
                         <SelectValue />
