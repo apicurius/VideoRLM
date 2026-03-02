@@ -230,7 +230,14 @@ class _QueueLogHandler(logging.Handler):
         elif "[pipeline] captioning: starting" in msg:
             self._emit_step("caption", "running", msg.split("[pipeline] ")[-1])
         elif "[pipeline] captioning:" in msg and "segments captioned" in msg:
-            self._emit_step("caption", "done", msg.split("[pipeline] ")[-1])
+            detail = msg.split("[pipeline] ")[-1]
+            # "0 segments captioned" means no caption function was wired (fast mode) → skip
+            if msg.strip().startswith("[pipeline] captioning: 0 "):
+                self._emit_step("caption", "skip", "fast mode — embeddings only")
+            else:
+                self._emit_step("caption", "done", detail)
+        elif "[pipeline] captioning:" in msg and "skipped" in msg:
+            self._emit_step("caption", "skip", "fast mode — embeddings only")
         elif "[pipeline] captioning:" in msg:
             self._emit_step("caption", "running", msg.split("[pipeline] ")[-1])
         elif "Gemini caption" in msg or "caption_fn" in msg:

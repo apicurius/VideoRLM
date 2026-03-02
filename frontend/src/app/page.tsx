@@ -14,7 +14,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { TraceViewer } from "@/components/TraceViewer";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// For the /api/analyze upload we go DIRECTLY to the backend to avoid the
+// Next.js rewrite proxy 10 MB body-size cap (videos are much larger).
+// CORS is enabled on the backend with allow_origins=["*"].
+const BACKEND_DIRECT =
+  process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:7860";
+
+// All other API calls (logs, arch, tools …) go through the Next.js proxy.
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "/backend";
 
 // Types
 type PipelineStep = {
@@ -55,6 +62,27 @@ const DEFAULT_PIPELINE_STEPS: PipelineStep[] = [
   { id: "agent", label: "Recursive Agent Loop", status: "pending" },
 ];
 
+// Popular OpenRouter model suggestions grouped by provider
+const OPENROUTER_MODELS: { label: string; value: string }[] = [
+  { label: "GPT-4o (OpenAI)", value: "openai/gpt-4o" },
+  { label: "GPT-4o Mini (OpenAI)", value: "openai/gpt-4o-mini" },
+  { label: "o3 Mini (OpenAI)", value: "openai/o3-mini" },
+  { label: "Claude Sonnet 4.5 (Anthropic)", value: "anthropic/claude-sonnet-4-5" },
+  { label: "Claude Haiku 3.5 (Anthropic)", value: "anthropic/claude-3-5-haiku" },
+  { label: "Gemini 2.0 Flash (Google)", value: "google/gemini-2.0-flash-001" },
+  { label: "Gemini 2.5 Pro (Google)", value: "google/gemini-2.5-pro-preview-06-05" },
+  { label: "Llama 4 Maverick (Meta)", value: "meta-llama/llama-4-maverick" },
+  { label: "Qwen3 235B (Alibaba)", value: "qwen/qwen3-235b-a22b" },
+  { label: "DeepSeek R2 (DeepSeek)", value: "deepseek/deepseek-r2" },
+];
+
+const BACKEND_DEFAULT_MODELS: Record<string, string> = {
+  openrouter: "openai/gpt-4o",
+  openai: "gpt-4o",
+  anthropic: "claude-sonnet-4-6",
+  gemini: "gemini-3.1-pro-preview",
+};
+
 // Main Page Component
 export default function VideoRLMInterface() {
   const [file, setFile] = useState<File | null>(null);
@@ -73,6 +101,8 @@ export default function VideoRLMInterface() {
   const [backend, setBackend] = useState("openrouter");
   const [model, setModel] = useState("openai/gpt-4o");
   const [apiKey, setApiKey] = useState("");
+  const [openrouterModels, setOpenrouterModels] = useState<{ label: string; value: string }[]>(OPENROUTER_MODELS);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
 
   // Progress/Results State
   const [steps, setSteps] = useState<PipelineStep[]>([]);
@@ -94,6 +124,37 @@ export default function VideoRLMInterface() {
       if (videoUrl) URL.revokeObjectURL(videoUrl);
     };
   }, [videoUrl]);
+
+  // Fetch live model list from OpenRouter when the API key is available
+  useEffect(() => {
+    if (backend !== "openrouter" || !apiKey.trim()) {
+      setOpenrouterModels(OPENROUTER_MODELS);
+      return;
+    }
+    let cancelled = false;
+    setIsFetchingModels(true);
+    fetch("/api/openrouter/models", {
+      headers: { "x-api-key": apiKey.trim() },
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        if (data.data && Array.isArray(data.data)) {
+          const fetched = (data.data as { id: string; name?: string }[])
+            .filter((m) => m.id)
+            .map((m) => ({ label: m.name || m.id, value: m.id }))
+            .sort((a, b) => a.label.localeCompare(b.label));
+          setOpenrouterModels(fetched.length > 0 ? fetched : OPENROUTER_MODELS);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setOpenrouterModels(OPENROUTER_MODELS);
+      })
+      .finally(() => {
+        if (!cancelled) setIsFetchingModels(false);
+      });
+    return () => { cancelled = true; };
+  }, [backend, apiKey]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -156,7 +217,7 @@ export default function VideoRLMInterface() {
     formData.append("custom_api_key", apiKey);
 
     try {
-      const response = await fetch(`${API_URL}/api/analyze`, {
+      const response = await fetch(`${BACKEND_DIRECT}/api/analyze`, {
         method: "POST",
         body: formData,
       });
@@ -353,10 +414,25 @@ export default function VideoRLMInterface() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white">
-                        <SelectItem value="fast">Fast (Embeddings Only)</SelectItem>
-                        <SelectItem value="captioned">Captioned (+ Gemini Descriptions)</SelectItem>
+                        <SelectItem value="fast">
+                          <div className="flex flex-col py-0.5">
+                            <span>Fast</span>
+                            <span className="text-[10px] text-zinc-500">Embeddings only — no LLM captions</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="captioned">
+                          <div className="flex flex-col py-0.5">
+                            <span>Captioned</span>
+                            <span className="text-[10px] text-zinc-500">LLM describes each segment (slower, richer)</span>
+                          </div>
+                        </SelectItem>
                       </SelectContent>
                     </Select>
+                    {indexMode === "captioned" && (
+                      <p className="text-[10px] text-amber-400/70 leading-relaxed">
+                        ⚡ Uses the selected backend model to caption segments. Requires a valid API key. Significantly slower on long videos.
+                      </p>
+                    )}
                   </div>
                   <div className="space-y-3">
                     <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">ASR Model</Label>
@@ -379,15 +455,7 @@ export default function VideoRLMInterface() {
                       value={backend}
                       onValueChange={(v) => {
                         setBackend(v);
-                        setModel(
-                          v === "openrouter"
-                            ? "openai/gpt-4o"
-                            : v === "openai"
-                              ? "gpt-4o"
-                              : v === "anthropic"
-                                ? "claude-sonnet-4-6"
-                                : "gemini-3.1-pro-preview"
-                        );
+                        setModel(BACKEND_DEFAULT_MODELS[v] ?? "openai/gpt-4o");
                       }}
                     >
                       <SelectTrigger className="bg-white/5 border-white/10 h-11 text-sm rounded-xl focus:ring-amber-500/30 text-white">
@@ -402,12 +470,36 @@ export default function VideoRLMInterface() {
                     </Select>
                   </div>
                   <div className="space-y-3">
-                    <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Model ID</Label>
-                    <Input
-                      value={model}
-                      onChange={(e) => setModel(e.target.value)}
-                      className="bg-white/5 border-white/10 h-11 text-sm rounded-xl text-white focus-visible:ring-amber-500/30"
-                    />
+                    <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
+                      Model ID
+                      {backend === "openrouter" && isFetchingModels && (
+                        <span className="ml-2 text-[10px] text-amber-400/70 normal-case font-normal">fetching…</span>
+                      )}
+                    </Label>
+                    {backend === "openrouter" ? (
+                      <Select value={model} onValueChange={setModel}>
+                        <SelectTrigger className="bg-white/5 border-white/10 h-11 text-sm rounded-xl focus:ring-amber-500/30 text-white">
+                          <SelectValue placeholder="Select a model" />
+                        </SelectTrigger>
+                        <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white max-h-64 overflow-y-auto">
+                          {openrouterModels.map((m) => (
+                            <SelectItem key={m.value} value={m.value}>
+                              {m.label}
+                            </SelectItem>
+                          ))}
+                          {/* Allow typing a custom model id */}
+                          <SelectItem value={model} className="text-zinc-400 italic">
+                            {openrouterModels.some((m) => m.value === model) ? "Custom…" : model}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <Input
+                        value={model}
+                        onChange={(e) => setModel(e.target.value)}
+                        className="bg-white/5 border-white/10 h-11 text-sm rounded-xl text-white focus-visible:ring-amber-500/30"
+                      />
+                    )}
                   </div>
                   <div className="space-y-3">
                     <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">API Key</Label>
