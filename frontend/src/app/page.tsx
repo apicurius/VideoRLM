@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Play, Settings, PanelRight, UploadCloud, Video, ChevronRight, CheckCircle2, RotateCw, AlertTriangle, X, FileText, Image, Layers, Eye } from "lucide-react";
+import { Play, Settings, PanelRight, UploadCloud, Video, ChevronRight, CheckCircle2, RotateCw, AlertTriangle, X, FileText, Image, Layers, Eye, Timer, TrendingUp, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +48,11 @@ type FrameEvent = {
   tool: string;
   count: number;
   timestamps: (number | null)[];
+};
+
+type TimingSummary = {
+  steps: { id: string; elapsed_ms: number }[];
+  total_ms: number;
 };
 
 type PanelTab = "pipeline" | "traces";
@@ -113,17 +118,36 @@ export default function VideoRLMInterface() {
   const [elapsed, setElapsed] = useState(0);
   const [indexStats, setIndexStats] = useState<IndexStats | null>(null);
   const [frameEvents, setFrameEvents] = useState<FrameEvent[]>([]);
+  const [timingSummary, setTimingSummary] = useState<TimingSummary | null>(null);
   const [panelTab, setPanelTab] = useState<PanelTab>("pipeline");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const timerRef = useRef<NodeJS.Timeout>(null);
+  const profileRef = useRef<HTMLDivElement>(null);
+
+  // Always start with 460 so SSR and first client render agree, then
+  // update after mount to respect the actual viewport width.
+  const [panelWidth, setPanelWidth] = useState(460);
+  useEffect(() => {
+    const compute = () => Math.min(460, Math.floor(window.innerWidth * 0.42));
+    const handler = () => setPanelWidth(compute());
+    handler();
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
 
   useEffect(() => {
     return () => {
       if (videoUrl) URL.revokeObjectURL(videoUrl);
     };
   }, [videoUrl]);
+
+  useEffect(() => {
+    if (timingSummary) {
+      setTimeout(() => profileRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+    }
+  }, [timingSummary]);
 
   // Fetch live model list from OpenRouter when the API key is available
   useEffect(() => {
@@ -182,6 +206,12 @@ export default function VideoRLMInterface() {
     return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
   };
 
+  const formatMs = (ms: number) => {
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+  };
+
   const handleSeek = (seconds: number) => {
     if (videoRef.current) {
       videoRef.current.currentTime = seconds;
@@ -204,6 +234,7 @@ export default function VideoRLMInterface() {
     setAgentIterations([]);
     setIndexStats(null);
     setFrameEvents([]);
+    setTimingSummary(null);
     startTimer();
 
     const formData = new FormData();
@@ -277,6 +308,8 @@ export default function VideoRLMInterface() {
                   ...prev,
                   { tool: event.tool, count: event.count, timestamps: event.timestamps || [] },
                 ]);
+              } else if (event.type === "timing_summary") {
+                setTimingSummary({ steps: event.steps, total_ms: event.total_ms });
               } else if (event.type === "result") {
                 setAnswerHtml({ __html: event.answer_html });
                 setTimestamps(event.timestamps || []);
@@ -371,7 +404,7 @@ export default function VideoRLMInterface() {
       {/* Main Area */}
       <main className="flex flex-1 overflow-hidden relative">
         {/* Left Side: Video & Input */}
-        <div className="flex flex-1 flex-col relative z-20 min-w-0 bg-[#050505] shadow-[20px_0_40px_-20px_rgba(0,0,0,0.5)]">
+        <div className="flex flex-1 flex-col relative z-20 min-w-0 bg-[#050505] shadow-[20px_0_40px_-20px_rgba(0,0,0,0.5)] overflow-y-auto">
           {/* Settings Drawer */}
           <AnimatePresence>
             {isSettingsOpen && (
@@ -517,7 +550,7 @@ export default function VideoRLMInterface() {
           </AnimatePresence>
 
           {/* Video Stage */}
-          <div className="flex-1 p-4 sm:p-8 flex flex-col items-center justify-center overflow-hidden bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/30 via-[#050505] to-[#050505]">
+          <div className="shrink-0 h-[50vh] p-4 sm:p-8 flex flex-col items-center overflow-hidden bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/30 via-[#050505] to-[#050505]">
             <input type="file" ref={fileInputRef} accept="video/*" className="hidden" onChange={handleFileChange} />
 
             <AnimatePresence mode="wait">
@@ -578,8 +611,146 @@ export default function VideoRLMInterface() {
             </motion.div>
           )}
 
+          {/* Results Section */}
+          {(timingSummary || answerHtml) && (
+            <div className="p-4 sm:p-6 space-y-6">
+              {/* Performance Profile */}
+              {timingSummary && (() => {
+                const maxMs = timingSummary.steps.length > 0
+                  ? Math.max(...timingSummary.steps.map(s => s.elapsed_ms))
+                  : 1;
+                return (
+                  <motion.div
+                    ref={profileRef}
+                    initial={{ opacity: 0, y: 10, filter: "blur(5px)" }}
+                    animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                    transition={{ type: "spring", stiffness: 200, damping: 20 }}
+                    className="rounded-2xl border border-blue-500/10 bg-blue-500/[0.03] overflow-hidden"
+                  >
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
+                      <h3 className="font-semibold text-sm flex items-center gap-2 text-zinc-100">
+                        <Timer className="w-3.5 h-3.5 text-blue-400" />
+                        Performance Profile
+                      </h3>
+                      <span className="text-[10px] font-mono text-zinc-500">{formatMs(timingSummary.total_ms)} total</span>
+                    </div>
+                    <div className="divide-y divide-white/[0.03]">
+                      {DEFAULT_PIPELINE_STEPS.map((pipStep, idx) => {
+                        const timing = timingSummary.steps.find(s => s.id === pipStep.id);
+                        const stepState = steps.find(s => s.id === pipStep.id);
+                        const status = stepState?.status ?? "pending";
+                        const ms = timing?.elapsed_ms ?? 0;
+                        const pct = timingSummary.total_ms > 0 ? (ms / timingSummary.total_ms) * 100 : 0;
+                        const isSkip = status === "skip" || status === "pending";
+                        const isCached = status === "cached";
+                        const isBottleneck = timing != null && ms === maxMs && ms > 0;
+                        return (
+                          <div key={pipStep.id} className="flex items-center gap-3 px-4 py-2">
+                            <span className="text-[10px] font-mono text-zinc-500 w-[42%] shrink-0 truncate">{pipStep.label}</span>
+                            <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                              {isSkip ? (
+                                <div className="h-full w-full opacity-30" style={{ backgroundImage: "repeating-linear-gradient(90deg,rgba(255,255,255,0.2) 0,rgba(255,255,255,0.2) 3px,transparent 3px,transparent 7px)" }} />
+                              ) : (
+                                <motion.div
+                                  initial={{ width: 0 }}
+                                  animate={{ width: `${pct}%` }}
+                                  transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1], delay: idx * 0.05 }}
+                                  className={`h-full rounded-full ${isCached ? "bg-blue-400/60" : isBottleneck ? "bg-amber-400" : "bg-green-400/60"}`}
+                                />
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 w-[28%] justify-end shrink-0">
+                              {isSkip ? (
+                                <span className="text-[9px] font-mono text-zinc-600 uppercase tracking-wider">skip</span>
+                              ) : (
+                                <>
+                                  <span className={`text-[10px] font-mono tabular-nums ${isBottleneck ? "text-amber-400" : "text-zinc-500"}`}>{formatMs(ms)}</span>
+                                  <span className={`text-[9px] font-mono tabular-nums ${isBottleneck ? "text-amber-500/60" : "text-zinc-600"}`}>{pct.toFixed(0)}%</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div className="flex items-center gap-3 px-4 py-2 bg-white/[0.015]">
+                        <span className="text-[10px] font-mono font-bold text-zinc-300 w-[42%] shrink-0">TOTAL</span>
+                        <div className="flex-1" />
+                        <div className="w-[28%] flex justify-end">
+                          <span className="text-[10px] font-mono font-bold text-zinc-200 tabular-nums">{formatMs(timingSummary.total_ms)}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="px-4 pb-3 pt-2 space-y-1.5 border-t border-white/5">
+                      {timingSummary.steps.length > 0 && (() => {
+                        const top = timingSummary.steps.reduce((a, b) => a.elapsed_ms > b.elapsed_ms ? a : b);
+                        const label = DEFAULT_PIPELINE_STEPS.find(p => p.id === top.id)?.label ?? top.id;
+                        const pct = ((top.elapsed_ms / timingSummary.total_ms) * 100).toFixed(1);
+                        return (
+                          <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/5 border border-amber-500/10">
+                            <TrendingUp className="w-3 h-3 text-amber-400 shrink-0 mt-0.5" />
+                            <p className="text-[10px] text-zinc-400 leading-relaxed">
+                              <span className="text-amber-300 font-medium">{label}</span>{" is the bottleneck — "}
+                              <span className="text-zinc-300">{formatMs(top.elapsed_ms)}</span>
+                              <span className="text-zinc-500"> ({pct}%)</span>
+                            </p>
+                          </div>
+                        );
+                      })()}
+                      {agentIterations.filter(Boolean).length > 0 && (() => {
+                        const agentTiming = timingSummary.steps.find(s => s.id === "agent");
+                        const nIter = agentIterations.filter(Boolean).length;
+                        const avgMs = agentTiming ? Math.round(agentTiming.elapsed_ms / nIter) : null;
+                        return (
+                          <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-white/[0.02] border border-white/5">
+                            <Zap className="w-3 h-3 text-zinc-400 shrink-0 mt-0.5" />
+                            <p className="text-[10px] text-zinc-400 leading-relaxed">
+                              Agent: <span className="text-zinc-200 font-medium">{nIter} iteration{nIter !== 1 ? "s" : ""}</span>
+                              {avgMs != null && <span className="text-zinc-500"> · ~{formatMs(avgMs)}/iter avg</span>}
+                            </p>
+                          </div>
+                        );
+                      })()}
+                      {(() => {
+                        const skipped = steps.filter(s => s.status === "skip");
+                        if (skipped.length === 0) return null;
+                        return (
+                          <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-white/[0.02] border border-white/5">
+                            <ChevronRight className="w-3 h-3 text-zinc-500 shrink-0 mt-0.5" />
+                            <p className="text-[10px] text-zinc-500 leading-relaxed">
+                              {skipped.length} skipped: <span className="text-zinc-400">{skipped.map(s => s.label).join(", ")}</span>
+                            </p>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </motion.div>
+                );
+              })()}
+
+              {/* Final Answer */}
+              {answerHtml && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95, y: 15, filter: "blur(5px)" }}
+                  animate={{ opacity: 1, scale: 1, y: 0, filter: "blur(0px)" }}
+                  transition={{ type: "spring", stiffness: 200, damping: 20 }}
+                >
+                  <h3 className="font-bold text-base mb-5 flex items-center gap-3 text-zinc-100">
+                    <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-green-600 to-green-400 border border-green-500/20 text-white flex items-center justify-center shadow-[0_0_20px_-5px_rgba(74,222,128,0.4)]">
+                      <CheckCircle2 className="w-4 h-4" />
+                    </div>
+                    Analysis Result
+                  </h3>
+                  <div
+                    className="prose prose-sm dark:prose-invert prose-amber max-w-none text-zinc-400 leading-relaxed prose-headings:text-zinc-100 prose-headings:font-bold prose-a:text-amber-500 hover:prose-a:text-amber-400 prose-ul:my-3 prose-li:my-1 prose-p:my-3 marker:text-amber-500"
+                    dangerouslySetInnerHTML={answerHtml}
+                  />
+                </motion.div>
+              )}
+            </div>
+          )}
+
           {/* Input Area */}
-          <div className="p-4 sm:p-6 border-t border-white/5 bg-zinc-950/90 backdrop-blur-2xl z-30 shadow-[0_-10px_40px_-10px_rgba(0,0,0,0.5)]">
+          <div className="sticky bottom-0 p-4 sm:p-6 border-t border-white/5 bg-zinc-950/90 backdrop-blur-2xl z-30 shadow-[0_-10px_40px_-10px_rgba(0,0,0,0.5)]">
             {error && (
               <Alert variant="destructive" className="mb-4 bg-red-500/10 border-red-500/20 text-red-400 rounded-xl px-5 py-4">
                 <AlertTriangle className="h-5 w-5" />
@@ -623,7 +794,7 @@ export default function VideoRLMInterface() {
           {isPanelOpen && (
             <motion.div
               initial={{ width: 0, opacity: 0, x: 20, filter: "blur(10px)" }}
-              animate={{ width: 460, opacity: 1, x: 0, filter: "blur(0px)" }}
+              animate={{ width: panelWidth, opacity: 1, x: 0, filter: "blur(0px)" }}
               exit={{ width: 0, opacity: 0, x: 20, filter: "blur(10px)" }}
               transition={{ type: "spring", stiffness: 300, damping: 30 }}
               className="h-full border-l border-white/5 bg-[#0a0a0c] flex flex-col shrink-0 overflow-hidden relative z-10 shadow-[-20px_0_40px_-10px_rgba(0,0,0,0.5)]"
@@ -927,27 +1098,6 @@ export default function VideoRLMInterface() {
                             );
                           })}
                         </div>
-
-                        {/* Final Answer */}
-                        {answerHtml && (
-                          <motion.div
-                            initial={{ opacity: 0, scale: 0.95, y: 15, filter: "blur(5px)" }}
-                            animate={{ opacity: 1, scale: 1, y: 0, filter: "blur(0px)" }}
-                            transition={{ type: "spring", stiffness: 200, damping: 20 }}
-                            className="pt-8 border-t border-white/5"
-                          >
-                            <h3 className="font-bold text-base mb-5 flex items-center gap-3 text-zinc-100">
-                              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-green-600 to-green-400 border border-green-500/20 text-white flex items-center justify-center shadow-[0_0_20px_-5px_rgba(74,222,128,0.4)]">
-                                <CheckCircle2 className="w-4 h-4" />
-                              </div>
-                              Analysis Result
-                            </h3>
-                            <div
-                              className="prose prose-sm dark:prose-invert prose-amber max-w-none text-zinc-400 leading-relaxed prose-headings:text-zinc-100 prose-headings:font-bold prose-a:text-amber-500 hover:prose-a:text-amber-400 prose-ul:my-3 prose-li:my-1 prose-p:my-3 marker:text-amber-500"
-                              dangerouslySetInnerHTML={answerHtml}
-                            />
-                          </motion.div>
-                        )}
                       </div>
                     )}
                   </ScrollArea>
