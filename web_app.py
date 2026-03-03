@@ -19,8 +19,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, StreamingResponse
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -37,14 +36,6 @@ app.add_middleware(
 UPLOAD_DIR = Path("/tmp/rlm_web_uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-STATIC_DIR = Path(__file__).parent / "web_static"
-
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-@app.get("/")
-async def index():
-    return FileResponse(str(STATIC_DIR / "index.html"))
 
 
 def _seconds_to_label(seconds: float) -> str:
@@ -166,6 +157,7 @@ class _StepTimer:
     def __init__(self, raw_emit):
         self._raw_emit = raw_emit
         self._starts: dict[str, float] = {}
+        self._completed_ms: dict[str, int] = {}
 
     def __call__(self, event: dict):
         if event.get("type") == "step":
@@ -180,8 +172,18 @@ class _StepTimer:
             elif status in ("done", "cached", "skip", "error") and sid:
                 start = self._starts.pop(sid, None)
                 if start is not None:
-                    event = {**event, "elapsed_ms": int((time.time() - start) * 1000)}
+                    elapsed = int((time.time() - start) * 1000)
+                    event = {**event, "elapsed_ms": elapsed}
+                    self._completed_ms[sid] = elapsed
         self._raw_emit(event)
+
+    def flush_summary(self) -> None:
+        """Emit a timing_summary event with all completed step durations."""
+        if not self._completed_ms:
+            return
+        step_timings = [{"id": sid, "elapsed_ms": ms} for sid, ms in self._completed_ms.items()]
+        total_ms = sum(d["elapsed_ms"] for d in step_timings)
+        self._raw_emit({"type": "timing_summary", "steps": step_timings, "total_ms": total_ms})
 
 
 class _QueueLogHandler(logging.Handler):
@@ -1416,6 +1418,7 @@ async def analyze(
             _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode, asr_model=asr_model)
         else:
             _full_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode, asr_model=asr_model)
+        emit.flush_summary()
         event_q.put(None)
 
     threading.Thread(target=run, daemon=True).start()
