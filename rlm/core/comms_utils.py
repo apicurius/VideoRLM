@@ -1,13 +1,19 @@
 """
-Communication utilities for RLM socket protocol.
+Communication utilities for RLM socket and stdio protocols.
 
-Protocol: 4-byte big-endian length prefix + JSON payload.
+Socket protocol: 4-byte big-endian length prefix + JSON payload over TCP.
+Stdio protocol:  same framing over stdin/stdout binary streams.
+
 Used for communication between LMHandler and environment subprocesses.
 """
 
+from __future__ import annotations
+
+import io
 import json
 import socket
 import struct
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -269,3 +275,132 @@ def send_lm_request_batched(
         ]
     except Exception as e:
         return [LMResponse.error_response(f"Request failed: {e}")] * len(prompts)
+
+
+# =============================================================================
+# Stdio Protocol Helpers
+# =============================================================================
+
+
+def stdio_send(stream: io.BufferedWriter | io.RawIOBase, data: dict) -> None:
+    """Send a length-prefixed JSON message over a binary writable stream.
+
+    Uses the same framing as :func:`socket_send` (4-byte big-endian length
+    prefix + UTF-8 JSON payload) so the handler can share parsing logic.
+    """
+    payload = json.dumps(data).encode("utf-8")
+    stream.write(struct.pack(">I", len(payload)) + payload)
+    stream.flush()
+
+
+def stdio_recv(stream: io.BufferedReader | io.RawIOBase) -> dict:
+    """Receive a length-prefixed JSON message from a binary readable stream.
+
+    Returns an empty dict when the stream is closed (EOF before the
+    4-byte length header is fully read).
+
+    Raises:
+        ConnectionError: If the stream closes mid-message.
+    """
+    raw_len = stream.read(4)
+    if not raw_len or len(raw_len) < 4:
+        return {}
+    length = struct.unpack(">I", raw_len)[0]
+    payload = b""
+    while len(payload) < length:
+        chunk = stream.read(length - len(payload))
+        if not chunk:
+            raise ConnectionError("Stdio stream closed before message complete")
+        payload += chunk
+    return json.loads(payload.decode("utf-8"))
+
+
+def stdio_request(proc: subprocess.Popen, data: dict, timeout: int = 300) -> dict:
+    """Send a request and receive a response over an open subprocess's
+    stdin/stdout.
+
+    The subprocess must already be running and its ``stdin``/``stdout``
+    must be binary pipes (``subprocess.PIPE``).
+
+    Args:
+        proc: Running subprocess with binary stdin/stdout pipes.
+        data: Dictionary to send as JSON.
+        timeout: Currently unused (reserved for future alarm-style timeout).
+
+    Returns:
+        Response dictionary.
+    """
+    stdio_send(proc.stdin, data)
+    return stdio_recv(proc.stdout)
+
+
+def send_lm_request_stdio(
+    proc: subprocess.Popen,
+    request: LMRequest,
+    timeout: int = 300,
+    depth: int | None = None,
+) -> LMResponse:
+    """Send an LM request over a subprocess's stdin/stdout and return a
+    typed response.
+
+    Drop-in replacement for :func:`send_lm_request` when the handler is
+    attached via pipes instead of a TCP socket.
+
+    Args:
+        proc: Running subprocess whose stdin/stdout carry the length-prefixed
+            JSON protocol.
+        request: LMRequest to send.
+        timeout: Reserved for future use.
+        depth: Optional depth to override ``request.depth``.
+
+    Returns:
+        LMResponse with content or error.
+    """
+    try:
+        if depth is not None:
+            request.depth = depth
+        response_data = stdio_request(proc, request.to_dict(), timeout)
+        return LMResponse.from_dict(response_data)
+    except Exception as e:
+        return LMResponse.error_response(f"Stdio request failed: {e}")
+
+
+def send_lm_request_stdio_batched(
+    proc: subprocess.Popen,
+    prompts: list[str | dict[str, Any]],
+    model: str | None = None,
+    timeout: int = 300,
+    depth: int = 0,
+) -> list[LMResponse]:
+    """Send a batched LM request over a subprocess's stdin/stdout.
+
+    Drop-in replacement for :func:`send_lm_request_batched` when the
+    handler is attached via pipes.
+
+    Args:
+        proc: Running subprocess with binary stdin/stdout pipes.
+        prompts: List of prompts to send.
+        model: Optional model name.
+        timeout: Reserved for future use.
+        depth: Depth for routing (default 0).
+
+    Returns:
+        List of LMResponse objects, one per prompt, in the same order.
+    """
+    try:
+        request = LMRequest(prompts=prompts, model=model, depth=depth)
+        response_data = stdio_request(proc, request.to_dict(), timeout)
+        response = LMResponse.from_dict(response_data)
+
+        if not response.success:
+            return [LMResponse.error_response(response.error)] * len(prompts)
+
+        if response.chat_completions is None:
+            return [LMResponse.error_response("No completions returned")] * len(prompts)
+
+        return [
+            LMResponse.success_response(cc)
+            for cc in response.chat_completions
+        ]
+    except Exception as e:
+        return [LMResponse.error_response(f"Stdio request failed: {e}")] * len(prompts)

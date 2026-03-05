@@ -124,6 +124,57 @@ def _cache_key(video_path: str) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+class _StageCache:
+    """Sidecar cache that persists individual pipeline stage outputs.
+
+    Stages are stored under ``<video_path>.kuavi/<cache_key>/``:
+    - JSON-serialisable stages (``scenes``, ``transcript``, ``segments``,
+      ``captions``) as ``.json`` files.
+    - Numeric arrays (``embeddings``) as ``.npz`` files.
+
+    This is **additive** — a missing sidecar file simply means the stage
+    hasn't been cached yet, and the pipeline falls through to compute it.
+    """
+
+    # Canonical ordered list of stage names.
+    ALL_STAGES: list[str] = [
+        "scenes",
+        "transcript",
+        "segments",
+        "captions",
+        "embeddings",
+    ]
+
+    def __init__(self, video_path: str, cache_key: str) -> None:
+        self.dir = Path(video_path).with_suffix(".kuavi") / cache_key
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    # -- JSON helpers --
+    def has_json(self, stage: str) -> bool:
+        return (self.dir / f"{stage}.json").exists()
+
+    def load_json(self, stage: str) -> Any:
+        return json.loads((self.dir / f"{stage}.json").read_text())
+
+    def save_json(self, stage: str, data: Any) -> None:
+        (self.dir / f"{stage}.json").write_text(json.dumps(data))
+
+    # -- NumPy helpers --
+    def has_npz(self, stage: str) -> bool:
+        return (self.dir / f"{stage}.npz").exists()
+
+    def load_npz(self, stage: str) -> dict[str, np.ndarray]:
+        return dict(np.load(self.dir / f"{stage}.npz"))
+
+    def save_npz(self, stage: str, arrays: dict[str, np.ndarray]) -> None:
+        np.savez(self.dir / f"{stage}.npz", **arrays)
+
+
+def _should_run(stage: str, stages: list[str] | None) -> bool:
+    """Return True if *stage* should be executed given an optional allow-list."""
+    return stages is None or stage in stages
+
+
 def _is_faster_whisper_model(model_name: str) -> bool:
     """Check if model_name refers to a faster-whisper model."""
     if model_name.startswith("faster-whisper/"):
@@ -396,6 +447,8 @@ class VideoIndexer:
         store_feature_maps: bool = False,
         overlapping_vjepa: bool = False,
         semantic_dedup: bool = False,
+        force_reindex: bool = False,
+        stages: list[str] | None = None,
     ) -> VideoIndex:
         """Build a full searchable index from a loaded video.
 
@@ -414,6 +467,11 @@ class VideoIndexer:
             mode: Indexing mode — ``"full"`` (default) runs the captioning
                 pipeline; ``"fast"`` skips segment captioning, using only
                 midpoint frame captions to produce a quickly searchable index.
+            force_reindex: When True, ignore sidecar stage caches and recompute
+                every stage from scratch.
+            stages: Optional allow-list of stage names to run.  Valid names are
+                ``scenes``, ``transcript``, ``segments``, ``captions``,
+                ``embeddings``.  When ``None`` (default) all stages run.
 
         Returns:
             A :class:`VideoIndex` ready for use with the search functions in
@@ -426,19 +484,25 @@ class VideoIndexer:
         except (FileNotFoundError, OSError):
             pass
 
-        if mem_key is not None and mem_key in self._memory_cache:
-            logger.info("Returning in-memory cached index for %s", loaded_video.metadata.path)
-            return self._memory_cache[mem_key]
+        if not force_reindex and stages is None:
+            if mem_key is not None and mem_key in self._memory_cache:
+                logger.info("Returning in-memory cached index for %s", loaded_video.metadata.path)
+                return self._memory_cache[mem_key]
 
         cache_path: Path | None = None
         if mem_key is not None and self._cache_dir is not None:
             cache_path = self._cache_dir / mem_key
-            if (cache_path / "metadata.json").exists():
+            if not force_reindex and stages is None and (cache_path / "metadata.json").exists():
                 logger.info("Loading cached index from %s", cache_path)
                 idx = VideoIndex.load(cache_path)
                 idx.embed_fn = self._encode_query
                 self._memory_cache[mem_key] = idx
                 return idx
+
+        # --- Stage-level sidecar cache ---
+        sc: _StageCache | None = None
+        if mem_key is not None:
+            sc = _StageCache(loaded_video.metadata.path, mem_key)
 
         fps = loaded_video.metadata.extraction_fps
         frames = loaded_video.frames
@@ -451,114 +515,142 @@ class VideoIndexer:
         vjepa_clip_embeddings: np.ndarray | None = None
         vjepa_clip_timestamps: list[float] | None = None
         vjepa_clip_feature_maps: list[np.ndarray] | None = None
-        if self._scene_model_name and overlapping_vjepa:
-            # Overlapping V-JEPA 2 windows with per-frame averaging
-            from kuavi.scene_detection import detect_scenes_perframe
 
-            self._ensure_scene_model()
-            logger.info(
-                "[pipeline] V-JEPA 2: detecting scenes (overlapping windows, stride=%d)",
-                self._scene_stride,
-            )
-            ovl_result = self._encode_frames_overlapping_vjepa(
-                frames,
-                timestamps,
-                clip_size=self._scene_clip_size,
-                stride=self._scene_stride,
-                store_feature_maps=store_feature_maps,
-            )
-            if store_feature_maps and len(ovl_result) == 3:
-                per_frame_embs, _, ovl_feature_maps = ovl_result
-                # Feature maps are per-window; compute window midpoint timestamps
-                # so downstream segment aggregation can index correctly.
-                ovl_window_ts: list[float] = []
-                for start in range(0, len(frames), self._scene_stride):
-                    end = min(start + self._scene_clip_size, len(frames))
-                    if end - start < 2:
-                        continue
-                    mid = min(start + (end - start) // 2, len(frames) - 1)
-                    ovl_window_ts.append(timestamps[mid])
-                # Store window-level feature maps with their own timestamps;
-                # these will be used for per-segment aggregation after scene
-                # detection (overrides vjepa_clip_feature_maps).
-                vjepa_clip_feature_maps = ovl_feature_maps
-                # We need a separate timestamps array for feature maps that
-                # aligns with vjepa_clip_feature_maps (per-window, not per-frame).
-                # Store it so the aggregation code below can use it.
-                _fmap_timestamps = ovl_window_ts
-            else:
-                per_frame_embs = ovl_result[0]
-                _fmap_timestamps = None
+        _scenes_cached = False
+        if (
+            not force_reindex
+            and _should_run("scenes", stages)
+            and sc is not None
+            and sc.has_json("scenes")
+        ):
+            logger.info("[stage-cache] loading scenes from sidecar")
+            _sc_data = sc.load_json("scenes")
+            scenes = [tuple(s) for s in _sc_data["scenes"]]
+            scene_boundaries = _sc_data["scene_boundaries"]
+            hierarchy_result = _sc_data.get("hierarchy_result")
+            _scenes_cached = True
+        elif _should_run("scenes", stages):
+            if self._scene_model_name and overlapping_vjepa:
+                # Overlapping V-JEPA 2 windows with per-frame averaging
+                from kuavi.scene_detection import detect_scenes_perframe
 
-            if self._hierarchical:
-                levels = []
-                for thresh, min_dur in zip((0.10, 0.20, 0.35), (0.5, 2.0, 4.0), strict=False):
-                    scenes_level = detect_scenes_perframe(
-                        per_frame_embs, timestamps, threshold=thresh, min_duration=min_dur
-                    )
-                    levels.append(scenes_level)
-                hierarchy_result = {"levels": levels}
-                scenes = hierarchy_result["levels"][0]
-            else:
-                scenes = detect_scenes_perframe(per_frame_embs, timestamps, threshold=0.20)
-
-            # Store per-frame embeddings as temporal embeddings (segment-averaged later)
-            vjepa_clip_embeddings = per_frame_embs
-            vjepa_clip_timestamps = timestamps
-            logger.info("[pipeline] V-JEPA 2 (overlapping): %d scenes detected", len(scenes))
-        elif self._scene_model_name:
-            # V-JEPA 2 clip-level scene detection (non-overlapping, default)
-            self._ensure_scene_model()
-            logger.info("[pipeline] V-JEPA 2: detecting scenes")
-            clips, clip_timestamps = self._group_frames_into_clips(
-                frames, timestamps, self._scene_clip_size
-            )
-
-            # Compute clip embeddings once and cache for reuse
-            if store_feature_maps:
-                vjepa_clip_embeddings, vjepa_clip_feature_maps = self._encode_clips_vjepa(
-                    clips, return_full=True
+                self._ensure_scene_model()
+                logger.info(
+                    "[pipeline] V-JEPA 2: detecting scenes (overlapping windows, stride=%d)",
+                    self._scene_stride,
                 )
-            else:
-                vjepa_clip_embeddings = self._encode_clips_vjepa(clips)
-            vjepa_clip_timestamps = clip_timestamps
-
-            def _vjepa_embed_fn(_frames):
-                return vjepa_clip_embeddings
-
-            clip_representatives = [c[len(c) // 2] for c in clips]
-
-            if self._hierarchical:
-                hierarchy_result = detect_scenes_hierarchical(
-                    clip_representatives,
-                    clip_timestamps,
-                    embed_fn=_vjepa_embed_fn,
-                )
-                scenes = hierarchy_result["levels"][0]
-            else:
-                scenes = detect_scenes(
-                    clip_representatives, clip_timestamps, embed_fn=_vjepa_embed_fn
-                )
-            logger.info("[pipeline] V-JEPA 2: %d scenes detected", len(scenes))
-        else:
-            # Existing SigLIP2 path
-            self._ensure_model()
-
-            def _scene_embed_fn(f):
-                return self._encode_frames(
-                    f, temporal_window=self._temporal_window, stride=self._embedding_stride
-                )
-
-            if self._hierarchical:
-                hierarchy_result = detect_scenes_hierarchical(
+                ovl_result = self._encode_frames_overlapping_vjepa(
                     frames,
                     timestamps,
-                    embed_fn=_scene_embed_fn,
+                    clip_size=self._scene_clip_size,
+                    stride=self._scene_stride,
+                    store_feature_maps=store_feature_maps,
                 )
-                scenes = hierarchy_result["levels"][0]
+                if store_feature_maps and len(ovl_result) == 3:
+                    per_frame_embs, _, ovl_feature_maps = ovl_result
+                    # Feature maps are per-window; compute window midpoint timestamps
+                    # so downstream segment aggregation can index correctly.
+                    ovl_window_ts: list[float] = []
+                    for start in range(0, len(frames), self._scene_stride):
+                        end = min(start + self._scene_clip_size, len(frames))
+                        if end - start < 2:
+                            continue
+                        mid = min(start + (end - start) // 2, len(frames) - 1)
+                        ovl_window_ts.append(timestamps[mid])
+                    # Store window-level feature maps with their own timestamps;
+                    # these will be used for per-segment aggregation after scene
+                    # detection (overrides vjepa_clip_feature_maps).
+                    vjepa_clip_feature_maps = ovl_feature_maps
+                    # We need a separate timestamps array for feature maps that
+                    # aligns with vjepa_clip_feature_maps (per-window, not per-frame).
+                    # Store it so the aggregation code below can use it.
+                    _fmap_timestamps = ovl_window_ts
+                else:
+                    per_frame_embs = ovl_result[0]
+                    _fmap_timestamps = None
+
+                if self._hierarchical:
+                    levels = []
+                    for thresh, min_dur in zip((0.10, 0.20, 0.35), (0.5, 2.0, 4.0), strict=False):
+                        scenes_level = detect_scenes_perframe(
+                            per_frame_embs, timestamps, threshold=thresh, min_duration=min_dur
+                        )
+                        levels.append(scenes_level)
+                    hierarchy_result = {"levels": levels}
+                    scenes = hierarchy_result["levels"][0]
+                else:
+                    scenes = detect_scenes_perframe(per_frame_embs, timestamps, threshold=0.20)
+
+                # Store per-frame embeddings as temporal embeddings (segment-averaged later)
+                vjepa_clip_embeddings = per_frame_embs
+                vjepa_clip_timestamps = timestamps
+                logger.info("[pipeline] V-JEPA 2 (overlapping): %d scenes detected", len(scenes))
+            elif self._scene_model_name:
+                # V-JEPA 2 clip-level scene detection (non-overlapping, default)
+                self._ensure_scene_model()
+                logger.info("[pipeline] V-JEPA 2: detecting scenes")
+                clips, clip_timestamps = self._group_frames_into_clips(
+                    frames, timestamps, self._scene_clip_size
+                )
+
+                # Compute clip embeddings once and cache for reuse
+                if store_feature_maps:
+                    vjepa_clip_embeddings, vjepa_clip_feature_maps = self._encode_clips_vjepa(
+                        clips, return_full=True
+                    )
+                else:
+                    vjepa_clip_embeddings = self._encode_clips_vjepa(clips)
+                vjepa_clip_timestamps = clip_timestamps
+
+                def _vjepa_embed_fn(_frames):
+                    return vjepa_clip_embeddings
+
+                clip_representatives = [c[len(c) // 2] for c in clips]
+
+                if self._hierarchical:
+                    hierarchy_result = detect_scenes_hierarchical(
+                        clip_representatives,
+                        clip_timestamps,
+                        embed_fn=_vjepa_embed_fn,
+                    )
+                    scenes = hierarchy_result["levels"][0]
+                else:
+                    scenes = detect_scenes(
+                        clip_representatives, clip_timestamps, embed_fn=_vjepa_embed_fn
+                    )
+                logger.info("[pipeline] V-JEPA 2: %d scenes detected", len(scenes))
             else:
-                scenes = detect_scenes(frames, timestamps, embed_fn=_scene_embed_fn)
-        scene_boundaries = [start for start, _end in scenes]
+                # Existing SigLIP2 path
+                self._ensure_model()
+
+                def _scene_embed_fn(f):
+                    return self._encode_frames(
+                        f, temporal_window=self._temporal_window, stride=self._embedding_stride
+                    )
+
+                if self._hierarchical:
+                    hierarchy_result = detect_scenes_hierarchical(
+                        frames,
+                        timestamps,
+                        embed_fn=_scene_embed_fn,
+                    )
+                    scenes = hierarchy_result["levels"][0]
+                else:
+                    scenes = detect_scenes(frames, timestamps, embed_fn=_scene_embed_fn)
+            scene_boundaries = [start for start, _end in scenes]
+
+            # Save scenes to sidecar cache
+            if sc is not None:
+                sc.save_json("scenes", {
+                    "scenes": [list(s) for s in scenes],
+                    "scene_boundaries": scene_boundaries,
+                    "hierarchy_result": hierarchy_result,
+                })
+                logger.info("[stage-cache] saved scenes to sidecar")
+        else:
+            # Stage skipped — initialise with empty defaults
+            scenes = []
+            scene_boundaries = []
 
         # 3. Build segment dicts — prefer existing segments, fall back to scenes
         if loaded_video.segments:
@@ -570,325 +662,411 @@ class VideoIndexer:
         #    so ASR context can be injected into caption prompts.
         #    Free V-JEPA 2 from GPU first — it stays loaded after scene detection
         #    and leaves too little VRAM for the ASR model on 11-12 GiB GPUs.
-        self._free_scene_model()
-        transcript = self._get_transcript(
-            loaded_video.metadata.path,
-            asr_model=asr_model,
-            transcript_path=transcript_path,
-        )
+        if (
+            not force_reindex
+            and _should_run("transcript", stages)
+            and sc is not None
+            and sc.has_json("transcript")
+        ):
+            logger.info("[stage-cache] loading transcript from sidecar")
+            transcript = sc.load_json("transcript")
+        elif _should_run("transcript", stages):
+            self._free_scene_model()
+            transcript = self._get_transcript(
+                loaded_video.metadata.path,
+                asr_model=asr_model,
+                transcript_path=transcript_path,
+            )
+            if sc is not None:
+                sc.save_json("transcript", transcript)
+                logger.info("[stage-cache] saved transcript to sidecar")
+        else:
+            self._free_scene_model()
+            transcript = []
 
         # 4b. Pre-captioning dedup: identify visually similar segments
         #     and only caption representatives, propagating results afterward.
-        self._pre_caption_dedup(segment_infos)
+        if (
+            not force_reindex
+            and _should_run("captions", stages)
+            and sc is not None
+            and sc.has_json("captions")
+        ):
+            logger.info("[stage-cache] loading captions from sidecar")
+            segment_infos = sc.load_json("captions")
+        elif _should_run("captions", stages):
+            self._pre_caption_dedup(segment_infos)
 
-        # 4c. Selective decoding: 3-tier (dead / static-informative / dynamic)
-        self._selective_decode(
-            segment_infos,
-            frames,
-            timestamps,
-            temporal_clip_embeddings=vjepa_clip_embeddings,
-            temporal_clip_timestamps=vjepa_clip_timestamps,
-        )
+            # 4c. Selective decoding: 3-tier (dead / static-informative / dynamic)
+            self._selective_decode(
+                segment_infos,
+                frames,
+                timestamps,
+                temporal_clip_embeddings=vjepa_clip_embeddings,
+                temporal_clip_timestamps=vjepa_clip_timestamps,
+            )
 
-        if mode == "fast":
-            # Fast mode: use midpoint frame captions only — skip Tree-of-Captions and Self-Refine.
-            if frame_caption_fn is not None:
-                logger.info("[pipeline] captioning: starting fast-mode frame captioning")
-                logger.info("[pipeline] captioning: starting fast-mode for %d segments", len(segment_infos))
-            self._action_first_pass(segment_infos, frame_caption_fn)
+            if mode == "fast":
+                # Fast mode: use midpoint frame captions only — skip Tree-of-Captions and Self-Refine.
+                if frame_caption_fn is not None:
+                    logger.info("[pipeline] captioning: starting fast-mode frame captioning")
+                    logger.info("[pipeline] captioning: starting fast-mode for %d segments", len(segment_infos))
+                self._action_first_pass(segment_infos, frame_caption_fn)
 
-            # 5c (fast). Propagate captions from representatives to skipped duplicates
-            for seg in segment_infos:
-                src_idx = seg.get("_caption_source")
-                if src_idx is not None:
-                    src = segment_infos[src_idx]
-                    for key in ("caption", "annotation", "frame_caption", "is_non_action"):
-                        if key in src:
-                            seg[key] = src[key]
+                # 5c (fast). Propagate captions from representatives to skipped duplicates
+                for seg in segment_infos:
+                    src_idx = seg.get("_caption_source")
+                    if src_idx is not None:
+                        src = segment_infos[src_idx]
+                        for key in ("caption", "annotation", "frame_caption", "is_non_action"):
+                            if key in src:
+                                seg[key] = src[key]
 
-            captioned_count = sum(1 for s in segment_infos if s.get("caption") or s.get("frame_caption"))
-            if frame_caption_fn is not None:
+                captioned_count = sum(1 for s in segment_infos if s.get("caption") or s.get("frame_caption"))
+                if frame_caption_fn is not None:
+                    logger.info("[pipeline] captioning: %d segments captioned", captioned_count)
+                else:
+                    logger.info("[pipeline] captioning: skipped (fast mode, no caption model)")
+
+                # Clean up temporary dedup keys
+                for seg in segment_infos:
+                    seg.pop("_skip_caption", None)
+                    seg.pop("_caption_source", None)
+            else:
+                # Full mode: Tree-of-Captions + Self-Refine (original behavior)
+
+                # 5. Caption each segment (if a caption function was provided)
+                logger.info("[pipeline] captioning: starting segment captioning")
+                if caption_fn is not None or frame_caption_fn is not None:
+                    logger.info("[pipeline] captioning: starting for %d segments", len(segment_infos))
+                    # Prepare all segments first (skip near-duplicates)
+                    caption_tasks = []
+                    for seg in segment_infos:
+                        seg_frames = seg.pop("_frames")
+                        if seg.get("_skip_caption"):
+                            continue
+                        # ASR context injection: prepend transcript text for this segment
+                        transcript_text = self._transcript_for_range(
+                            transcript,
+                            seg["start_time"],
+                            seg["end_time"],
+                        )
+                        if transcript_text:
+                            seg_frames = [f"[transcript] {transcript_text}"] + seg_frames
+                        caption_tasks.append((seg, seg_frames))
+
+                    # 5b. Segment-level captioning
+                    if caption_fn is not None:
+
+                        def _caption_segment(args):
+                            seg, seg_frames = args
+                            # Filter visually dissimilar edge frames
+                            if self._model is not None:
+                                real_frames = [f for f in seg_frames if not isinstance(f, str)]
+                                if len(real_frames) >= 5:
+                                    filtered_real = self._filter_edge_frames(real_frames, threshold=0.5)
+                                    str_tokens = [f for f in seg_frames if isinstance(f, str)]
+                                    seg_frames = str_tokens + filtered_real
+                            # Resize real frames for captioning if caption_resize is set
+                            if self._caption_resize:
+                                import cv2
+
+                                resized = []
+                                for f in seg_frames:
+                                    if isinstance(f, str):
+                                        resized.append(f)
+                                    else:
+                                        resized.append(cv2.resize(f, self._caption_resize))
+                                seg_frames = resized
+                            result = caption_fn(seg_frames)
+                            # Backward compat: wrap plain strings into structured annotation
+                            if isinstance(result, str):
+                                annotation = {
+                                    "summary": {"brief": result, "detailed": result},
+                                    "action": {"brief": "", "detailed": "", "actor": None},
+                                }
+                            else:
+                                annotation = result
+                            return seg, annotation
+
+                        with ThreadPoolExecutor(max_workers=8) as pool:
+                            futures = [pool.submit(_caption_segment, task) for task in caption_tasks]
+                            for future in as_completed(futures):
+                                try:
+                                    seg, annotation = future.result()
+                                    seg["annotation"] = annotation
+                                    seg["caption"] = annotation.get("summary", {}).get("brief", "")
+                                    action_brief = (
+                                        annotation.get("action", {}).get("brief", "").strip()
+                                    )
+                                    if not action_brief or action_brief.upper() == "N/A":
+                                        seg["is_non_action"] = True
+                                except Exception:
+                                    logger.warning("Caption future raised an exception", exc_info=True)
+                else:
+                    for seg in segment_infos:
+                        seg.pop("_frames", None)
+
+                captioned = sum(1 for s in segment_infos if s.get("caption"))
+                logger.info("[pipeline] captioning: %d segments captioned", captioned)
+
+                # 5c. Propagate captions from representatives to skipped duplicates
+                for seg in segment_infos:
+                    src_idx = seg.get("_caption_source")
+                    if src_idx is not None:
+                        src = segment_infos[src_idx]
+                        for key in ("caption", "annotation", "frame_caption", "is_non_action"):
+                            if key in src:
+                                seg[key] = src[key]
+
+                # Clean up temporary dedup keys
+                for seg in segment_infos:
+                    seg.pop("_skip_caption", None)
+                    seg.pop("_caption_source", None)
+
+                captioned_count = sum(1 for s in segment_infos if s.get("caption"))
                 logger.info("[pipeline] captioning: %d segments captioned", captioned_count)
-            else:
-                logger.info("[pipeline] captioning: skipped (fast mode, no caption model)")
 
-            # Clean up temporary dedup keys
-            for seg in segment_infos:
-                seg.pop("_skip_caption", None)
-                seg.pop("_caption_source", None)
-        else:
-            # Full mode: Tree-of-Captions + Self-Refine (original behavior)
+                # 6. Self-Refine annotations
+                self._refine_annotations(
+                    segment_infos,
+                    transcript,
+                    refine_fn,
+                    video_metadata=loaded_video.metadata,
+                    rounds=refine_rounds,
+                )
 
-            # 5. Caption each segment (if a caption function was provided)
-            logger.info("[pipeline] captioning: starting segment captioning")
-            if caption_fn is not None or frame_caption_fn is not None:
-                logger.info("[pipeline] captioning: starting for %d segments", len(segment_infos))
-                # Prepare all segments first (skip near-duplicates)
-                caption_tasks = []
-                for seg in segment_infos:
-                    seg_frames = seg.pop("_frames")
-                    if seg.get("_skip_caption"):
-                        continue
-                    # ASR context injection: prepend transcript text for this segment
-                    transcript_text = self._transcript_for_range(
-                        transcript,
-                        seg["start_time"],
-                        seg["end_time"],
-                    )
-                    if transcript_text:
-                        seg_frames = [f"[transcript] {transcript_text}"] + seg_frames
-                    caption_tasks.append((seg, seg_frames))
+                # 6b. Mark near-duplicate adjacent segments before embedding
+                self._deduplicate_segments(segment_infos)
 
-                # 5b. Segment-level captioning
-                if caption_fn is not None:
+                # 6c. Global dedup: find duplicates anywhere (non-adjacent)
+                self._global_deduplicate(segment_infos)
 
-                    def _caption_segment(args):
-                        seg, seg_frames = args
-                        # Filter visually dissimilar edge frames
-                        if self._model is not None:
-                            real_frames = [f for f in seg_frames if not isinstance(f, str)]
-                            if len(real_frames) >= 5:
-                                filtered_real = self._filter_edge_frames(real_frames, threshold=0.5)
-                                str_tokens = [f for f in seg_frames if isinstance(f, str)]
-                                seg_frames = str_tokens + filtered_real
-                        # Resize real frames for captioning if caption_resize is set
-                        if self._caption_resize:
-                            import cv2
+                # 6.5 Score annotation quality
+                self._score_annotations(
+                    segment_infos,
+                    loaded_video_frames=frames,
+                    timestamps=timestamps,
+                )
 
-                            resized = []
-                            for f in seg_frames:
-                                if isinstance(f, str):
-                                    resized.append(f)
-                                else:
-                                    resized.append(cv2.resize(f, self._caption_resize))
-                            seg_frames = resized
-                        result = caption_fn(seg_frames)
-                        # Backward compat: wrap plain strings into structured annotation
-                        if isinstance(result, str):
-                            annotation = {
-                                "summary": {"brief": result, "detailed": result},
-                                "action": {"brief": "", "detailed": "", "actor": None},
-                            }
-                        else:
-                            annotation = result
-                        return seg, annotation
-
-                    with ThreadPoolExecutor(max_workers=8) as pool:
-                        futures = [pool.submit(_caption_segment, task) for task in caption_tasks]
-                        for future in as_completed(futures):
-                            try:
-                                seg, annotation = future.result()
-                                seg["annotation"] = annotation
-                                seg["caption"] = annotation.get("summary", {}).get("brief", "")
-                                action_brief = (
-                                    annotation.get("action", {}).get("brief", "").strip()
-                                )
-                                if not action_brief or action_brief.upper() == "N/A":
-                                    seg["is_non_action"] = True
-                            except Exception:
-                                logger.warning("Caption future raised an exception", exc_info=True)
-            else:
-                for seg in segment_infos:
-                    seg.pop("_frames", None)
-
-            captioned = sum(1 for s in segment_infos if s.get("caption"))
-            logger.info("[pipeline] captioning: %d segments captioned", captioned)
-
-            # 5c. Propagate captions from representatives to skipped duplicates
-            for seg in segment_infos:
-                src_idx = seg.get("_caption_source")
-                if src_idx is not None:
-                    src = segment_infos[src_idx]
-                    for key in ("caption", "annotation", "frame_caption", "is_non_action"):
-                        if key in src:
-                            seg[key] = src[key]
-
-            # Clean up temporary dedup keys
-            for seg in segment_infos:
-                seg.pop("_skip_caption", None)
-                seg.pop("_caption_source", None)
-
-            captioned_count = sum(1 for s in segment_infos if s.get("caption"))
-            logger.info("[pipeline] captioning: %d segments captioned", captioned_count)
-
-            # 6. Self-Refine annotations
-            self._refine_annotations(
-                segment_infos,
-                transcript,
-                refine_fn,
-                video_metadata=loaded_video.metadata,
-                rounds=refine_rounds,
-            )
-
-            # 6b. Mark near-duplicate adjacent segments before embedding
-            self._deduplicate_segments(segment_infos)
-
-            # 6c. Global dedup: find duplicates anywhere (non-adjacent)
-            self._global_deduplicate(segment_infos)
-
-            # 6.5 Score annotation quality
-            self._score_annotations(
-                segment_infos,
-                loaded_video_frames=frames,
-                timestamps=timestamps,
-            )
+            # Save captioned segments to sidecar cache
+            if sc is not None:
+                sc.save_json("captions", segment_infos)
+                logger.info("[stage-cache] saved captions to sidecar")
 
         # 7. Embed captions
-        if self._text_embedding_model_name is not None:
-            logger.info("[pipeline] Gemma: embedding captions for %d segments", len(segment_infos))
-        embeddings, action_embeddings = self._embed_captions(segment_infos)
+        if (
+            not force_reindex
+            and _should_run("embeddings", stages)
+            and sc is not None
+            and sc.has_npz("embeddings")
+        ):
+            logger.info("[stage-cache] loading embeddings from sidecar")
+            _emb_data = sc.load_npz("embeddings")
+            embeddings = _emb_data.get("embeddings")
+            action_embeddings = _emb_data.get("action_embeddings")
+            frame_embeddings = _emb_data.get("frame_embeddings")
+            temporal_embeddings = _emb_data.get("temporal_embeddings")
+            temporal_feature_maps = _emb_data.get("temporal_feature_maps")
+            _emb_meta = sc.load_json("embeddings_meta") if sc.has_json("embeddings_meta") else {}
+            quality = _emb_meta.get("quality", {})
+            segment_hierarchy = _emb_meta.get("segment_hierarchy", [])
+            hierarchy_embeddings_raw: list[np.ndarray | None] = []
+            lvl = 0
+            while f"hierarchy_emb_L{lvl}" in _emb_data:
+                hierarchy_embeddings_raw.append(_emb_data[f"hierarchy_emb_L{lvl}"])
+                lvl += 1
+            hierarchy_embeddings = hierarchy_embeddings_raw
+        elif _should_run("embeddings", stages):
+            if self._text_embedding_model_name is not None:
+                logger.info("[pipeline] Gemma: embedding captions for %d segments", len(segment_infos))
+            embeddings, action_embeddings = self._embed_captions(segment_infos)
 
-        # 7b. Smooth embeddings to reduce noise across adjacent segments
-        if embeddings is not None:
-            embeddings = self._smooth_embeddings(embeddings, window=3)
-        if action_embeddings is not None:
-            action_embeddings = self._smooth_embeddings(action_embeddings, window=3)
+            # 7b. Smooth embeddings to reduce noise across adjacent segments
+            if embeddings is not None:
+                embeddings = self._smooth_embeddings(embeddings, window=3)
+            if action_embeddings is not None:
+                action_embeddings = self._smooth_embeddings(action_embeddings, window=3)
 
-        quality = self._check_embedding_quality(embeddings, label="caption")
-        if self._text_embedding_model_name is not None:
-            logger.info("[pipeline] Gemma: caption embeddings complete")
+            quality = self._check_embedding_quality(embeddings, label="caption")
+            if self._text_embedding_model_name is not None:
+                logger.info("[pipeline] Gemma: caption embeddings complete")
 
-        # 7b2. Semantic deduplication via k-means clustering (optional)
-        if semantic_dedup:
-            self._semantic_deduplicate(
-                segment_infos,
-                embeddings,
-                action_embeddings=action_embeddings,
-            )
+            # 7b2. Semantic deduplication via k-means clustering (optional)
+            if semantic_dedup:
+                self._semantic_deduplicate(
+                    segment_infos,
+                    embeddings,
+                    action_embeddings=action_embeddings,
+                )
 
-        # 7c. Embed representative frame per segment for visual search
-        rep_frames = []
-        for seg in segment_infos:
-            seg_frames_list = [
-                f for f, t in zip(frames, timestamps, strict=False)
-                if seg["start_time"] <= t <= seg["end_time"]
-            ]
-            if seg_frames_list:
-                rep_frames.append(seg_frames_list[len(seg_frames_list) // 2])
-            else:
-                rep_frames.append(frames[0])  # fallback
-
-        logger.info("[pipeline] SigLIP2: building frame embeddings for %d segments", len(rep_frames))
-        self._ensure_model()
-        frame_embeddings = self._encode_frames(rep_frames)
-        frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
-        self._check_embedding_quality(frame_embeddings, label="frame")
-        logger.info("[pipeline] SigLIP2: %d frame embeddings built", len(rep_frames))
-
-        # 7d. Aggregate V-JEPA 2 temporal embeddings per segment
-        temporal_embeddings: np.ndarray | None = None
-        temporal_feature_maps: np.ndarray | None = None
-        # Feature maps may use different timestamps than clip embeddings
-        # (e.g. overlapping path: embeddings are per-frame, feature maps per-window).
-        fmap_ts = locals().get("_fmap_timestamps") or vjepa_clip_timestamps
-        if vjepa_clip_embeddings is not None and vjepa_clip_timestamps is not None:
-            temporal_per_seg: list[np.ndarray] = []
-            feature_maps_per_seg: list[np.ndarray] = []
+            # 7c. Embed representative frame per segment for visual search
+            rep_frames = []
             for seg in segment_infos:
-                clip_indices = [
-                    i
-                    for i, ct in enumerate(vjepa_clip_timestamps)
-                    if seg["start_time"] <= ct <= seg["end_time"]
+                seg_frames_list = [
+                    f for f, t in zip(frames, timestamps, strict=False)
+                    if seg["start_time"] <= t <= seg["end_time"]
                 ]
-                if clip_indices:
-                    seg_emb = vjepa_clip_embeddings[clip_indices].mean(axis=0)
-                    norm = np.linalg.norm(seg_emb)
-                    if norm > 1e-10:
-                        seg_emb = seg_emb / norm
-                    temporal_per_seg.append(seg_emb)
-                    if vjepa_clip_feature_maps is not None:
-                        # Use fmap_ts (may differ from vjepa_clip_timestamps)
-                        fmap_indices = [
-                            i
-                            for i, ct in enumerate(fmap_ts)
-                            if seg["start_time"] <= ct <= seg["end_time"]
-                        ]
-                        if fmap_indices:
-                            maps = [vjepa_clip_feature_maps[i] for i in fmap_indices]
-                            shapes = {m.shape for m in maps}
-                            if len(shapes) == 1:
-                                # All same shape — average across clips
-                                feature_maps_per_seg.append(
-                                    np.stack(maps).mean(axis=0)
-                                )
+                if seg_frames_list:
+                    rep_frames.append(seg_frames_list[len(seg_frames_list) // 2])
+                else:
+                    rep_frames.append(frames[0])  # fallback
+
+            logger.info("[pipeline] SigLIP2: building frame embeddings for %d segments", len(rep_frames))
+            self._ensure_model()
+            frame_embeddings = self._encode_frames(rep_frames)
+            frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
+            self._check_embedding_quality(frame_embeddings, label="frame")
+            logger.info("[pipeline] SigLIP2: %d frame embeddings built", len(rep_frames))
+
+            # 7d. Aggregate V-JEPA 2 temporal embeddings per segment
+            temporal_embeddings: np.ndarray | None = None
+            temporal_feature_maps: np.ndarray | None = None
+            # Feature maps may use different timestamps than clip embeddings
+            # (e.g. overlapping path: embeddings are per-frame, feature maps per-window).
+            fmap_ts = locals().get("_fmap_timestamps") or vjepa_clip_timestamps
+            if vjepa_clip_embeddings is not None and vjepa_clip_timestamps is not None:
+                temporal_per_seg: list[np.ndarray] = []
+                feature_maps_per_seg: list[np.ndarray] = []
+                for seg in segment_infos:
+                    clip_indices = [
+                        i
+                        for i, ct in enumerate(vjepa_clip_timestamps)
+                        if seg["start_time"] <= ct <= seg["end_time"]
+                    ]
+                    if clip_indices:
+                        seg_emb = vjepa_clip_embeddings[clip_indices].mean(axis=0)
+                        norm = np.linalg.norm(seg_emb)
+                        if norm > 1e-10:
+                            seg_emb = seg_emb / norm
+                        temporal_per_seg.append(seg_emb)
+                        if vjepa_clip_feature_maps is not None:
+                            # Use fmap_ts (may differ from vjepa_clip_timestamps)
+                            fmap_indices = [
+                                i
+                                for i, ct in enumerate(fmap_ts)
+                                if seg["start_time"] <= ct <= seg["end_time"]
+                            ]
+                            if fmap_indices:
+                                maps = [vjepa_clip_feature_maps[i] for i in fmap_indices]
+                                shapes = {m.shape for m in maps}
+                                if len(shapes) == 1:
+                                    # All same shape — average across clips
+                                    feature_maps_per_seg.append(
+                                        np.stack(maps).mean(axis=0)
+                                    )
+                                else:
+                                    # Variable shapes (different clip lengths) —
+                                    # pick the clip closest to segment midpoint
+                                    seg_mid = (seg["start_time"] + seg["end_time"]) / 2
+                                    best_idx = min(
+                                        fmap_indices,
+                                        key=lambda i: abs(fmap_ts[i] - seg_mid),
+                                    )
+                                    feature_maps_per_seg.append(
+                                        vjepa_clip_feature_maps[best_idx]
+                                    )
                             else:
-                                # Variable shapes (different clip lengths) —
-                                # pick the clip closest to segment midpoint
-                                seg_mid = (seg["start_time"] + seg["end_time"]) / 2
-                                best_idx = min(
-                                    fmap_indices,
-                                    key=lambda i: abs(fmap_ts[i] - seg_mid),
-                                )
-                                feature_maps_per_seg.append(
-                                    vjepa_clip_feature_maps[best_idx]
-                                )
-                        else:
+                                num_patches = vjepa_clip_feature_maps[0].shape[0]
+                                patch_dim = vjepa_clip_feature_maps[0].shape[1]
+                                feature_maps_per_seg.append(np.zeros((num_patches, patch_dim)))
+                    else:
+                        temporal_per_seg.append(np.zeros(vjepa_clip_embeddings.shape[1]))
+                        if vjepa_clip_feature_maps is not None:
                             num_patches = vjepa_clip_feature_maps[0].shape[0]
                             patch_dim = vjepa_clip_feature_maps[0].shape[1]
                             feature_maps_per_seg.append(np.zeros((num_patches, patch_dim)))
-                else:
-                    temporal_per_seg.append(np.zeros(vjepa_clip_embeddings.shape[1]))
-                    if vjepa_clip_feature_maps is not None:
-                        num_patches = vjepa_clip_feature_maps[0].shape[0]
-                        patch_dim = vjepa_clip_feature_maps[0].shape[1]
-                        feature_maps_per_seg.append(np.zeros((num_patches, patch_dim)))
-            temporal_embeddings = np.stack(temporal_per_seg)
-            temporal_embeddings = self._smooth_embeddings(temporal_embeddings, window=3)
-            self._check_embedding_quality(temporal_embeddings, label="temporal")
-            if vjepa_clip_feature_maps is not None and feature_maps_per_seg:
-                shapes = {m.shape for m in feature_maps_per_seg}
-                if len(shapes) == 1:
-                    temporal_feature_maps = np.stack(feature_maps_per_seg)
-                else:
-                    # Variable patch counts across segments — store as object array
-                    temporal_feature_maps = np.empty(
-                        len(feature_maps_per_seg), dtype=object
-                    )
-                    for i, m in enumerate(feature_maps_per_seg):
-                        temporal_feature_maps[i] = m
+                temporal_embeddings = np.stack(temporal_per_seg)
+                temporal_embeddings = self._smooth_embeddings(temporal_embeddings, window=3)
+                self._check_embedding_quality(temporal_embeddings, label="temporal")
+                if vjepa_clip_feature_maps is not None and feature_maps_per_seg:
+                    shapes = {m.shape for m in feature_maps_per_seg}
+                    if len(shapes) == 1:
+                        temporal_feature_maps = np.stack(feature_maps_per_seg)
+                    else:
+                        # Variable patch counts across segments — store as object array
+                        temporal_feature_maps = np.empty(
+                            len(feature_maps_per_seg), dtype=object
+                        )
+                        for i, m in enumerate(feature_maps_per_seg):
+                            temporal_feature_maps[i] = m
 
-        # 8. Build hierarchy levels (when hierarchical mode is enabled)
-        segment_hierarchy: list[list[dict]] = []
-        hierarchy_embeddings: list[np.ndarray | None] = []
-        if hierarchy_result is not None and len(hierarchy_result["levels"]) > 1:
-            for lvl_idx in range(1, len(hierarchy_result["levels"])):
-                lvl_scenes = hierarchy_result["levels"][lvl_idx]
-                lvl_segments: list[dict] = []
-                for h_start, h_end in lvl_scenes:
-                    # Find child segments from level 0 that fall within this range
-                    child_captions = [
-                        seg.get("caption", "")
-                        for seg in segment_infos
-                        if seg["start_time"] >= h_start and seg["end_time"] <= h_end
-                    ]
-                    merged_caption = " ".join(c for c in child_captions if c)
-                    lvl_segments.append(
-                        {
-                            "start_time": h_start,
-                            "end_time": h_end,
-                            "caption": merged_caption,
-                        }
-                    )
-                segment_hierarchy.append(lvl_segments)
+            # 8. Build hierarchy levels (when hierarchical mode is enabled)
+            segment_hierarchy: list[list[dict]] = []
+            hierarchy_embeddings: list[np.ndarray | None] = []
+            if hierarchy_result is not None and len(hierarchy_result["levels"]) > 1:
+                for lvl_idx in range(1, len(hierarchy_result["levels"])):
+                    lvl_scenes = hierarchy_result["levels"][lvl_idx]
+                    lvl_segments: list[dict] = []
+                    for h_start, h_end in lvl_scenes:
+                        # Find child segments from level 0 that fall within this range
+                        child_captions = [
+                            seg.get("caption", "")
+                            for seg in segment_infos
+                            if seg["start_time"] >= h_start and seg["end_time"] <= h_end
+                        ]
+                        merged_caption = " ".join(c for c in child_captions if c)
+                        lvl_segments.append(
+                            {
+                                "start_time": h_start,
+                                "end_time": h_end,
+                                "caption": merged_caption,
+                            }
+                        )
+                    segment_hierarchy.append(lvl_segments)
 
-                # Embed the merged captions for this level
-                lvl_captions = [s["caption"] for s in lvl_segments]
-                if any(lvl_captions):
-                    lvl_emb = self._embed_captions(lvl_segments)[0]  # summary only
-                    if lvl_emb is not None:
-                        lvl_emb = self._smooth_embeddings(lvl_emb, window=3)
-                    hierarchy_embeddings.append(lvl_emb)
-                else:
-                    hierarchy_embeddings.append(None)
+                    # Embed the merged captions for this level
+                    lvl_captions = [s["caption"] for s in lvl_segments]
+                    if any(lvl_captions):
+                        lvl_emb = self._embed_captions(lvl_segments)[0]  # summary only
+                        if lvl_emb is not None:
+                            lvl_emb = self._smooth_embeddings(lvl_emb, window=3)
+                        hierarchy_embeddings.append(lvl_emb)
+                    else:
+                        hierarchy_embeddings.append(None)
 
-        # Always add a fixed-duration coarse level for multi-scale search
-        if embeddings is not None:
-            coarse_segs, coarse_embs = self._build_coarse_level(
-                segment_infos, embeddings, target_duration=30.0
-            )
-            if coarse_segs:
-                segment_hierarchy.append(coarse_segs)
-                hierarchy_embeddings.append(coarse_embs)
+            # Always add a fixed-duration coarse level for multi-scale search
+            if embeddings is not None:
+                coarse_segs, coarse_embs = self._build_coarse_level(
+                    segment_infos, embeddings, target_duration=30.0
+                )
+                if coarse_segs:
+                    segment_hierarchy.append(coarse_segs)
+                    hierarchy_embeddings.append(coarse_embs)
+
+            # Save embeddings to sidecar cache
+            if sc is not None:
+                _emb_arrays: dict[str, np.ndarray] = {}
+                if embeddings is not None:
+                    _emb_arrays["embeddings"] = embeddings
+                if action_embeddings is not None:
+                    _emb_arrays["action_embeddings"] = action_embeddings
+                if frame_embeddings is not None:
+                    _emb_arrays["frame_embeddings"] = frame_embeddings
+                if temporal_embeddings is not None:
+                    _emb_arrays["temporal_embeddings"] = temporal_embeddings
+                if temporal_feature_maps is not None and temporal_feature_maps.dtype != object:
+                    _emb_arrays["temporal_feature_maps"] = temporal_feature_maps
+                for _lvl, _h_emb in enumerate(hierarchy_embeddings):
+                    if _h_emb is not None:
+                        _emb_arrays[f"hierarchy_emb_L{_lvl}"] = _h_emb
+                if _emb_arrays:
+                    sc.save_npz("embeddings", _emb_arrays)
+                sc.save_json("embeddings_meta", {
+                    "quality": quality,
+                    "segment_hierarchy": segment_hierarchy,
+                })
+                logger.info("[stage-cache] saved embeddings to sidecar")
+        else:
+            # Embeddings stage skipped — initialise with empty defaults
+            embeddings = None
+            action_embeddings = None
+            frame_embeddings = None
+            temporal_embeddings = None
+            temporal_feature_maps = None
+            quality = {}
+            segment_hierarchy = []
+            hierarchy_embeddings = []
 
         logger.info(
             "[pipeline] search index: %d segments, %d scenes",

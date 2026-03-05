@@ -34,6 +34,10 @@ Homepage = "https://github.com/alexzhang13/rlm"
 Repository = "https://github.com/alexzhang13/rlm"
 Issues = "https://github.com/alexzhang13/rlm/issues"
 
+[project.scripts]
+kuavi = "kuavi.cli:main"
+kuavi-mcp = "kuavi.mcp_server:mcp.run"
+
 [project.optional-dependencies]
 modal = ["modal>=0.73.0", "dill>=0.3.7"]
 e2b = ["e2b-code-interpreter>=0.0.11", "dill>=0.3.7"]
@@ -53,7 +57,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["rlm", "rlm.*"]
+include = ["rlm", "rlm.*", "kuavi", "kuavi.*"]
 
 [dependency-groups]
 dev = [
