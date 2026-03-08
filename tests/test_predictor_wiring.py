@@ -62,9 +62,7 @@ def _fake_vjepa_clips(windows, D=D, return_full=False, **kw):
     embs = embs / np.maximum(norms, 1e-10)
 
     if return_full:
-        fmaps = [
-            rng.standard_normal((NUM_PATCHES, D)).astype(np.float32) for _ in range(n)
-        ]
+        fmaps = [rng.standard_normal((NUM_PATCHES, D)).astype(np.float32) for _ in range(n)]
         return embs, fmaps
     return embs
 
@@ -123,17 +121,22 @@ def _patch_indexer_for_index_video(indexer):
     stack.enter_context(patch.object(indexer, "_action_first_pass"))
     stack.enter_context(patch.object(indexer, "_build_coarse_level", return_value=([], None)))
     stack.enter_context(
-        patch("kuavi.indexer.detect_scenes", return_value=[(i * 2.0, (i + 1) * 2.0) for i in range(NUM_SEGMENTS)])
+        patch(
+            "kuavi.indexer.detect_scenes",
+            return_value=[(i * 2.0, (i + 1) * 2.0) for i in range(NUM_SEGMENTS)],
+        )
     )
     stack.enter_context(
-        patch("kuavi.indexer.detect_scenes_hierarchical", return_value={"levels": [
-            [(i * 2.0, (i + 1) * 2.0) for i in range(NUM_SEGMENTS)]
-        ]})
+        patch(
+            "kuavi.indexer.detect_scenes_hierarchical",
+            return_value={"levels": [[(i * 2.0, (i + 1) * 2.0) for i in range(NUM_SEGMENTS)]]},
+        )
     )
     stack.enter_context(
-        patch("kuavi.scene_detection.detect_scenes_perframe", return_value=[
-            (i * 2.0, (i + 1) * 2.0) for i in range(NUM_SEGMENTS)
-        ])
+        patch(
+            "kuavi.scene_detection.detect_scenes_perframe",
+            return_value=[(i * 2.0, (i + 1) * 2.0) for i in range(NUM_SEGMENTS)],
+        )
     )
     # Provide a query encoder
     indexer._encode_query = lambda t: np.ones(D, dtype=np.float32) / np.sqrt(D)
@@ -249,7 +252,10 @@ class TestOverlappingVjepaFeatureMaps:
         with _patch_indexer_for_index_video(indexer):
             with patch.object(indexer, "_encode_clips_vjepa", side_effect=_fake_vjepa_clips):
                 index = indexer.index_video(
-                    lv, mode="fast", store_feature_maps=True, overlapping_vjepa=True,
+                    lv,
+                    mode="fast",
+                    store_feature_maps=True,
+                    overlapping_vjepa=True,
                 )
 
         assert index.temporal_feature_maps is not None, (
@@ -264,7 +270,10 @@ class TestOverlappingVjepaFeatureMaps:
         with _patch_indexer_for_index_video(indexer):
             with patch.object(indexer, "_encode_clips_vjepa", side_effect=_fake_vjepa_clips):
                 index = indexer.index_video(
-                    lv, mode="fast", store_feature_maps=False, overlapping_vjepa=True,
+                    lv,
+                    mode="fast",
+                    store_feature_maps=False,
+                    overlapping_vjepa=True,
                 )
 
         assert index.temporal_feature_maps is None
@@ -277,7 +286,10 @@ class TestOverlappingVjepaFeatureMaps:
         with _patch_indexer_for_index_video(indexer):
             with patch.object(indexer, "_encode_clips_vjepa", side_effect=_fake_vjepa_clips):
                 index = indexer.index_video(
-                    lv, mode="fast", store_feature_maps=True, overlapping_vjepa=False,
+                    lv,
+                    mode="fast",
+                    store_feature_maps=True,
+                    overlapping_vjepa=False,
                 )
 
         assert index.temporal_feature_maps is not None
@@ -292,7 +304,11 @@ class TestOverlappingVjepaFeatureMaps:
         timestamps = [i * 0.5 for i in range(20)]
 
         result = indexer._encode_frames_overlapping_vjepa(
-            frames, timestamps, clip_size=4, stride=2, store_feature_maps=True,
+            frames,
+            timestamps,
+            clip_size=4,
+            stride=2,
+            store_feature_maps=True,
         )
         assert len(result) == 3, "Should return (embeddings, timestamps, feature_maps)"
         embs, ts, fmaps = result
@@ -311,7 +327,11 @@ class TestOverlappingVjepaFeatureMaps:
         timestamps = [i * 0.5 for i in range(20)]
 
         result = indexer._encode_frames_overlapping_vjepa(
-            frames, timestamps, clip_size=4, stride=2, store_feature_maps=False,
+            frames,
+            timestamps,
+            clip_size=4,
+            stride=2,
+            store_feature_maps=False,
         )
         assert len(result) == 2, "Should return (embeddings, timestamps)"
 
@@ -395,7 +415,11 @@ class TestOverlappingFeatureMapEdgeCases:
         indexer._encode_clips_vjepa = _fake_vjepa_clips
 
         result = indexer._encode_frames_overlapping_vjepa(
-            [], [], clip_size=4, stride=2, store_feature_maps=True,
+            [],
+            [],
+            clip_size=4,
+            stride=2,
+            store_feature_maps=True,
         )
         assert len(result) == 3
         embs, ts, fmaps = result
@@ -411,7 +435,11 @@ class TestOverlappingFeatureMapEdgeCases:
         timestamps = [0.0]
 
         result = indexer._encode_frames_overlapping_vjepa(
-            frames, timestamps, clip_size=4, stride=2, store_feature_maps=True,
+            frames,
+            timestamps,
+            clip_size=4,
+            stride=2,
+            store_feature_maps=True,
         )
         assert len(result) == 3
         embs, ts, fmaps = result
@@ -434,24 +462,32 @@ class TestASRGracefulFallback:
         assert result == []
 
     def test_ensure_asr_model_imports_only_qwen3asrmodel(self):
-        """_ensure_asr_model should import Qwen3ASRModel, not Qwen3ForcedAligner."""
+        """ensure_asr_model should import Qwen3ASRModel, not Qwen3ForcedAligner."""
         import inspect
-        source = inspect.getsource(VideoIndexer._ensure_asr_model)
+
+        from kuavi import transcript as transcript_mod
+
+        source = inspect.getsource(transcript_mod.ensure_asr_model)
         assert "from qwen_asr import Qwen3ASRModel" in source
         lines = source.split("\n")
         top_import_lines = [
-            line for line in lines
-            if "from qwen_asr import" in line and "Qwen3ForcedAligner" in line
+            line
+            for line in lines
+            if "from qwen_asr import" in line
+            and "Qwen3ForcedAligner" in line
             and "# noqa" not in line
         ]
         assert len(top_import_lines) == 0, (
-            "Qwen3ForcedAligner should not be imported at top level of _ensure_asr_model"
+            "Qwen3ForcedAligner should not be imported at top level of ensure_asr_model"
         )
 
     def test_uses_correct_aligner_model_name(self):
-        """_ensure_asr_model should reference Qwen/Qwen3-ForcedAligner-0.6B, not the old 404 name."""
+        """ensure_asr_model should reference Qwen/Qwen3-ForcedAligner-0.6B, not the old 404 name."""
         import inspect
-        source = inspect.getsource(VideoIndexer._ensure_asr_model)
+
+        from kuavi import transcript as transcript_mod
+
+        source = inspect.getsource(transcript_mod.ensure_asr_model)
         assert "Qwen/Qwen3-ForcedAligner-0.6B" in source
         assert "Qwen/Qwen3-ASR-ForcedAligner" not in source
 
