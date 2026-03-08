@@ -1,17 +1,108 @@
 """
 LMHandler - Routes LLM requests from the RLM process and environment subprocesses.
 
-Uses a multi-threaded socket server. Protocol: 4-byte length prefix + JSON payload.
+Provides two transport layers:
+  * ``LMHandler`` — multi-threaded TCP socket server (4-byte length prefix + JSON).
+  * ``StdioLMHandler`` — single-threaded stdin/stdout handler using the same framing.
+
+Both share the same request processing logic (``LMRequestHandler``,
+``_handle_single``, ``_handle_batched``).
 """
 
+from __future__ import annotations
+
 import asyncio
+import sys
 import time
 from socketserver import StreamRequestHandler, ThreadingTCPServer
 from threading import Thread
 
 from rlm.clients.base_lm import BaseLM
-from rlm.core.comms_utils import LMRequest, LMResponse, socket_recv, socket_send
+from rlm.core.comms_utils import (
+    LMRequest,
+    LMResponse,
+    socket_recv,
+    socket_send,
+    stdio_recv,
+    stdio_send,
+)
 from rlm.core.types import RLMChatCompletion, UsageSummary
+
+
+# =============================================================================
+# Shared request processing (used by both socket and stdio transports)
+# =============================================================================
+
+
+def _process_single(request: LMRequest, handler: "LMHandler") -> LMResponse:
+    """Process a single-prompt LMRequest and return an LMResponse."""
+    client = handler.get_client(request.model, request.depth)
+
+    start_time = time.perf_counter()
+    content = client.completion(request.prompt)
+    end_time = time.perf_counter()
+
+    model_usage = client.get_last_usage()
+    root_model = request.model or client.model_name
+    usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
+    return LMResponse.success_response(
+        chat_completion=RLMChatCompletion(
+            root_model=root_model,
+            prompt=request.prompt,
+            response=content,
+            usage_summary=usage_summary,
+            execution_time=end_time - start_time,
+        )
+    )
+
+
+def _process_batched(request: LMRequest, handler: "LMHandler") -> LMResponse:
+    """Process a batched LMRequest using async concurrency."""
+    client = handler.get_client(request.model, request.depth)
+
+    start_time = time.perf_counter()
+
+    async def run_all():
+        tasks = [client.acompletion(prompt) for prompt in request.prompts]
+        return await asyncio.gather(*tasks)
+
+    results = asyncio.run(run_all())
+    end_time = time.perf_counter()
+
+    total_time = end_time - start_time
+    model_usage = client.get_last_usage()
+    root_model = request.model or client.model_name
+    usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
+
+    chat_completions = [
+        RLMChatCompletion(
+            root_model=root_model,
+            prompt=prompt,
+            response=content,
+            usage_summary=usage_summary,
+            execution_time=total_time / len(request.prompts),
+        )
+        for prompt, content in zip(request.prompts, results, strict=True)
+    ]
+
+    return LMResponse.batched_success_response(chat_completions=chat_completions)
+
+
+def _dispatch_request(request_data: dict, handler: "LMHandler") -> LMResponse:
+    """Parse *request_data*, dispatch to single/batched, return response."""
+    if not isinstance(request_data, dict):
+        return LMResponse.error_response("Request must be a JSON object")
+    request = LMRequest.from_dict(request_data)
+    if request.is_batched:
+        return _process_batched(request, handler)
+    if request.prompt:
+        return _process_single(request, handler)
+    return LMResponse.error_response("Missing 'prompt' or 'prompts' in request.")
+
+
+# =============================================================================
+# Socket transport
+# =============================================================================
 
 
 class LMRequestHandler(StreamRequestHandler):
@@ -20,32 +111,14 @@ class LMRequestHandler(StreamRequestHandler):
     def handle(self):
         try:
             request_data = socket_recv(self.connection)
-            if not isinstance(request_data, dict):
-                response = LMResponse.error_response("Request must be a JSON object")
-                self._safe_send(response)
-                return
-
-            request = LMRequest.from_dict(request_data)
             handler: LMHandler = self.server.lm_handler  # type: ignore
-
-            if request.is_batched:
-                # Batched request: process multiple prompts concurrently
-                response = self._handle_batched(request, handler)
-            elif request.prompt:
-                # Single request: process one prompt
-                response = self._handle_single(request, handler)
-            else:
-                response = LMResponse.error_response("Missing 'prompt' or 'prompts' in request.")
-
+            response = _dispatch_request(request_data, handler)
             self._safe_send(response)
 
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
-            # Client disconnected - this is expected during parallel execution
-            # when workers complete and close their sockets. Silently ignore.
             pass
 
         except Exception as e:
-            # Try to send error response, but don't fail if socket is broken
             response = LMResponse.error_response(str(e))
             self._safe_send(response)
 
@@ -55,60 +128,7 @@ class LMRequestHandler(StreamRequestHandler):
             socket_send(self.connection, response.to_dict())
             return True
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
-            # Client disconnected - silently ignore
             return False
-
-    def _handle_single(self, request: LMRequest, handler: "LMHandler") -> LMResponse:
-        """Handle a single prompt request."""
-        client = handler.get_client(request.model, request.depth)
-
-        start_time = time.perf_counter()
-        content = client.completion(request.prompt)
-        end_time = time.perf_counter()
-
-        model_usage = client.get_last_usage()
-        root_model = request.model or client.model_name
-        usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
-        return LMResponse.success_response(
-            chat_completion=RLMChatCompletion(
-                root_model=root_model,
-                prompt=request.prompt,
-                response=content,
-                usage_summary=usage_summary,
-                execution_time=end_time - start_time,
-            )
-        )
-
-    def _handle_batched(self, request: LMRequest, handler: "LMHandler") -> LMResponse:
-        """Handle a batched prompts request using async for concurrency."""
-        client = handler.get_client(request.model, request.depth)
-
-        start_time = time.perf_counter()
-
-        async def run_all():
-            tasks = [client.acompletion(prompt) for prompt in request.prompts]
-            return await asyncio.gather(*tasks)
-
-        results = asyncio.run(run_all())
-        end_time = time.perf_counter()
-
-        total_time = end_time - start_time
-        model_usage = client.get_last_usage()
-        root_model = request.model or client.model_name
-        usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
-
-        chat_completions = [
-            RLMChatCompletion(
-                root_model=root_model,
-                prompt=prompt,
-                response=content,
-                usage_summary=usage_summary,
-                execution_time=total_time / len(request.prompts),  # approximate per-prompt time
-            )
-            for prompt, content in zip(request.prompts, results, strict=True)
-        ]
-
-        return LMResponse.batched_success_response(chat_completions=chat_completions)
 
 
 class ThreadingLMServer(ThreadingTCPServer):
@@ -223,3 +243,85 @@ class LMHandler:
             client_summary = client.get_usage_summary()
             merged.update(client_summary.model_usage_summaries)
         return UsageSummary(model_usage_summaries=merged)
+
+
+# =============================================================================
+# Stdio transport
+# =============================================================================
+
+
+class StdioLMHandler:
+    """Single-threaded LM handler that reads requests from *stdin* and writes
+    responses to *stdout* using the same 4-byte length-prefixed JSON framing.
+
+    This is useful for embedding the handler inside a subprocess that
+    communicates over pipes rather than TCP.  The parent process writes
+    ``LMRequest`` messages to the child's stdin and reads ``LMResponse``
+    messages from its stdout.
+
+    Usage (inside the child process)::
+
+        handler = StdioLMHandler(client)
+        handler.run()          # blocks, serving until EOF on stdin
+
+    Or from the parent, launch the child and talk via
+    :func:`~rlm.core.comms_utils.send_lm_request_stdio`.
+    """
+
+    def __init__(
+        self,
+        client: BaseLM,
+        other_backend_client: BaseLM | None = None,
+        *,
+        input_stream: "io.BufferedReader | None" = None,
+        output_stream: "io.BufferedWriter | None" = None,
+    ) -> None:
+        # Re-use LMHandler for client routing / usage tracking
+        self._handler = LMHandler(client, other_backend_client=other_backend_client)
+        self._in = input_stream or sys.stdin.buffer
+        self._out = output_stream or sys.stdout.buffer
+
+    # Expose the same client-management surface as LMHandler
+    def register_client(self, model_name: str, client: BaseLM) -> None:
+        """Register a client for a specific model name."""
+        self._handler.register_client(model_name, client)
+
+    def get_client(self, model: str | None = None, depth: int = 0) -> BaseLM:
+        """Get client by model name or depth."""
+        return self._handler.get_client(model, depth)
+
+    def completion(self, prompt: str, model: str | None = None) -> str:
+        """Direct completion call (for in-process use)."""
+        return self._handler.completion(prompt, model)
+
+    def get_usage_summary(self) -> UsageSummary:
+        """Get merged usage summary for all clients."""
+        return self._handler.get_usage_summary()
+
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        """Read requests from *stdin*, process them, and write responses
+        to *stdout* until the input stream is closed (EOF).
+
+        Each iteration reads exactly one length-prefixed message,
+        dispatches it through the shared ``_dispatch_request`` helper,
+        and writes the response back.
+        """
+        import io as _io  # local to avoid polluting module namespace
+
+        while True:
+            request_data = stdio_recv(self._in)
+            if not request_data:
+                break  # EOF — parent closed the pipe
+            try:
+                response = _dispatch_request(request_data, self._handler)
+            except Exception as exc:
+                response = LMResponse.error_response(str(exc))
+            stdio_send(self._out, response.to_dict())
+
+    def __enter__(self) -> "StdioLMHandler":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        return False
