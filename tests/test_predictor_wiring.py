@@ -534,11 +534,11 @@ class TestRLMMirrorPredictorWiring:
         assert indexer._scene_predictor is None
 
     def test_rlm_asr_uses_correct_aligner_name(self):
-        """RLM mirror _ensure_asr_model should reference Qwen/Qwen3-ForcedAligner-0.6B."""
+        """RLM video_transcript.ensure_asr_model should reference Qwen/Qwen3-ForcedAligner-0.6B."""
         import inspect
 
-        from rlm.video.video_indexer import VideoIndexer as RLMVideoIndexer
+        from rlm.video.video_transcript import ensure_asr_model
 
-        source = inspect.getsource(RLMVideoIndexer._ensure_asr_model)
+        source = inspect.getsource(ensure_asr_model)
         assert "Qwen/Qwen3-ForcedAligner-0.6B" in source
         assert "Qwen/Qwen3-ASR-ForcedAligner" not in source
