@@ -291,24 +291,6 @@ def main():
     )
 
     # ==================================================================
-    section("11. VideoRLM store_feature_maps (Fix 4)")
-    # ==================================================================
-    from rlm.video.video_rlm import VideoRLM
-
-    vrlm = VideoRLM(store_feature_maps=True, enable_search=False)
-    check("VideoRLM accepts store_feature_maps", vrlm.store_feature_maps is True)
-
-    # ==================================================================
-    section("12. RLM Mirror Consistency")
-    # ==================================================================
-    rlm_src = open("rlm/video/video_indexer.py").read()
-    check("RLM mirror: correct aligner name", "Qwen/Qwen3-ForcedAligner-0.6B" in rlm_src)
-    check("RLM mirror: no old 404 name", "Qwen/Qwen3-ASR-ForcedAligner" not in rlm_src)
-    check("RLM mirror: _predict_fn wiring", "_predict_fn" in rlm_src and "index._predict_fn" in rlm_src)
-    check("RLM mirror: _predict_future_fn wiring", "index._predict_future_fn" in rlm_src)
-    check("RLM mirror: overlapping store_feature_maps", "store_feature_maps=store_feature_maps" in rlm_src)
-
-    # ==================================================================
     # Summary
     # ==================================================================
     elapsed = time.time() - t0

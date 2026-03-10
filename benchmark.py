@@ -266,80 +266,6 @@ _MAX_TOOL_RESULT_CHARS = 80_000
 
 
 # ---------------------------------------------------------------------------
-# RLM Benchmark
-# ---------------------------------------------------------------------------
-
-
-def run_rlm_benchmark(
-    video_path: str,
-    question: str,
-    *,
-    backend: str = "gemini",
-    model: str = "gemini-3.1-pro-preview",
-    cache_dir: str | None = None,
-    auto_fps: bool = True,
-    max_iterations: int = 15,
-    thinking_level: str = "LOW",
-) -> dict[str, Any]:
-    """Run RLM benchmark, return metrics dict with real Gemini API token counts."""
-    from rlm.logger import RLMLogger
-    from rlm.video import VideoRLM
-
-    logger = RLMLogger(log_dir=None)  # in-memory only
-
-    vrlm = VideoRLM(
-        backend=backend,
-        backend_kwargs={
-            "model_name": model,
-            "timeout": 300.0,
-            "thinking_level": thinking_level,
-        },
-        fps=0.5,
-        num_segments=5,
-        max_frames_per_segment=3,
-        resize=(640, 480),
-        max_iterations=max_iterations,
-        logger=logger,
-        verbose=True,
-        enable_search=True,
-        embedding_model="google/siglip2-base-patch16-256",
-        cache_dir=cache_dir,
-        auto_fps=auto_fps,
-        scene_model="facebook/vjepa2-vitl-fpc64-256",
-        text_embedding_model="google/embeddinggemma-300m",
-    )
-
-    start = time.time()
-    result = vrlm.completion(video_path, prompt=question)
-    elapsed = time.time() - start
-
-    # Extract token usage from all models
-    usage = result.usage_summary
-    total_input = 0
-    total_output = 0
-    for _model_name, model_usage in usage.model_usage_summaries.items():
-        total_input += model_usage.total_input_tokens
-        total_output += model_usage.total_output_tokens
-
-    iterations = logger.iteration_count
-
-    return {
-        "system": "rlm",
-        "model": model,
-        "answer": result.response,
-        "elapsed_s": round(elapsed, 2),
-        "iterations": iterations,
-        "input_tokens": total_input,
-        "output_tokens": total_output,
-        "total_tokens": total_input + total_output,
-        "per_model_usage": {
-            m: {"input": u.total_input_tokens, "output": u.total_output_tokens}
-            for m, u in usage.model_usage_summaries.items()
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
 # KUAVi Benchmark
 # ---------------------------------------------------------------------------
 
@@ -659,17 +585,10 @@ def run_kuavi_benchmark(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="KUAVi vs RLM benchmark with full token tracking"
+        description="KUAVi benchmark with full token tracking"
     )
     parser.add_argument("--video", required=True, help="Path to video file")
     parser.add_argument("--question", required=True, help="Question to ask about the video")
-    parser.add_argument(
-        "--systems",
-        nargs="+",
-        default=["rlm", "kuavi"],
-        choices=["rlm", "kuavi"],
-        help="Systems to benchmark (default: both)",
-    )
     parser.add_argument("--cache-dir", default="./cache", help="Index cache directory")
     parser.add_argument(
         "--kuavi-model",
@@ -677,26 +596,10 @@ def main():
         help="Anthropic model for KUAVi agent",
     )
     parser.add_argument(
-        "--rlm-model",
-        default="gemini-3.1-pro-preview",
-        help="Gemini model for RLM",
-    )
-    parser.add_argument(
-        "--rlm-backend",
-        default="gemini",
-        help="RLM backend (default: gemini)",
-    )
-    parser.add_argument(
         "--max-turns",
         type=int,
         default=20,
         help="Max agent turns for KUAVi (default: 20)",
-    )
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=15,
-        help="Max REPL iterations for RLM (default: 15)",
     )
     parser.add_argument(
         "--output",
@@ -710,30 +613,19 @@ def main():
         "video": args.video,
     }
 
-    for system in args.systems:
-        print(f"\n{'=' * 60}")
-        print(f"Running {system.upper()} benchmark...")
-        print(f"{'=' * 60}\n")
+    print(f"\n{'=' * 60}")
+    print("Running KUAVI benchmark...")
+    print(f"{'=' * 60}\n")
 
-        if system == "rlm":
-            results["rlm"] = run_rlm_benchmark(
-                args.video,
-                args.question,
-                backend=args.rlm_backend,
-                model=args.rlm_model,
-                cache_dir=args.cache_dir,
-                max_iterations=args.max_iterations,
-            )
-        elif system == "kuavi":
-            results["kuavi"] = run_kuavi_benchmark(
-                args.video,
-                args.question,
-                model=args.kuavi_model,
-                max_turns=args.max_turns,
-                cache_dir=args.cache_dir,
-            )
+    results["kuavi"] = run_kuavi_benchmark(
+        args.video,
+        args.question,
+        model=args.kuavi_model,
+        max_turns=args.max_turns,
+        cache_dir=args.cache_dir,
+    )
 
-    # Print comparison table
+    # Print results table
     print(f"\n{'=' * 70}")
     print(f"{'BENCHMARK RESULTS':^70}")
     print(f"{'=' * 70}")
@@ -741,11 +633,8 @@ def main():
     print(f"Video: {args.video}")
     print(f"{'-' * 70}")
 
-    headers = ["Metric"]
-    for s in args.systems:
-        headers.append(s.upper())
-    header_fmt = "{:<25}" + "{:>20}" * len(args.systems)
-    print(header_fmt.format(*headers))
+    header_fmt = "{:<25}" + "{:>20}"
+    print(header_fmt.format("Metric", "KUAVI"))
     print("-" * 70)
 
     metrics = [
@@ -754,7 +643,6 @@ def main():
         ("output_tokens", "Output tokens"),
         ("total_tokens", "Total tokens"),
         ("tool_calls", "Tool calls"),
-        ("iterations", "REPL iterations"),
         ("turns", "Agent turns"),
         ("cache_read_tokens", "Cache read tokens"),
         ("cache_creation_tokens", "Cache creation tokens"),
@@ -762,29 +650,23 @@ def main():
     ]
 
     for key, label in metrics:
-        vals = []
-        for s in args.systems:
-            v = results.get(s, {}).get(key, "-")
-            if isinstance(v, float):
-                v = f"{v:.1f}"
-            elif v == 0 and key in ("cache_read_tokens", "cache_creation_tokens"):
-                v = "-"
-            vals.append(str(v))
-        # Skip rows where all values are "-"
-        if all(v == "-" for v in vals):
+        v = results.get("kuavi", {}).get(key, "-")
+        if isinstance(v, float):
+            v = f"{v:.1f}"
+        elif v == 0 and key in ("cache_read_tokens", "cache_creation_tokens"):
+            v = "-"
+        if str(v) == "-":
             continue
-        print(header_fmt.format(label, *vals))
+        print(header_fmt.format(label, str(v)))
 
-    # Print answers
-    for s in args.systems:
-        r = results.get(s, {})
-        answer = r.get("answer", "")
-        if answer:
-            print(f"\n{'-' * 70}")
-            print(f"{s.upper()} Answer:")
-            print(answer[:500])
-            if len(answer) > 500:
-                print(f"... [{len(answer) - 500} more chars]")
+    # Print answer
+    answer = results.get("kuavi", {}).get("answer", "")
+    if answer:
+        print(f"\n{'-' * 70}")
+        print("KUAVI Answer:")
+        print(answer[:500])
+        if len(answer) > 500:
+            print(f"... [{len(answer) - 500} more chars]")
 
     # Save JSON
     with open(args.output, "w") as f:

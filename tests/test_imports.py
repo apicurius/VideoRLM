@@ -162,26 +162,6 @@ class TestEnvironmentImports:
 
         assert LocalREPL is not None
 
-    def test_modal_repl_import(self):
-        """Test ModalREPL import."""
-        pytest.importorskip("modal")
-        from rlm.environments.modal_repl import ModalREPL
-
-        assert ModalREPL is not None
-
-    def test_docker_repl_import(self):
-        """Test DockerREPL import."""
-        from rlm.environments.docker_repl import DockerREPL
-
-        assert DockerREPL is not None
-
-    def test_prime_repl_import(self):
-        """Test PrimeREPL import."""
-        pytest.importorskip("prime_sandboxes")
-        from rlm.environments.prime_repl import PrimeREPL
-
-        assert PrimeREPL is not None
-
     def test_get_environment_function(self):
         """Test get_environment function import."""
         from rlm.environments import get_environment
@@ -307,7 +287,6 @@ class TestImportConflicts:
             "rlm.environments",
             "rlm.environments.base_env",
             "rlm.environments.local_repl",
-            "rlm.environments.docker_repl",
             "rlm.logger",
             "rlm.logger.rlm_logger",
             "rlm.logger.verbose",
@@ -323,8 +302,6 @@ class TestImportConflicts:
             ("rlm.clients.anthropic", "anthropic"),
             ("rlm.clients.portkey", "portkey_ai"),
             ("rlm.clients.litellm", "litellm"),
-            ("rlm.environments.modal_repl", "modal"),
-            ("rlm.environments.prime_repl", "prime_sandboxes"),
         ]
 
         # Test core modules
@@ -474,7 +451,6 @@ class TestImportCompleteness:
     def test_all_environment_classes_importable(self):
         """Test that all environment classes can be imported."""
         from rlm.environments.base_env import BaseEnv, IsolatedEnv, NonIsolatedEnv
-        from rlm.environments.docker_repl import DockerREPL
         from rlm.environments.local_repl import LocalREPL
 
         # Verify they're all classes
@@ -482,22 +458,3 @@ class TestImportCompleteness:
         assert isinstance(IsolatedEnv, type)
         assert isinstance(NonIsolatedEnv, type)
         assert isinstance(LocalREPL, type)
-        assert isinstance(DockerREPL, type)
-
-        # Test optional ModalREPL
-        try:
-            pytest.importorskip("modal")
-            from rlm.environments.modal_repl import ModalREPL
-
-            assert isinstance(ModalREPL, type)
-        except Exception:
-            pass
-
-        # Test optional PrimeREPL
-        try:
-            pytest.importorskip("prime_sandboxes")
-            from rlm.environments.prime_repl import PrimeREPL
-
-            assert isinstance(PrimeREPL, type)
-        except Exception:
-            pass

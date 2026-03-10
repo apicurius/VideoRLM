@@ -143,88 +143,6 @@ DEFAULT_QUESTION = (
 
 
 # ---------------------------------------------------------------------------
-# RLM pipeline
-# ---------------------------------------------------------------------------
-
-def run_rlm(
-    video_path: str,
-    question: str,
-    model: str,
-    backend: str,
-    cache_dir: str | None,
-    max_iterations: int = 15,
-    thinking_level: str = "LOW",
-) -> dict:
-    """Run VideoRLM pipeline and return result dict."""
-    from rlm.logger import RLMLogger
-    from rlm.video import VideoRLM
-
-    TOOL_NAMES = [
-        "search_video", "search_transcript", "extract_frames",
-        "get_scene_list", "get_transcript", "discriminative_vqa",
-        "crop_frame", "diff_frames", "blend_frames", "threshold_frame",
-        "blend_frames", "frame_info",
-    ]
-
-    logger = RLMLogger(log_dir="./logs")
-
-    t0 = time.monotonic()
-    vrlm = VideoRLM(
-        backend=backend,
-        backend_kwargs={"model_name": model, "timeout": 300.0, "thinking_level": thinking_level},
-        fps=0.5,
-        num_segments=5,
-        max_frames_per_segment=3,
-        resize=(640, 480),
-        max_iterations=max_iterations,
-        logger=logger,
-        verbose=True,
-        enable_search=True,
-        embedding_model="google/siglip2-base-patch16-256",
-        cache_dir=cache_dir,
-        auto_fps=False,
-        scene_model="facebook/vjepa2-vitl-fpc64-256",
-        text_embedding_model="google/embeddinggemma-300m",
-    )
-    result = vrlm.completion(video_path, prompt=question)
-    elapsed = time.monotonic() - t0
-
-    # Extract tool calls from logged iterations
-    all_tools: list[str] = []
-    trajectory = logger.get_trajectory()
-    iteration_count = logger.iteration_count
-    total_tokens = 0
-    if trajectory:
-        for it in trajectory.get("iterations", []):
-            for block in it.get("code_blocks", []):
-                code = block.get("code", "")
-                for tool in TOOL_NAMES:
-                    if tool + "(" in code and tool not in all_tools:
-                        all_tools.append(tool)
-            # Token usage from sub-calls
-            for block in it.get("code_blocks", []):
-                for sub in block.get("result", {}).get("rlm_calls", []):
-                    usage = sub.get("usage_summary", {})
-                    total_tokens += usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
-
-    # Also get usage from the completion itself
-    if hasattr(result, "usage_summary") and result.usage_summary:
-        us = result.usage_summary
-        total_tokens += getattr(us, "prompt_tokens", 0) + getattr(us, "completion_tokens", 0)
-
-    return {
-        "pipeline": "rlm",
-        "answer": result.response,
-        "iteration_count": iteration_count,
-        "tool_calls": all_tools,
-        "wall_time_seconds": round(elapsed, 2),
-        "approximate_tokens": total_tokens or None,
-        "execution_time_seconds": round(result.execution_time, 2),
-        "log_file": logger.log_file_path,
-    }
-
-
-# ---------------------------------------------------------------------------
 # KUAVi pipeline
 # ---------------------------------------------------------------------------
 
@@ -1142,74 +1060,6 @@ def run_kuavi(
 # Summary table
 # ---------------------------------------------------------------------------
 
-def print_summary(results: list[dict]) -> None:
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.style import Style
-    from rich.table import Table
-    from rich.text import Text
-
-    from kuavi.verbose import (
-        COLORS,
-        STYLE_ACCENT,
-        STYLE_MUTED,
-        STYLE_PRIMARY,
-        STYLE_TEXT,
-        STYLE_WARNING,
-    )
-
-    console = Console()
-
-    title = Text()
-    title.append("★ ", style=STYLE_WARNING)
-    title.append("Experiment Summary", style=Style(color=COLORS["warning"], bold=True))
-
-    table = Table(
-        show_edge=False,
-        padding=(0, 1),
-        expand=True,
-        border_style=COLORS["border"],
-    )
-    table.add_column("Pipeline", style=STYLE_PRIMARY, width=10)
-    table.add_column("Wall Time", style=STYLE_ACCENT, width=12, justify="right")
-    table.add_column("Iterations", style=STYLE_ACCENT, width=12, justify="right")
-    table.add_column("Tool Calls", style=STYLE_ACCENT, width=12, justify="right")
-    table.add_column("~Tokens", style=STYLE_ACCENT, width=12, justify="right")
-    table.add_column("Index Time", style=STYLE_ACCENT, width=12, justify="right")
-
-    for r in results:
-        tokens = f"{r['approximate_tokens']:,}" if r.get("approximate_tokens") else "-"
-        idx_time = f"{r['index_time_seconds']}s" if r.get("index_time_seconds") else "-"
-        tools_str = str(len(r["tool_calls"]))
-        table.add_row(
-            r["pipeline"].upper(),
-            f"{r['wall_time_seconds']}s",
-            str(r["iteration_count"]),
-            tools_str,
-            tokens,
-            idx_time,
-        )
-
-    panel = Panel(
-        table,
-        title=title,
-        title_align="left",
-        border_style=COLORS["border"],
-        padding=(1, 2),
-    )
-    console.print()
-    console.print(panel)
-
-    # Print answer previews
-    for r in results:
-        pipeline = r["pipeline"].upper()
-        preview = r["answer"][:200].strip()
-        if preview:
-            answer_title = Text()
-            answer_title.append(f"  {pipeline} Answer Preview", style=STYLE_MUTED)
-            console.print(answer_title)
-            console.print(Text(f"  {preview}...", style=STYLE_TEXT))
-    console.print()
 
 
 # ---------------------------------------------------------------------------
@@ -1217,20 +1067,16 @@ def print_summary(results: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare RLM vs KUAVi on video analysis")
+    parser = argparse.ArgumentParser(description="Run KUAVi pipeline on video analysis")
     parser.add_argument("--video", required=True, help="Path to the video file")
     parser.add_argument("--question", default=DEFAULT_QUESTION, help="Question to ask about the video")
     parser.add_argument("--model", default="gemini-3.1-pro-preview", help="LLM model name")
     parser.add_argument("--backend", default="gemini", help="LLM backend (gemini, openai, openrouter, anthropic)")
-    parser.add_argument(
-        "--pipeline", default="both", choices=["rlm", "kuavi", "both"],
-        help="Which pipeline(s) to run (default: both)"
-    )
     parser.add_argument("--cache-dir", default=None, help="Shared cache directory for video indexes")
     parser.add_argument("--output-dir", default="experiments", help="Directory to save JSON results (default: experiments/)")
     parser.add_argument("--max-iterations", type=int, default=15, help="Max agent iterations (default: 15)")
     parser.add_argument("--thinking-level", default="LOW", choices=["NONE", "LOW", "MEDIUM", "HIGH"],
-                        help="Gemini thinking level for RLM (default: LOW)")
+                        help="Gemini thinking level (default: LOW)")
     args = parser.parse_args()
 
     video_path = args.video
@@ -1244,7 +1090,6 @@ def main() -> None:
 
     video_stem = Path(video_path).stem
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    pipelines = ["rlm", "kuavi"] if args.pipeline == "both" else [args.pipeline]
 
     from rich.console import Console
     from rich.rule import Rule
@@ -1253,70 +1098,49 @@ def main() -> None:
     from kuavi.verbose import COLORS, STYLE_PRIMARY
 
     exp_console = Console()
+    exp_console.print()
+    exp_console.print(Rule(
+        Text(" KUAVI ", style=STYLE_PRIMARY),
+        style=COLORS["border"],
+        characters="═",
+    ))
 
-    results: list[dict] = []
-    for pipeline in pipelines:
-        exp_console.print()
-        exp_console.print(Rule(
-            Text(f" {pipeline.upper()} ", style=STYLE_PRIMARY),
-            style=COLORS["border"],
-            characters="═",
-        ))
-        try:
-            if pipeline == "rlm":
-                result = run_rlm(
-                    video_path=video_path,
-                    question=args.question,
-                    model=args.model,
-                    backend=args.backend,
-                    cache_dir=args.cache_dir,
-                    max_iterations=args.max_iterations,
-                    thinking_level=args.thinking_level,
-                )
-            else:
-                result = run_kuavi(
-                    video_path=video_path,
-                    question=args.question,
-                    model=args.model,
-                    backend=args.backend,
-                    cache_dir=args.cache_dir,
-                    max_iterations=args.max_iterations,
-                    thinking_level=args.thinking_level,
-                )
-        except Exception as exc:
-            from kuavi.verbose import KUAViPrinter
-            KUAViPrinter().print_error(f"[{pipeline}] {exc}")
-            result = {
-                "pipeline": pipeline,
-                "error": str(exc),
-                "answer": "",
-                "iteration_count": 0,
-                "tool_calls": [],
-                "wall_time_seconds": 0.0,
-                "approximate_tokens": None,
-            }
+    try:
+        result = run_kuavi(
+            video_path=video_path,
+            question=args.question,
+            model=args.model,
+            backend=args.backend,
+            cache_dir=args.cache_dir,
+            max_iterations=args.max_iterations,
+            thinking_level=args.thinking_level,
+        )
+    except Exception as exc:
+        from kuavi.verbose import KUAViPrinter
+        KUAViPrinter().print_error(f"[kuavi] {exc}")
+        result = {
+            "pipeline": "kuavi",
+            "error": str(exc),
+            "answer": "",
+            "iteration_count": 0,
+            "tool_calls": [],
+            "wall_time_seconds": 0.0,
+            "approximate_tokens": None,
+        }
 
-        result["video"] = video_path
-        result["question"] = args.question
-        result["model"] = args.model
-        result["backend"] = args.backend
-        result["timestamp"] = timestamp
-        results.append(result)
+    result["video"] = video_path
+    result["question"] = args.question
+    result["model"] = args.model
+    result["backend"] = args.backend
+    result["timestamp"] = timestamp
 
-        # Save per-pipeline result
-        out_path = output_dir / f"{video_stem}_{pipeline}_{timestamp}.json"
-        out_path.write_text(json.dumps(result, indent=2))
-        from kuavi.verbose import STYLE_MUTED
-        exp_console.print(Text(f"  Result saved to: {out_path}", style=STYLE_MUTED))
+    out_path = output_dir / f"{video_stem}_kuavi_{timestamp}.json"
+    out_path.write_text(json.dumps(result, indent=2))
+    from kuavi.verbose import STYLE_MUTED
+    exp_console.print(Text(f"  Result saved to: {out_path}", style=STYLE_MUTED))
 
-    if args.pipeline == "both":
-        print_summary(results)
-        combined_path = output_dir / f"{video_stem}_both_{timestamp}.json"
-        combined_path.write_text(json.dumps(results, indent=2))
-        exp_console.print(Text(f"Combined results saved to: {combined_path}", style=STYLE_MUTED))
-    else:
-        from kuavi.verbose import KUAViPrinter as _KP
-        _KP().print_final_summary({"Answer": results[0].get("answer", results[0].get("error", ""))[:500]})
+    from kuavi.verbose import KUAViPrinter as _KP
+    _KP().print_final_summary({"Answer": result.get("answer", result.get("error", ""))[:500]})
 
 
 if __name__ == "__main__":

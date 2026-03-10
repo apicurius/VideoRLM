@@ -566,170 +566,12 @@ def _kuavi_pipeline(
     finally:
         kuavi_logger.removeHandler(log_handler)
 
-
-def _full_pipeline(
-    video_path: str,
-    question: str,
-    model: str,
-    api_key: str,
-    backend: str,
-    emit,
-    index_mode: str = "fast",
-    asr_model: str = "faster-whisper/base",
-) -> None:
-    from rlm.video.video_rlm import VideoRLM
-
-    completed: set[str] = set()
-
-    def emit_step(step_id: str, status: str, detail: str | None = None) -> None:
-        event: dict = {"type": "step", "id": step_id, "status": status}
-        if detail:
-            event["detail"] = detail
-        if status in ("done", "cached", "skip"):
-            completed.add(step_id)
-        emit(event)
-
-    use_gemini = _use_gemini_captioning(backend, model)
-
-    if use_gemini:
-        client_backend = "gemini"
-        bkw: dict = {
-            "model_name": model,
-            "api_key": api_key or os.getenv("GEMINI_API_KEY"),
-            "thinking_level": "LOW",
-        }
-    else:
-        client_backend = "openai" if backend == "openrouter" else backend
-        bkw = {"model_name": model, "api_key": api_key}
-        if backend == "openrouter":
-            bkw["base_url"] = "https://openrouter.ai/api/v1"
-
-    caption_fn = None
-    frame_caption_fn = None
-    refine_fn = None
-    use_captioning = index_mode == "captioned"
-
-    if use_captioning:
-        gemini_key = os.getenv("GEMINI_API_KEY") or (api_key if use_gemini else None)
-        if gemini_key:
-            try:
-                from kuavi.captioning import (
-                    make_gemini_caption_fn,
-                    make_gemini_frame_caption_fn,
-                    make_gemini_refine_fn,
-                )
-                caption_model_name = "gemini-2.5-flash"
-                caption_fn = make_gemini_caption_fn(model=caption_model_name, api_key=gemini_key)
-                frame_caption_fn = make_gemini_frame_caption_fn(model=caption_model_name, api_key=gemini_key)
-                refine_fn = make_gemini_refine_fn(model=caption_model_name, api_key=gemini_key)
-                emit_step("caption", "pending", f"using {caption_model_name}")
-            except ImportError:
-                gemini_key = None
-
-        if not gemini_key:
-            try:
-                from rlm.clients.openai import OpenAIClient
-                caption_model_name = "openai/gpt-4o-mini" if backend == "openrouter" else model
-                caption_lm = OpenAIClient(
-                    model_name=caption_model_name,
-                    api_key=api_key,
-                    base_url="https://openrouter.ai/api/v1" if backend == "openrouter" else None,
-                )
-
-                def caption_fn(frames):
-                    parts: list = [
-                        "Describe this video segment in 1-2 sentences. "
-                        "Focus on what is shown visually, who/what is present, and any actions. "
-                        "Be specific and concise."
-                    ]
-                    parts.extend(frames[:3])
-                    try:
-                        return caption_lm.completion(parts)
-                    except Exception:
-                        return ""
-
-                emit_step("caption", "pending", f"using {caption_model_name}")
-            except ImportError:
-                emit_step("caption", "skip", "no captioning available")
-    else:
-        emit_step("caption", "skip", "fast mode — embeddings only")
-
-    log_handler = _QueueLogHandler(emit, completed)
-    log_handler.setLevel(logging.INFO)
-    indexer_logger = logging.getLogger("rlm.video.video_indexer")
-    indexer_logger.setLevel(logging.INFO)
-    kuavi_logger = logging.getLogger("kuavi.indexer")
-    kuavi_logger.setLevel(logging.INFO)
-    indexer_logger.addHandler(log_handler)
-    kuavi_logger.addHandler(log_handler)
-
-    try:
-        emit_step("vjepa", "running", "loading video...")
-        rlm_logger = _EventRLMLogger(emit)
-        video_rlm = VideoRLM(
-            backend=client_backend,
-            backend_kwargs=bkw,
-            enable_search=True,
-            scene_model=SCENE_MODEL,
-            embedding_model=VISUAL_EMBED_MODEL,
-            text_embedding_model=TEXT_EMBED_MODEL,
-            asr_model=asr_model,
-            caption_fn=caption_fn,
-            frame_caption_fn=frame_caption_fn,
-            refine_fn=None,  # Disabled to speed up Stage 3 flow
-            auto_fps=True,
-            num_segments=8,
-            max_frames_per_segment=4,
-            max_iterations=15,
-            token_budget=100_000,
-            logger=rlm_logger,
-        )
-        augmented = (
-            f"{question}\n\n"
-            "ANALYSIS STRATEGY (follow this order):\n"
-            "1. Call get_scene_list() to see all scenes and their timestamps.\n"
-            "2. Use search_video(query, field='visual') to find visually relevant scenes.\n"
-            "3. Call extract_frames(start, end, fps=2.0, max_frames=6) to zoom into promising scenes.\n"
-            "4. For fine-grained detail, use crop_frame(frame_index, x1, y1, x2, y2) or diff_frames.\n"
-            "5. Use search_transcript(keyword) for any spoken/audio clues.\n"
-            "6. Cite moments with [TS: X.X] (seconds) right after each claim."
-        )
-        result = video_rlm.completion(video_path, prompt=augmented)
-
-        # Emit done for any steps the log handler didn't already mark
-        for step_id in ("vjepa", "whisper", "caption", "gemma", "siglip"):
-            if step_id not in completed:
-                if step_id == "caption" and caption_fn is None:
-                    emit_step(step_id, "skip", "no captioning available")
-                elif step_id == "whisper":
-                    emit_step(step_id, "done", "transcript complete")
-                else:
-                    emit_step(step_id, "done")
-        emit_step("agent", "done")
-        timestamps = _parse_timestamps(result.response)
-        answer_html = _render_answer_html(result.response)
-        emit({
-            "type": "result",
-            "answer": result.response,
-            "answer_html": answer_html,
-            "timestamps": timestamps,
-        })
-    except Exception as exc:
-        short = str(exc)[:200]
-        _mark_pending_as_error(PIPELINE_STEPS, completed, emit, short)
-        emit({"type": "error", "message": str(exc)})
-    finally:
-        indexer_logger.removeHandler(log_handler)
-        kuavi_logger.removeHandler(log_handler)
-
-
 @app.post("/api/analyze")
 async def analyze(
     video: UploadFile = File(...),  # noqa: B008
     question: str = Form(...),
     backend: str = Form(default="openrouter"),
     model: str = Form(default="openai/gpt-4o"),
-    pipeline: str = Form(default="rlm"),
     index_mode: str = Form(default="fast"),
     asr_model: str = Form(default="faster-whisper/base"),
     custom_api_key: str = Form(default=""),
@@ -758,10 +600,7 @@ async def analyze(
     emit = _StepTimer(_raw_emit)
 
     def run() -> None:
-        if pipeline == "kuavi":
-            _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode, asr_model=asr_model)
-        else:
-            _full_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode, asr_model=asr_model)
+        _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode, asr_model=asr_model)
         emit.flush_summary()
         event_q.put(None)
 
