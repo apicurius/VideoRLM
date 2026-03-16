@@ -136,6 +136,7 @@ export default function VideoRLMInterface() {
   const [routingInfo, setRoutingInfo] = useState<RoutingInfo | null>(null);
   const [escalationInfo, setEscalationInfo] = useState<EscalationInfo | null>(null);
   const [estimatedCostUsd, setEstimatedCostUsd] = useState<number | null>(null);
+  const [executedTier, setExecutedTier] = useState<number | null>(null);
   const [panelTab, setPanelTab] = useState<PanelTab>("pipeline");
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -249,6 +250,7 @@ export default function VideoRLMInterface() {
     setRoutingInfo(null);
     setEscalationInfo(null);
     setEstimatedCostUsd(null);
+    setExecutedTier(null);
     startTimer();
 
     const formData = new FormData();
@@ -310,10 +312,51 @@ export default function VideoRLMInterface() {
                   reason: String(event.reason ?? ""),
                 });
               } else if (event.type === "cost") {
+                setExecutedTier(typeof event.tier_used === "number" ? event.tier_used : null);
                 setEstimatedCostUsd(
                   typeof event.estimated_usd === "number" ? event.estimated_usd : null
                 );
               } else if (event.type === "step") {
+                const stepId = String(event.id || "");
+
+                if (stepId === "index" && event.status === "done") {
+                  setSteps((prev) =>
+                    prev.map((s) => {
+                      if (["vjepa", "whisper", "caption", "gemma", "siglip"].includes(s.id) && s.status === "pending") {
+                        return { ...s, status: "cached", detail: "handled during indexing" };
+                      }
+                      if (s.id === "index") {
+                        return {
+                          ...s,
+                          status: event.status,
+                          detail: event.detail || s.detail,
+                          ...(event.elapsed_ms != null && { elapsed_ms: event.elapsed_ms }),
+                        };
+                      }
+                      return s;
+                    })
+                  );
+                  continue;
+                }
+
+                if (stepId.startsWith("tier_")) {
+                  const mappedId = stepId === "tier_1" ? "vjepa" : stepId === "tier_2" ? "siglip" : "agent";
+                  const tierLabel = stepId.replace("_", " ").toUpperCase();
+                  setSteps((prev) =>
+                    prev.map((s) =>
+                      s.id === mappedId
+                        ? {
+                            ...s,
+                            status: event.status,
+                            detail: event.detail || `${tierLabel} execution`,
+                            ...(event.elapsed_ms != null && { elapsed_ms: event.elapsed_ms }),
+                          }
+                        : s
+                    )
+                  );
+                  continue;
+                }
+
                 setSteps((prev) =>
                   prev.map((s) =>
                     s.id === event.id
@@ -343,11 +386,29 @@ export default function VideoRLMInterface() {
               } else if (event.type === "timing_summary") {
                 setTimingSummary({ steps: event.steps, total_ms: event.total_ms });
               } else if (event.type === "result") {
+                setSteps((prev) =>
+                  prev.map((s) => {
+                    if (s.id === "agent" && executedTier === 3 && (s.status === "pending" || s.status === "running")) {
+                      return { ...s, status: "done", detail: s.detail || "Tier 3 completed" };
+                    }
+                    if (s.status === "pending") {
+                      return { ...s, status: "skip", detail: s.detail || "not required for this query" };
+                    }
+                    return s;
+                  })
+                );
                 setAnswerHtml({ __html: event.answer_html });
                 setTimestamps(event.timestamps || []);
                 stopTimer();
                 setIsLoading(false);
               } else if (event.type === "error") {
+                setSteps((prev) =>
+                  prev.map((s) =>
+                    s.status === "pending" || s.status === "running"
+                      ? { ...s, status: "error", detail: s.detail || "pipeline failed" }
+                      : s
+                  )
+                );
                 setError(event.message || "Pipeline error");
                 stopTimer();
                 setIsLoading(false);
