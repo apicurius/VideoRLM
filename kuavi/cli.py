@@ -42,6 +42,7 @@ MCP-equivalent subcommands (all output JSON to stdout):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import concurrent.futures
 import json
 import subprocess
@@ -1180,6 +1181,39 @@ def cmd_agent(args: argparse.Namespace) -> None:
             _output(event, fmt)
 
 
+def cmd_query(args: argparse.Namespace) -> None:
+    """Run the tiered router -> executor pipeline and stream events."""
+    from kuavi.tiered_pipeline import run_tiered_pipeline
+
+    async def _run() -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        async for event in run_tiered_pipeline(
+            video_path=args.video,
+            query=args.question,
+            model=args.model,
+            backend=args.backend,
+            index_mode=getattr(args, "index_mode", "fast"),
+            asr_model=getattr(args, "asr_model", "faster-whisper/base"),
+            force_llm=getattr(args, "force_llm", False),
+            max_tier=getattr(args, "max_tier", 3),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+    fmt = getattr(args, "output_format", "jsonl")
+    show_routing = getattr(args, "show_routing", False)
+
+    if fmt == "jsonl":
+        for event in events:
+            if event.get("type") == "routing" and not show_routing:
+                continue
+            print(json.dumps(event, default=str), flush=True)
+    else:
+        out = events if show_routing else [e for e in events if e.get("type") != "routing"]
+        _output(out, fmt)
+
+
 # ---------------------------------------------------------------------------
 # Argument parser helpers
 # ---------------------------------------------------------------------------
@@ -1455,6 +1489,18 @@ def main() -> None:
     p_ag.add_argument("--custom-api-key", default=None)
     _add_common_args(p_ag)
 
+    p_qr = subparsers.add_parser("query", help="Run tiered query routing pipeline")
+    p_qr.add_argument("--video", required=True)
+    p_qr.add_argument("--question", required=True)
+    p_qr.add_argument("--model", default="openai/gpt-4o")
+    p_qr.add_argument("--backend", default="openrouter")
+    p_qr.add_argument("--index-mode", default="fast", choices=["fast", "full", "captioned"])
+    p_qr.add_argument("--asr-model", default="faster-whisper/base")
+    p_qr.add_argument("--max-tier", type=int, default=3, choices=[1, 2, 3])
+    p_qr.add_argument("--force-llm", action="store_true")
+    p_qr.add_argument("--show-routing", action="store_true")
+    p_qr.add_argument("--output-format", choices=["json", "jsonl"], default="jsonl")
+
     # ===================================================================
     # Dispatch
     # ===================================================================
@@ -1499,6 +1545,7 @@ def main() -> None:
         "inspect-segment": cmd_inspect_segment,
         "quick-answer": cmd_quick_answer,
         "agent": cmd_agent,
+        "query": cmd_query,
     }
 
     try:
@@ -1518,6 +1565,11 @@ def main() -> None:
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
+
+
+def cli() -> None:
+    """Compatibility wrapper for console script entrypoints."""
+    main()
 
 
 if __name__ == "__main__":

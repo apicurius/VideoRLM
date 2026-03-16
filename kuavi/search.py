@@ -10,6 +10,11 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+try:
+    from sklearn.metrics.pairwise import cosine_similarity as _sklearn_cosine_similarity
+except ModuleNotFoundError:
+    _sklearn_cosine_similarity = None
+
 if TYPE_CHECKING:
     from kuavi.indexer import VideoIndex
 
@@ -37,6 +42,33 @@ def _align_query_dim(query_emb: np.ndarray, matrix: np.ndarray) -> np.ndarray:
         "Query dim %d > matrix dim %d; truncating query embedding.", d_q, d_m
     )
     return query_emb[:, :d_m]
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Cosine similarity with sklearn when available and numpy fallback otherwise."""
+    if _sklearn_cosine_similarity is not None:
+        return _sklearn_cosine_similarity(a, b)
+
+    a_arr = np.asarray(a, dtype=np.float32)
+    b_arr = np.asarray(b, dtype=np.float32)
+    a_norm = np.linalg.norm(a_arr, axis=1, keepdims=True)
+    b_norm = np.linalg.norm(b_arr, axis=1, keepdims=True)
+    a_safe = a_arr / np.clip(a_norm, 1e-12, None)
+    b_safe = b_arr / np.clip(b_norm, 1e-12, None)
+    return a_safe @ b_safe.T
+
+
+def _cluster_labels(matrix: np.ndarray, n_clusters: int) -> np.ndarray:
+    """KMeans labels with deterministic fallback when sklearn is unavailable."""
+    if len(matrix) == 0:
+        return np.array([], dtype=int)
+    try:
+        from sklearn.cluster import KMeans
+
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        return kmeans.fit_predict(matrix)
+    except ModuleNotFoundError:
+        return np.arange(len(matrix), dtype=int) % max(1, n_clusters)
 
 
 def _mmr_rerank(
@@ -115,13 +147,11 @@ def _round_robin_from_clusters(
 
 def make_search_video(index: VideoIndex) -> dict[str, Any]:
     """Semantic search over video segment embeddings."""
-    from sklearn.metrics.pairwise import cosine_similarity
-
     def _search_matrix(
         query_emb: np.ndarray,
         matrix: np.ndarray,
     ) -> np.ndarray:
-        return cosine_similarity(query_emb, matrix)[0]
+        return _cosine_similarity(query_emb, matrix)[0]
 
     def search_video(
         query: str,
@@ -312,13 +342,10 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                         clusters.setdefault(int(cid), []).append(int(vi))
                     top_indices = _round_robin_from_clusters(clusters, scores, top_k)
                 else:
-                    from sklearn.cluster import KMeans
-
                     active_matrix = summary_emb if summary_emb is not None else frame_emb
                     k = min(top_k, n_valid)
                     valid_embs = active_matrix[valid_indices_arr]
-                    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-                    labels = kmeans.fit_predict(valid_embs)
+                    labels = _cluster_labels(valid_embs, k)
 
                     clusters = {}
                     for vi, label in zip(valid_indices_arr, labels, strict=False):
@@ -396,13 +423,10 @@ def make_search_video(index: VideoIndex) -> dict[str, Any]:
                     clusters.setdefault(int(cid), []).append(int(vi))
                 top_indices = _round_robin_from_clusters(clusters, scores, top_k)
             else:
-                from sklearn.cluster import KMeans
-
                 active_matrix = matrices[0]
                 k = min(top_k, n_valid)
                 valid_embs = active_matrix[valid_indices]
-                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-                labels = kmeans.fit_predict(valid_embs)
+                labels = _cluster_labels(valid_embs, k)
 
                 clusters = {}
                 for vi, label in zip(valid_indices, labels, strict=False):
@@ -538,8 +562,6 @@ def make_get_transcript(index: VideoIndex) -> dict[str, Any]:
 
 def make_discriminative_vqa(index: VideoIndex) -> dict[str, Any]:
     """Embedding-based multiple-choice VQA without LLM generation."""
-    from sklearn.metrics.pairwise import cosine_similarity
-
     def discriminative_vqa(
         question: str,
         candidates: list[str],
@@ -566,7 +588,7 @@ def make_discriminative_vqa(index: VideoIndex) -> dict[str, Any]:
         if len(active_embs) == 0:
             return []
 
-        sims = cosine_similarity(candidate_embs, active_embs)
+        sims = _cosine_similarity(candidate_embs, active_embs)
         max_sims = sims.max(axis=1)
         best_seg_indices = sims.argmax(axis=1)
 
@@ -633,8 +655,6 @@ def make_get_scene_list(index: VideoIndex) -> dict[str, Any]:
 
 def make_anticipate_action(index: VideoIndex) -> dict[str, Any]:
     """Predict what happens next after a given time point."""
-    from sklearn.metrics.pairwise import cosine_similarity
-
     def anticipate_action(
         time_point: float,
         top_k: int = 3,
@@ -681,7 +701,7 @@ def make_anticipate_action(index: VideoIndex) -> dict[str, Any]:
             if not future_mask.any():
                 return {"predicted_segments": [], "note": "No future segments available"}
 
-            scores = cosine_similarity(context_emb, index.embeddings)[0]
+            scores = _cosine_similarity(context_emb, index.embeddings)[0]
             scores[~future_mask] = -np.inf
             scores[context_seg_idx] = -np.inf  # exclude self
 
@@ -723,7 +743,7 @@ def make_anticipate_action(index: VideoIndex) -> dict[str, Any]:
                     ][:top_k]
                     pred_embs = index.embeddings[pred_indices]
                     mean_pred = pred_embs.mean(axis=0).reshape(1, -1)
-                    cand_scores = cosine_similarity(candidate_embs, mean_pred).flatten()
+                    cand_scores = _cosine_similarity(candidate_embs, mean_pred).flatten()
                     ranking = sorted(
                         zip(candidates, cand_scores, strict=False),
                         key=lambda x: x[1], reverse=True,
@@ -743,9 +763,9 @@ def make_anticipate_action(index: VideoIndex) -> dict[str, Any]:
         # Find nearest segments to predicted embedding
         predicted_emb = predicted_emb.reshape(1, -1)
         if index.temporal_embeddings is not None:
-            scores = cosine_similarity(predicted_emb, index.temporal_embeddings)[0]
+            scores = _cosine_similarity(predicted_emb, index.temporal_embeddings)[0]
         elif index.embeddings is not None:
-            scores = cosine_similarity(predicted_emb, index.embeddings)[0]
+            scores = _cosine_similarity(predicted_emb, index.embeddings)[0]
         else:
             return {"error": "No embeddings available", "predicted_segments": []}
 
@@ -778,8 +798,6 @@ def make_anticipate_action(index: VideoIndex) -> dict[str, Any]:
 
 def make_predict_future(index: VideoIndex) -> dict[str, Any]:
     """Predict likely future content after a given time range (world model)."""
-    from sklearn.metrics.pairwise import cosine_similarity
-
     def predict_future(
         start_time: float,
         end_time: float,
@@ -847,7 +865,7 @@ def make_predict_future(index: VideoIndex) -> dict[str, Any]:
                         "note": "No future segments available",
                     }
 
-                scores = cosine_similarity(predicted_emb, emb_matrix)[0]
+                scores = _cosine_similarity(predicted_emb, emb_matrix)[0]
                 scores[~future_mask] = -np.inf
 
                 top_indices = np.argsort(scores)[::-1][:5]
@@ -905,7 +923,7 @@ def make_predict_future(index: VideoIndex) -> dict[str, Any]:
                 "note": "No future segments available",
             }
 
-        sim_scores = cosine_similarity(ctx_emb, emb_matrix)[0]
+        sim_scores = _cosine_similarity(ctx_emb, emb_matrix)[0]
 
         predicted = []
         for i, seg in future_segs:
@@ -948,8 +966,6 @@ def make_predict_future(index: VideoIndex) -> dict[str, Any]:
 
 def make_verify_coherence(index: VideoIndex) -> dict[str, Any]:
     """Verify temporal coherence and detect anomalies in a video segment."""
-    from sklearn.metrics.pairwise import cosine_similarity
-
     def verify_coherence(
         start_time: float,
         end_time: float,
@@ -1010,15 +1026,15 @@ def make_verify_coherence(index: VideoIndex) -> dict[str, Any]:
                 if predicted_features is not None:
                     predicted_emb = predicted_features.mean(axis=0).reshape(1, -1)
                     actual_emb = emb_matrix[next_idx].reshape(1, -1)
-                    score = float(cosine_similarity(predicted_emb, actual_emb)[0, 0])
+                    score = float(_cosine_similarity(predicted_emb, actual_emb)[0, 0])
                 else:
                     curr_emb = emb_matrix[curr_idx].reshape(1, -1)
                     next_emb = emb_matrix[next_idx].reshape(1, -1)
-                    score = float(cosine_similarity(curr_emb, next_emb)[0, 0])
+                    score = float(_cosine_similarity(curr_emb, next_emb)[0, 0])
             else:
                 curr_emb = emb_matrix[curr_idx].reshape(1, -1)
                 next_emb = emb_matrix[next_idx].reshape(1, -1)
-                score = float(cosine_similarity(curr_emb, next_emb)[0, 0])
+                score = float(_cosine_similarity(curr_emb, next_emb)[0, 0])
 
             is_anomalous = score < threshold
             segment_scores.append({

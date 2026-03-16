@@ -84,3 +84,11 @@ def get_client(
         raise ValueError(
             f"Unknown backend: {backend}. Supported backends: ['openai', 'vllm', 'portkey', 'openrouter', 'litellm', 'anthropic', 'azure_openai', 'gemini', 'vercel']"
         )
+
+
+def create_client(
+    backend: ClientBackend,
+    backend_kwargs: dict[str, Any],
+) -> BaseLM:
+    """Backward-compatible alias for legacy call sites."""
+    return get_client(backend=backend, backend_kwargs=backend_kwargs)

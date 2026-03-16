@@ -670,9 +670,11 @@ def run_agent(
     model: str = "gemini-2.5-flash",
     api_key: str | None = None,
     backend: str = "gemini",
+    pipeline: str | None = None,
     index_mode: str = "fast",
     asr_model: str = "faster-whisper/base",
     max_iterations: int = 12,
+    output_format: str = "text",
     index: Any | None = None,
 ) -> Iterator[dict]:
     """Run the video-analysis agent, yielding event dicts.
@@ -688,11 +690,14 @@ def run_agent(
         model: LLM model identifier.
         api_key: API key (falls back to env vars).
         backend: ``"gemini"``, ``"openrouter"``, ``"openai"``, ``"anthropic"``.
+        pipeline: Optional pipeline label for compatibility.
         index_mode: ``"fast"`` or ``"captioned"``.
         asr_model: ASR model for transcription.
         max_iterations: Maximum agent loop iterations.
+        output_format: Optional hint for caller-side formatting.
         index: Pre-built :class:`VideoIndex` — skips indexing when provided.
     """
+    _ = pipeline, output_format
     from kuavi.indexer import VideoIndexer
     from kuavi.loader import VideoLoader
 

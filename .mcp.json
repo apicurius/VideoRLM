@@ -4,7 +4,7 @@
       "command": "uv",
       "args": ["run", "python", "-m", "kuavi.mcp_server"],
       "env": {
-        "KUAVI_LOG_DIR": "/Users/oerdogan/LVU/logs"
+        "KUAVI_LOG_DIR": "logs"
       }
     }
   }

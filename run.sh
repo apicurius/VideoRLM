@@ -33,7 +33,40 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 # ── Ensure Python deps are installed ─────────────────────────────────────────
 VENV_PYTHON="$ROOT/.venv/bin/python"
-uv pip install openai markdown --python "$VENV_PYTHON" --quiet
+if ! "$VENV_PYTHON" - <<'PY' >/dev/null 2>&1
+import fastapi
+import uvicorn
+import multipart
+import numpy
+import cv2
+import sklearn
+import torch
+import torchvision
+import transformers
+import sentence_transformers
+from PIL import Image
+import openai
+import markdown
+PY
+then
+    echo "→ Installing missing backend dependencies..."
+    uv pip install \
+        fastapi \
+        uvicorn \
+        python-multipart \
+        numpy \
+        opencv-python \
+        scikit-learn \
+    torch \
+    torchvision \
+    transformers \
+    sentence-transformers \
+    pillow \
+        openai \
+        markdown \
+        --python "$VENV_PYTHON" \
+        --quiet
+fi
 
 # ── Ensure frontend deps are installed ───────────────────────────────────────
 if [ ! -d "$ROOT/frontend/node_modules" ]; then

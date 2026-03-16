@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <title>VideoRLM Tier Benchmark Report</title>
+  <style>
+    :root { --bg:#0b0f17; --panel:#121826; --text:#e6edf7; --muted:#9fb0cc; --ok:#2ecc71; --bad:#e74c3c; --amber:#f39c12; --blue:#3498db; --green:#2ecc71; --orange:#e67e22; }
+    body { margin:0; font-family:Inter,Arial,sans-serif; background:var(--bg); color:var(--text); }
+    .wrap { max-width:1300px; margin:0 auto; padding:24px; }
+    .panel { background:var(--panel); border:1px solid #1f2a40; border-radius:14px; padding:16px; margin-bottom:16px; }
+    h1,h2,h3 { margin:0 0 12px; }
+    .badges { display:flex; gap:10px; flex-wrap:wrap; }
+    .badge { padding:8px 12px; border-radius:999px; background:#1a2436; border:1px solid #2a3a57; color:var(--text); font-size:13px; }
+    .cards { display:grid; grid-template-columns:repeat(3,minmax(250px,1fr)); gap:12px; }
+    .card { background:#111a2a; border:1px solid #223252; border-radius:10px; padding:14px; }
+    .chart-grid { display:grid; grid-template-columns:repeat(2,minmax(300px,1fr)); gap:14px; }
+    .chart-cell { background:#111a2a; border:1px solid #223252; border-radius:10px; padding:12px; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th,td { border:1px solid #23324f; padding:6px 7px; vertical-align:top; }
+    th { background:#18253c; position:sticky; top:0; z-index:2; }
+    .router-ok { background:rgba(46,204,113,.20); }
+    .router-bad { background:rgba(231,76,60,.20); }
+    .dot { display:inline-block; width:10px; height:10px; border-radius:50%; }
+    .dot-yes { background:var(--ok); }
+    .dot-no { background:var(--bad); }
+    .cost-hot { background:rgba(243,156,18,.22); }
+    .acc-item { border:1px solid #223252; border-radius:8px; margin-bottom:8px; background:#111a2a; }
+    .acc-item summary { cursor:pointer; padding:10px 12px; font-weight:600; }
+    .acc-body { padding:0 12px 10px; color:#d2def2; }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <div class='wrap'>
+    <section class='panel'>
+      <h1>VideoRLM Tier Benchmark Report</h1>
+      <p class='muted'>Video: big_bang_theory.mp4 • Run at: 2026-03-16T15:41:32 • Total questions: 20</p>
+      <div class='badges'>
+        <span class='badge'>Tier 1 avg: 39.5ms</span>
+        <span class='badge'>Tier 2 avg: 327.8ms</span>
+        <span class='badge'>Tier 3 avg: 15954.5ms</span>
+      </div>
+    </section>
+
+    <section class='panel'>
+      <h2>Tier Explanation</h2>
+      <div class='cards'>
+        <div class='card'>
+          <h3>TIER 1 — World Model (V-JEPA)</h3>
+          <p><strong>Cost:</strong> $0.00 per query</p>
+          <p>How it works: Uses V-JEPA 2, a video world model trained by Meta to predict masked spacetime patches. It understands temporal structure, action sequences, and physical coherence directly from video features — no language model involved.</p>
+          <p><strong>Best for:</strong> Temporal questions, action classification, coherence checks.</p>
+          <p><strong>Limitation:</strong> Cannot produce free-form text answers.</p>
+        </div>
+        <div class='card'>
+          <h3>TIER 2 — Semantic Embeddings</h3>
+          <p><strong>Cost:</strong> $0.00 per query</p>
+          <p>How it works: Uses SigLIP 2 (visual) and Gemma (text) embedding models to perform semantic similarity search over indexed video segments and transcript. Finds the most relevant scenes by meaning, not keyword matching.</p>
+          <p><strong>Best for:</strong> Scene search, transcript lookup, multiple choice questions.</p>
+          <p><strong>Limitation:</strong> Cannot reason across multiple scenes or synthesize answers.</p>
+        </div>
+        <div class='card'>
+          <h3>TIER 3 — LLM Agent (Last Resort)</h3>
+          <p><strong>Cost:</strong> ~$0.01–0.05 per query</p>
+          <p>How it works: Routes to a full LLM (GPT-4o, Claude, Gemini) with access to all 31 kuavi tools. The agent autonomously decides which tools to call, synthesizes results across multiple tool calls, and produces a free-form natural language answer.</p>
+          <p><strong>Best for:</strong> Summarization, multi-hop reasoning, open-ended questions.</p>
+          <p><strong>Limitation:</strong> Expensive, slower, non-deterministic.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class='panel'>
+      <h2>Summary Charts</h2>
+      <div class='chart-grid'>
+        <div class='chart-cell'><h3>Average Response Time by Tier</h3><canvas id='chartTime'></canvas></div>
+        <div class='chart-cell'><h3>Answer Rate by Tier</h3><canvas id='chartAnswer'></canvas></div>
+        <div class='chart-cell'><h3>Router Classification Accuracy</h3><canvas id='chartRouter'></canvas></div>
+        <div class='chart-cell'><h3>Total LLM Calls & Cost</h3><canvas id='chartCalls'></canvas></div>
+        <div class='chart-cell'><h3>Escalation Rate</h3><canvas id='chartEscalation'></canvas></div>
+      </div>
+    </section>
+
+    <section class='panel'>
+      <h2>Per-Question Results</h2>
+      <div style='overflow:auto; max-height:520px'>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Question</th><th>Type</th><th>Expected Tier</th><th>Router Said</th><th>Router ✓/✗</th>
+              <th>T1 Time</th><th>T1 Answered</th><th>T2 Time</th><th>T2 Answered</th>
+              <th>T3 Time</th><th>T3 LLM Calls</th><th>T3 Cost USD</th>
+            </tr>
+          </thead>
+          <tbody><tr><td>q01</td><td>what action is happening at minute 3</td><td>temporal</td><td>T1</td><td class='router-ok'>T1</td><td>✓</td><td>627ms</td><td><span class="dot dot-yes"></span></td><td>6377ms</td><td><span class="dot dot-yes"></span></td><td>23952ms</td><td>4</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q02</td><td>what sport is being played</td><td>classification</td><td>T1</td><td class='router-ok'>T1</td><td>✓</td><td>0ms</td><td><span class="dot dot-no"></span></td><td>14ms</td><td><span class="dot dot-yes"></span></td><td>28435ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q03</td><td>what is the person doing at minute 5</td><td>temporal</td><td>T1</td><td class='router-ok'>T1</td><td>✓</td><td>45ms</td><td><span class="dot dot-yes"></span></td><td>13ms</td><td><span class="dot dot-yes"></span></td><td>7575ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q04</td><td>predict what happens next after minute 10</td><td>temporal</td><td>T1</td><td class='router-ok'>T1</td><td>✓</td><td>0ms</td><td><span class="dot dot-no"></span></td><td>5ms</td><td><span class="dot dot-yes"></span></td><td>16725ms</td><td>5</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q05</td><td>is the motion at minute 7 natural and smooth</td><td>coherence</td><td>T1</td><td class='router-bad'>T2</td><td>✗</td><td>53ms</td><td><span class="dot dot-yes"></span></td><td>6ms</td><td><span class="dot dot-yes"></span></td><td>18227ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q06</td><td>find the scene where someone picks up an object</td><td>search</td><td>T2</td><td class='router-ok'>T2</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>17ms</td><td><span class="dot dot-yes"></span></td><td>21472ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q07</td><td>when does the main character first appear</td><td>search</td><td>T2</td><td class='router-ok'>T2</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>10ms</td><td><span class="dot dot-yes"></span></td><td>9153ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q08</td><td>find the scene where two people are talking</td><td>search</td><td>T2</td><td class='router-ok'>T2</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>6ms</td><td><span class="dot dot-yes"></span></td><td>14494ms</td><td>4</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q09</td><td>when does the music change</td><td>search</td><td>T2</td><td class='router-ok'>T2</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>5ms</td><td><span class="dot dot-yes"></span></td><td>24190ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q10</td><td>what is said at the beginning of the video</td><td>transcript</td><td>T2</td><td class='router-ok'>T2</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>20ms</td><td><span class="dot dot-yes"></span></td><td>7671ms</td><td>4</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q11</td><td>find the scene where someone sits down</td><td>search</td><td>T2</td><td class='router-ok'>T2</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>5ms</td><td><span class="dot dot-yes"></span></td><td>23334ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q12</td><td>at what timestamp does the scene change indoors</td><td>search</td><td>T2</td><td class='router-ok'>T2</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>20ms</td><td><span class="dot dot-yes"></span></td><td>19899ms</td><td>5</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q13</td><td>summarize what happens in this video</td><td>summary</td><td>T3</td><td class='router-ok'>T3</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>13ms</td><td><span class="dot dot-yes"></span></td><td>14268ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q14</td><td>explain the main storyline</td><td>explanation</td><td>T3</td><td class='router-bad'>T2</td><td>✗</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>5ms</td><td><span class="dot dot-yes"></span></td><td>9878ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q15</td><td>why does the character react that way</td><td>reasoning</td><td>T3</td><td class='router-ok'>T3</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>6ms</td><td><span class="dot dot-yes"></span></td><td>14644ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q16</td><td>describe everything that happens in the first 5 minutes</td><td>description</td><td>T3</td><td class='router-ok'>T3</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>5ms</td><td><span class="dot dot-yes"></span></td><td>18891ms</td><td>4</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q17</td><td>what caused the scene change at minute 8</td><td>reasoning</td><td>T3</td><td class='router-ok'>T3</td><td>✓</td><td>64ms</td><td><span class="dot dot-yes"></span></td><td>13ms</td><td><span class="dot dot-yes"></span></td><td>9859ms</td><td>4</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q18</td><td>tell me about the relationships between characters</td><td>explanation</td><td>T3</td><td class='router-ok'>T3</td><td>✓</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>6ms</td><td><span class="dot dot-yes"></span></td><td>10752ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q19</td><td>what is the overall mood of this video</td><td>description</td><td>T3</td><td class='router-bad'>T2</td><td>✗</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>5ms</td><td><span class="dot dot-yes"></span></td><td>13811ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr><tr><td>q20</td><td>how does the narrative develop throughout</td><td>explanation</td><td>T3</td><td class='router-bad'>T2</td><td>✗</td><td>0ms</td><td><span class="dot dot-yes"></span></td><td>5ms</td><td><span class="dot dot-yes"></span></td><td>11861ms</td><td>3</td><td class='cost-hot'>$0.0300</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class='panel'>
+      <h2>Raw Answers Accordion</h2>
+      <details class='acc-item'><summary>q01 — what action is happening at minute 3</summary><div class='acc-body'><p><strong>Question:</strong> what action is happening at minute 3</p><p><strong>Tier 1:</strong> Extracted 4 frames around the target time range.</p><p><strong>Tier 2:</strong> Top label: unknown</p><p><strong>Tier 3:</strong> At minute 3 (specifically around 3:12 to 3:28), the characters are conversing about colonoscopies. One character mentions, "Oh my uncle just had a colonoscopy," which leads to another character expressing surprise at this shared experience. They further discuss having people in their lives who have undergone similar procedures [TS: 316.96-326.12].
+
+### Summary of Action:
+- A conversation takes place regarding colonoscopies, highlighting a connection between the characters through shared experiences. 
+
+Here are some frames from that segment for visual reference:
+![Frame from minute 3](data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD... /* truncated for brevity */) 
+
+If you need more detailed visual analysis or additional context, please let me know!</p></div></details><details class='acc-item'><summary>q02 — what sport is being played</summary><div class='acc-body'><p><strong>Question:</strong> what sport is being played</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> Top label: unknown</p><p><strong>Tier 3:</strong> The sport being played in the video appears to be **basketball**. This conclusion is supported by multiple segments observed in the analysis:
+
+1. In the segment from **1112 to 1128 seconds**, players are seen engaging in typical basketball movements such as dribbling and shooting the ball, which are characteristic actions in basketball games [TS: 1112.0].
+2. The visual content from the same segment displays a basketball court setting, complete with a hoop, players in jerseys, and the use of a basketball [TS: 1112.0].
+3. Further supporting evidence can be found in the segment from **1224 to 1240 seconds**, where similar gameplay dynamics are evident, with players running and performing actions that are consistent with basketball play [TS: 1224.0].
+
+No other sports were observed in the video content, reinforcing the notion that basketball is the primary sport being played.</p></div></details><details class='acc-item'><summary>q03 — what is the person doing at minute 5</summary><div class='acc-body'><p><strong>Question:</strong> what is the person doing at minute 5</p><p><strong>Tier 1:</strong> Extracted 4 frames around the target time range.</p><p><strong>Tier 2:</strong> Top label: unknown</p><p><strong>Tier 3:</strong> At minute 5 (specifically from [TS: 424.0] to [TS: 472.0]), the person in the video is involved in an activity that appears to be focused on engagement with their surroundings or tools. 
+
+The visual analysis shows that the person could be interacting with materials, possibly involving some artistic or technical work, as they seem to be manipulating objects in their vicinity. Detailed actions are not explicitly captioned, but the context of the segment provides enough evidence of active participation in a task related to their environment.
+
+If you require further specifics or a visual reference, feel free to ask!</p></div></details><details class='acc-item'><summary>q04 — predict what happens next after minute 10</summary><div class='acc-body'><p><strong>Question:</strong> predict what happens next after minute 10</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [504.0s-536.0s] score=0.088
+2. [424.0s-472.0s] score=0.086
+3. [648.0s-664.0s] score=0.086</p><p><strong>Tier 3:</strong> After minute 10 of the video, several scenes appear to build upon earlier content, featuring ongoing developments in narrative and character dynamics. Here's a breakdown of what happens next based on the insights gathered:
+
+1. **Scene Transition**: The transition around [TS: 10:12] indicates a shift where characters start to discuss new strategies or reveal deeper emotional conflicts. This is a pivotal moment where the interplay between different character motivations is examined in more detail.
+
+2. **Emotional Climax**: In the segment between [TS: 11:12] and [TS: 11:28], characters express heightened emotions, which could lead to a confrontation or a significant revelation. The intensity of the dialogue suggests a turning point in relationships, with potential for conflict or reconciliation.
+
+3. **Future Implications**: By [TS: 11:44], the narrative appears to set up future scenarios where the outcomes of current conflicts will influence character arcs. Decisions made during this segment will likely have consequences that affect the unfolding plot, indicating that what follows will be crucial for character development and story progression.
+
+4. **Visual and Narrative Connections**: The visual elements throughout these segments enhance the dramatic tension, showing close-ups of characters and the environment, which helps convey the emotional weight of the discussions and enhances viewer engagement.
+
+Based on these findings, we can anticipate that the story will pivot towards critical decisions by the characters, with possible confrontations or resolutions leading to subsequent action or reflection in the following segments.</p></div></details><details class='acc-item'><summary>q05 — is the motion at minute 7 natural and smooth</summary><div class='acc-body'><p><strong>Question:</strong> is the motion at minute 7 natural and smooth</p><p><strong>Tier 1:</strong> Temporal coherence score: 1.000; anomalies detected: 0
+Extracted 4 frames around the target time range.</p><p><strong>Tier 2:</strong> 1. [424.0s-472.0s] score=0.080
+2. [504.0s-536.0s] score=0.080
+3. [312.0s-328.0s] score=0.074</p><p><strong>Tier 3:</strong> The analysis of the motion at minute 7 of the video, specifically from [TS: 7:12] to [TS: 7:28], shows varying frames that capture smooth movement. 
+
+1. **Frame Analysis**:
+   - The first frame has a mean brightness of approximately 59.04, indicating a balanced exposure with sensible color representation (Red: 92.68, Green: 43.77, Blue: 49.56) [TS: 432.0].
+   - The subsequent frames show mean brightness values ranging from 58.46 to 71.55, suggesting consistent lighting conditions [TS: 432.0 to 448.0].
+   - The color channels maintain a pleasing distribution, which contributes positively to the perception of motion being smooth and natural.
+  
+2. **Smoothness**: 
+   - The brightness and color values are stable across the frames, indicating no abrupt changes that could disrupt the flow of motion. The gradual gradient in brightness also suggests a smooth transition which is characteristic of natural motion.
+
+Overall, the motion captured appears to be natural and smooth, characterized by consistent lighting and color quality across multiple frames.</p></div></details><details class='acc-item'><summary>q06 — find the scene where someone picks up an object</summary><div class='acc-body'><p><strong>Question:</strong> find the scene where someone picks up an object</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [216.0s-232.0s] score=0.103
+2. [1576.0s-1592.0s] score=0.102
+3. [312.0s-328.0s] score=0.101</p><p><strong>Tier 3:</strong> I found several scenes where someone picks up an object in the video. Here are the relevant results:
+
+1. **Scene at 376-392 seconds:**
+   - **Context:** In a discussion about building something, the characters mention picking up scrap aluminum for their project.
+   - **Visuals:** There is no specific visual description provided, but you'll see the characters involved in the conversation.
+   - **Transcript Excerpt:** "Leonard why don't you and Sheldon go down to the junkyard and pick up about six square meters of scrap aluminum." [TS: 87.8]
+
+2. **Scene at 1112-1128 seconds:**
+   - **Context:** A character discusses the need to pick up refrigerated foods to prevent bacterial growth.
+   - **Transcript Excerpt:** "Anyone who knows anything about the dynamics of bacterial growth knows to pick up their refrigerated foods on the way out of the supermarket." [TS: 509.32]
+
+3. **Scene at 1224-1240 seconds:**
+   - **Context:** There is a general discussion that includes the notion of picking items up during their conversation.
+   - **Transcript Excerpt:** Not specifically available but generally fits the theme of retrieval or collection. 
+
+4. **Scene at 424-472 seconds:**
+   - **Context:** Conversations unfold with discussions about tasks or actions, but specific mentions of picking are less clear.
+   - **Relevant actions:** Several interactions take place that may involve picking up or handling objects, but not precisely detailed in the excerpts.
+
+5. **Scene at 312-328 seconds:**
+   - **Context:** Discussing activities, with a general mention of requirements without a clear object mentioned for picking up.
+   - **Transcript Excerpt:** Involves a planning discussion without explicit object handling. 
+
+If you need detailed visuals or further contents from any specific segment, please let me know!</p></div></details><details class='acc-item'><summary>q07 — when does the main character first appear</summary><div class='acc-body'><p><strong>Question:</strong> when does the main character first appear</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> Best match at 1064.0s-1080.0s (score=0.112).</p><p><strong>Tier 3:</strong> The main character first appears around **TS: 648.0** during the video.</p></div></details><details class='acc-item'><summary>q08 — find the scene where two people are talking</summary><div class='acc-body'><p><strong>Question:</strong> find the scene where two people are talking</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [216.0s-232.0s] score=0.121
+2. [312.0s-328.0s] score=0.113
+3. [376.0s-392.0s] score=0.113</p><p><strong>Tier 3:</strong> I found several scenes where two people are talking. Here are the details:
+
+1. **Scene from 376 to 392 seconds**:
+   - Transcript: 
+     - "Wow centripetal force" 
+     - "Actually it's centripetal force which is an inward force generated by the glass acting on the olive" 
+     - "Excuse me" 
+     - "Now if you were riding on the olive you'd..." 
+   - This dialogue suggests a discussion between two people about forces related to an olive in a glass [TS: 377.20].
+
+2. **Scene from 424 to 472 seconds**:
+   - Transcript: 
+     - "No it doesn't"
+     - "Not unless the two doors are connected by relays or there are motion sensors involved..."
+     - "Slow down slow down please slow down"
+     - "You're not leaving yourself enough space between cars..."
+     - "Oh I'm sorry. Did I insult you? Is your body mass somehow tied into your self-worth?"
+     - "Well yeah. Interesting. Anyway that gives us a total weight of..."
+   - This scene involves a conversation about driving and weight calculation, indicating a debate between two people [TS: 423.76].
+
+3. **Scene from 312 to 328 seconds**:
+   - Transcript: 
+     - "Oh my uncle just had a colonoscopy."
+     - "You're kidding."
+     - "Well then that's something we have in common."
+   - Here, the two people are sharing personal stories about relatives, involving lighthearted banter [TS: 312.32].
+
+These segments showcase various conversations between two individuals across different contexts.</p></div></details><details class='acc-item'><summary>q09 — when does the music change</summary><div class='acc-body'><p><strong>Question:</strong> when does the music change</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> Best match at 504.0s-536.0s (score=0.075).</p><p><strong>Tier 3:</strong> The music changes at the following timestamps in the video:
+
+1. At **376 seconds**, during a scene that shows significant visual content [TS: 376.0].
+2. Again at **424 seconds**, where the mood shifts with a noticeable change in the music [TS: 424.0].
+3. There is another change at **920 seconds**, signaling a transition in the audio [TS: 920.0].
+4. Finally, another change occurs at **1112 seconds**, marking the last notable music shift [TS: 1112.0].
+
+These timestamps indicate moments where the audio, specifically the music, transitions noticeably in the video.</p></div></details><details class='acc-item'><summary>q10 — what is said at the beginning of the video</summary><div class='acc-body'><p><strong>Question:</strong> what is said at the beginning of the video</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> Top label: unknown</p><p><strong>Tier 3:</strong> At the beginning of the video, the speaker says: "easy. Okay, now we've got an inclined plane. The force required to lift is reduced by the sine of the angle of the stairs called thirty degrees, so about half. Exactly half." [TS: 216.12]</p></div></details><details class='acc-item'><summary>q11 — find the scene where someone sits down</summary><div class='acc-body'><p><strong>Question:</strong> find the scene where someone sits down</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [216.0s-232.0s] score=0.110
+2. [712.0s-728.0s] score=0.109
+3. [1112.0s-1128.0s] score=0.108</p><p><strong>Tier 3:</strong> The search for scenes where someone sits down yielded relevant segments. Here are the details:
+
+1. **Segment from 312.0 to 328.0 seconds**: This segment appears to touch on the topic of sitting down, as indicated by the transcript quotes related to waiting for someone to sit down. Unfortunately, the visual information did not provide clear evidence of sitting behavior. The frames extracted may help in visual confirmation [TS: 312.0-328.0].
+
+2. **Segment from 376.0 to 392.0 seconds**: This was another segment considered, but again there was no explicit visual or contextual evidence directly confirming a person sitting down. The lack of significant visual detail about the action of sitting during this time was noted [TS: 376.0-392.0].
+
+3. **Segment from 216.0 to 232.0 seconds**: Like the others above, this may have included dialogue pertinent to a related interaction but did not visually confirm the action of sitting down [TS: 216.0-232.0].
+
+The analysis indicates multiple considerations but no unequivocal visuals of the action "sit down." If needed, I could further explore specific frames from the closest segments for a detailed examination. Would you like me to extract specific frames or look for more segments?</p></div></details><details class='acc-item'><summary>q12 — at what timestamp does the scene change indoors</summary><div class='acc-body'><p><strong>Question:</strong> at what timestamp does the scene change indoors</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> Best match at 744.0s-760.0s (score=0.107).</p><p><strong>Tier 3:</strong> The scene transitions indoors at the following timestamps:
+
+1. **Scene Change 1:** Begins at [TS: 424.0] and ends at [TS: 472.0]. 
+2. **Scene Change 2:** Begins at [TS: 712.0] and ends at [TS: 728.0].
+3. **Scene Change 3:** Begins at [TS: 744.0] and ends at [TS: 760.0].
+
+These segments indicate distinct changes occurring indoors within the broader video timeline.</p></div></details><details class='acc-item'><summary>q13 — summarize what happens in this video</summary><div class='acc-body'><p><strong>Question:</strong> summarize what happens in this video</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [504.0s-536.0s] score=0.077
+2. [376.0s-392.0s] score=0.077
+3. [424.0s-472.0s] score=0.077</p><p><strong>Tier 3:</strong> The video has a total duration of approximately 26 minutes and is composed of various scenes that cover multiple topics.
+
+1. **Beginning of the Video (Scene 0)**: The video starts with an introduction, providing an overview of what will be discussed. This sets the stage for the details to follow. [TS: 0:00–0:20].
+
+2. **First Topic Overview (Scene 1)**: It transitions into the first main topic with detailed explanations. Here, the presenter discusses the foundational elements necessary for understanding the subject matter. [TS: 5:12–5:32].
+
+3. **In-depth Analysis (Scenes 2–4)**: Key elements of the topic are analyzed. The presenter utilizes various tools and examples to illustrate these points, providing visuals to enhance understanding. This segment includes discussions on complex concepts, supported by relevant examples. [TS: 7:00–12:00].
+
+4. **Transition to New Ideas (Scenes 5-8)**: The video shifts topics, introducing new theories and perspectives that complement the initial topics. This section highlights ongoing research and findings that affect the subject area covered in previous sections. [TS: 15:30–20:00].
+
+5. **Concluding Remarks (Scene 20)**: The video concludes with a summary of the key points discussed, reinforcing the main themes and encouraging audience reflection on the material presented. The final scene summarizes the total content effectively, aiming to leave the viewers with lasting impressions. [TS: 25:25–26:00].
+
+Throughout the video, visuals and graphics are used effectively to convey complex ideas in an engaging manner. Each section builds upon the previous one, transitioning smoothly to explore a comprehensive view of the subject matter.</p></div></details><details class='acc-item'><summary>q14 — explain the main storyline</summary><div class='acc-body'><p><strong>Question:</strong> explain the main storyline</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [216.0s-232.0s] score=0.084
+2. [504.0s-536.0s] score=0.084
+3. [1576.0s-1592.0s] score=0.084</p><p><strong>Tier 3:</strong> The video presents a complex narrative, which is broken down through various scenes that feature significant moments and dialogues, contributing to the overall storyline. Below are the summarized insights derived from different segments of the video.
+
+1. **Scene Overview**:
+   - The video seems to present a progression of events across various scenes, indicating a structured storyline with scenes starting from [TS: 216.0] and concluding at [TS: 1592.0]. The scenes transition multiple times, hinting at shifts in context or perspective.
+
+2. **Key Scene Insights**:
+   - **Early Scenes** (e.g., [TS: 216.0] to [TS: 232.0]):
+     This section introduces characters or setting elements possibly establishing motivations or relationships.
+   - **Conflict Development** (e.g., [TS: 504.0] to [TS: 536.0]):
+     Here, a clear conflict arises, suggesting tension or challenges faced by the characters involved.
+   - **Climax Sequence** (e.g., [TS: 1544.0] to [TS: 1560.0]):
+     This part might showcase critical turning points or a build-up leading to a climax where resolutions begin to be hinted at.
+   - **Resolution Stage** (e.g., [TS: 1576.0] to [TS: 1592.0]):
+     The conclusion of the narrative where outcomes of prior conflicts are realized and character arcs potentially resolve.
+
+3. **Themes and Motifs**:
+   - The recurring motifs across scenes suggest themes of struggle, resolution, relationships, and perhaps existential queries faced by the characters.
+   - Significant emphasis on visual storytelling indicates that actions often replace dialogues, driving emotion through visuals rather than words.
+
+4. **Character Dynamics**:
+   - Various characters appear to navigate complex relationships, with scenes often reflecting their emotional states and conflicts with one another.
+   - The depth of these interactions likely underlines the narrative, making character development a focal point.
+
+The segmented approach employed allows for parsing through the broader storyline — namely, from the introduction of characters and their challenges to a conflictive climax and a reflective resolution, encapsulating human experiences and emotions at various stages of interaction. 
+
+To understand the precise dialogue and the depth of character interactions, reviewing the actual video scenes via the specified timestamps is recommended. This approach allows for appreciating both the thematic depth and the visual storytelling present in the narrative.</p></div></details><details class='acc-item'><summary>q15 — why does the character react that way</summary><div class='acc-body'><p><strong>Question:</strong> why does the character react that way</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [1224.0s-1240.0s] score=0.113
+2. [712.0s-728.0s] score=0.112
+3. [648.0s-664.0s] score=0.112</p><p><strong>Tier 3:</strong> The character's reactions can be analyzed through specific segments of the video where these emotions are expressed. Here’s a detailed breakdown based on the emotional context and actions depicted in the relevant scenes:
+
+1. **Scene Analysis (376-392 seconds)**: In this segment, there is likely a moment of tension or conflict, which influences the character's reaction. The visuals likely depict a significant emotional response, exploring how situations can lead to heightened feelings like fear, anger, or frustration, concluding with the character exhibiting a specific reaction to the stressor [TS: 376-392].
+
+2. **Scene Analysis (424-472 seconds)**: In this segment, the character might be faced with a pivotal decision or revelation. Visual cues and the character's body language suggest that the stakes are high, leading to an intense emotional reaction. The character’s expression, along with surrounding context, drives the understanding of their reaction—simultaneously showing vulnerability and determination [TS: 424-472].
+
+3. **Scene Analysis (648-664 seconds)**: Here, the character's reaction may involve a moment of realization or connection with another character. This transition can evoke feelings of hope or joy, depicted through lighter tones in the visuals, contrasting with the earlier tension. The character’s expressions likely evolve to reflect a shift from one emotional state to another [TS: 648-664].
+
+4. **Scene Analysis (504-536 seconds)**: This segment might involve another pivotal scene where the character's reaction is shaped by past experiences. Illustrating the character's background influences their response to current events, suggesting a more profound psychological depth to their reaction. This can include flashbacks or visual symbols that reinforce their emotional state [TS: 504-536].
+
+Based on these observations, the character's reactions are informed by the situations they are placed in during the narrative, revealing layers of complexity in their emotional responses influenced by both external events and internal struggles. For a deep contextual understanding, examining the specific visual elements and narrative choices that lead to these reactions is crucial.</p></div></details><details class='acc-item'><summary>q16 — describe everything that happens in the first 5 minutes</summary><div class='acc-body'><p><strong>Question:</strong> describe everything that happens in the first 5 minutes</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [424.0s-472.0s] score=0.074
+2. [376.0s-392.0s] score=0.073
+3. [312.0s-328.0s] score=0.072</p><p><strong>Tier 3:</strong> In the first five minutes of the video, a series of humorous and technical exchanges take place between several characters as they attempt to assemble furniture and discuss various technological modifications. Here's a detailed breakdown:
+
+1. **Initial Setup and Confidence** (0:16 - 0:19):
+   - One character describes gathering supplies, specifically mentioning "six two inch dowels" and "one package Phillips head screw" [TS: 0.16]. They express confidence in their ability to assemble a "cheap Swedish media center," drawing on their experience rebuilding a tractor engine as a child [TS: 0.16].
+
+2. **Concerns About Instructions** (0:19 - 0:30):
+   - Another character reacts with concern upon seeing the assembly instructions, describing them as "a pictographic representation of the least imaginative way to assemble these components." They humorously attribute this simplicity to the reason why "Sweden has no space program" [TS: 19.44].
+
+3. **Critique of Design** (0:30 - 0:46):
+   - The characters critique the design of the media center, mentioning that it appears good in the store but is inefficient. They note that a flatscreen TV means wasted space behind it and discuss placing her stereo there, suggesting the use of an infrared repeater to control it [TS: 30.04].
+
+4. **Cooling Ideas** (0:46 - 0:58):
+   - Another character suggests cooling solutions, including fans and possibly liquid cooling with an aquarium pump, indicating a collaboration on enhancing the design functionality [TS: 46.84].
+
+5. **Complex Modifications** (0:58 - 1:07):
+   - The conversation escalates with one character suggesting using "aircraft-grade aluminum" for various parts, expressing confidence that it would turn the whole setup into an effective heatsink. They decide one character and another should head to a junkyard to collect materials for this mod [TS: 58.64].
+
+6. **Neighborhood Smuggling** (1:07 - 1:30):
+   - Characters contemplate sneaking into someone’s apartment to clean their carpet, invoking banter about sarcasm and miscommunication about actions taken at night while others were sleeping [TS: 106.36].
+
+7. **Physical Challenges** (1:30 - 2:30):
+   - The group faces practical challenges related to moving the assembled unit, including a discussion on their lack of physical strength versus their intellectual capabilities in physics. They humorously debate the application of Archimedes' principle and engage in physical exertion to move the media center upstairs using a makeshift inclined plane [TS: 175.84].
+
+8. **Morale and Efforts** (2:30 - 5:00):
+   - Continuous efforts to move the furniture lead to comedic frustrations, with references to gravity being an "heartless bitch" and discussions on whether their efforts are expected to yield social benefits, ultimately underscoring themes of camaraderie and lighthearted competition among the group [TS: 259.04, 274.28].
+
+Overall, the scene combines elements of comedy, technical dialogue, and character interplay, showcasing their personalities while trying to engage in a task that seems simple but becomes a humorous struggle.</p></div></details><details class='acc-item'><summary>q17 — what caused the scene change at minute 8</summary><div class='acc-body'><p><strong>Question:</strong> what caused the scene change at minute 8</p><p><strong>Tier 1:</strong> Extracted 4 frames around the target time range.</p><p><strong>Tier 2:</strong> 1. [312.0s-328.0s] score=0.103
+2. [424.0s-472.0s] score=0.102
+3. [216.0s-232.0s] score=0.101</p><p><strong>Tier 3:</strong> The scene change at minute 8 (8:24) occurs at timestamp 504.0 to 536.0 seconds. During this segment, the dialogue shifts to a conversation about tomatoes being shelved with vegetables despite being technically a fruit. The scene captures a playful discussion between characters, where one character expresses a desire to talk about tomatoes, leading to a light-hearted exchange about supermarket dynamics and bacterial growth, indicating a change in focus from a previous topic to this conversation [TS: 503.88-527.44]. 
+
+The visual context likely reflects this playful interaction, marking a transition in the narrative or thematic content of the video.</p></div></details><details class='acc-item'><summary>q18 — tell me about the relationships between characters</summary><div class='acc-body'><p><strong>Question:</strong> tell me about the relationships between characters</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [952.0s-1000.0s] score=0.097
+2. [1576.0s-1592.0s] score=0.095
+3. [1064.0s-1080.0s] score=0.094</p><p><strong>Tier 3:</strong> The video analysis indicates various character relationships across multiple segments. Here are some insights drawn from the sequences:
+
+1. **Emotional Bonds**:
+   - In the segment from **[TS: 376.0-392.0]**, characters seem to share deep emotional interactions, suggesting a connection that may be romantic or familial. The visual cues highlight expressions of concern and affection between the characters involved.
+
+2. **Conflict and Tension**:
+   - The segment from **[TS: 312.0-328.0]** depicts a moment of conflict or disagreement. Characters display body language and facial expressions that indicate tension, which may suggest a strained relationship or a pivotal moment in their interaction that could affect future dynamics.
+
+3. **Supportive Interactions**:
+   - In the segment from **[TS: 424.0-472.0]**, there are instances of support and cooperation among the characters. This could suggest that despite any previous conflicts, there is a foundation of teamwork or friendship that plays a crucial role in their relationship development.
+
+These observations indicate a complex interplay of relationships where emotional depth, conflict, and support contribute to character development throughout the video. Each segment captures different dimensions of these interactions, highlighting the evolution of relationships among the characters involved.</p></div></details><details class='acc-item'><summary>q19 — what is the overall mood of this video</summary><div class='acc-body'><p><strong>Question:</strong> what is the overall mood of this video</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [376.0s-392.0s] score=0.104
+2. [424.0s-472.0s] score=0.101
+3. [504.0s-536.0s] score=0.099</p><p><strong>Tier 3:</strong> To determine the overall mood of the video, I analyzed several selected segments based on visual and auditory cues.
+
+1. **Segment from [TS: 1112.0 to 1128.0]:** This segment presents a dramatic visual style with dim lighting and higher contrasts, likely evoking feelings of tension or suspense. The audio annotations suggest that the tone is serious and possibly ominous, contributing to a more intense mood.
+
+2. **Segment from [TS: 376.0 to 392.0]:** Here, vibrant colors and upbeat audio can be observed, showcasing another mood, possibly one of excitement or joy, contrasting with previous segments. The lively setting could suggest a celebration or positive experience.
+
+3. **Segment from [TS: 312.0 to 328.0]:** The visuals here reflect a peaceful landscape with soft colors. Accompanying softer audio elements contribute to a serene or reflective mood.
+
+4. **Segment from [TS: 216.0 to 232.0]:** This segment invokes a relaxed and calm atmosphere through simple visuals and gentle sound. It likely serves to ground the viewer, building emotional variance throughout the video.
+
+5. **Segment from [TS: 1224.0 to 1240.0]:** This features a climactic buildup, intense visuals, and suspenseful audio, suggesting a thrilling or dramatic flair, which can heighten the viewer's engagement and anticipation.
+
+### Conclusion
+The video appears to convey a complex range of moods, including tension, joy, serenity, and excitement, depending on the particular segment being viewed. This dynamic interplay between differing moods likely works to maintain viewer interest and evoke a varying emotional response throughout its duration.</p></div></details><details class='acc-item'><summary>q20 — how does the narrative develop throughout</summary><div class='acc-body'><p><strong>Question:</strong> how does the narrative develop throughout</p><p><strong>Tier 1:</strong> Tier 1 completed but did not produce a confident classification.</p><p><strong>Tier 2:</strong> 1. [1576.0s-1592.0s] score=0.068
+2. [648.0s-664.0s] score=0.059
+3. [216.0s-232.0s] score=0.058</p><p><strong>Tier 3:</strong> The narrative of the video develops through several key segments, each contributing to the overall story arc. Here's a breakdown of how the narrative evolves:
+
+1. **Introduction (TS: 0-232)**: The video begins with establishing themes and characters, setting the groundwork for the narrative. During this time, we see a glimpse of the main conflicts that will be explored later.
+
+2. **Character Development (TS: 312-392)**: In this segment, we gain insights into the backgrounds of the main characters. This contextual information is crucial for understanding their motivations, which drives the narrative forward.
+
+3. **Rising Action (TS: 424-472)**: Here, tensions increase as characters face challenges that affect their relationships and goals. This segment heightens the stakes for the characters involved, leading to further developments.
+
+4. **Climax (TS: 1112-1128)**: A pivotal moment in the narrative occurs, where conflicts reach a boiling point. This segment is critical as it represents the peak of emotional and thematic intensity in the video.
+
+5. **Falling Action and Resolution (TS: 1224-1240)**: Following the climax, the video shifts towards resolving the conflicts presented earlier. Here, characters begin to confront the consequences of their actions, leading to a denouement.
+
+Each of these segments contributes to a cohesive narrative progression, showcasing character growth and thematic exploration throughout the video.</p></div></details>
+    </section>
+
+    <section class='panel'>
+      <h2>Conclusions</h2>
+      <p>Tier 1 answered 90.0% of queries at $0 cost.</p>
+      <p>Tier 2 answered 100.0% of queries at $0 cost.</p>
+      <p>Tier 3 answered 95.0% of queries at avg $0.0300 per query.</p>
+      <p>The router correctly classified 16/20 queries (80.0%).</p>
+      <p>Estimated cost savings vs full LLM baseline: running all 20 queries through Tier 3 would cost ~$0.6000. Tiered routing reduced this to ~$0.6000 (0.0% savings).</p>
+    </section>
+  </div>
+
+  <script src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js'></script>
+  <script>
+    const green = '#2ecc71';
+    const blue = '#3498db';
+    const orange = '#e67e22';
+    const amber = '#f39c12';
+
+    new Chart(document.getElementById('chartTime'), {
+      type: 'bar',
+      data: {
+        labels: ['Tier 1','Tier 2','Tier 3'],
+        datasets: [{ data: [39.450,327.800,15954.550], backgroundColor:[green,blue,orange] }]
+      },
+      options: { plugins: { legend: { display:false } } }
+    });
+
+    new Chart(document.getElementById('chartAnswer'), {
+      type: 'bar',
+      data: {
+        labels: ['Tier 1','Tier 2','Tier 3'],
+        datasets: [{ data: [90.000,100.000,95.000], backgroundColor:[green,blue,orange] }]
+      },
+      options: { scales: { y: { min:0, max:100 } }, plugins: { legend: { display:false } } }
+    });
+
+    new Chart(document.getElementById('chartRouter'), {
+      type: 'doughnut',
+      data: { labels:['Correct','Incorrect'], datasets:[{ data:[16,4], backgroundColor:[green,'#e74c3c'] }] }
+    });
+
+    new Chart(document.getElementById('chartCalls'), {
+      type: 'bar',
+      data: {
+        labels: ["q01", "q02", "q03", "q04", "q05", "q06", "q07", "q08", "q09", "q10", "q11", "q12", "q13", "q14", "q15", "q16", "q17", "q18", "q19", "q20"],
+        datasets: [{ label:'LLM Calls', data:[4, 3, 3, 5, 3, 3, 3, 4, 3, 4, 3, 5, 3, 3, 3, 4, 4, 3, 3, 3], backgroundColor: amber }]
+      }
+    });
+
+    new Chart(document.getElementById('chartEscalation'), {
+      type: 'doughnut',
+      data: { labels:['T1→T2','T2→T3','No escalation'], datasets:[{ data:[2,20,0], backgroundColor:[blue,orange,green] }] }
+    });
+  </script>
+</body>
+</html>

@@ -55,6 +55,18 @@ type TimingSummary = {
   total_ms: number;
 };
 
+type RoutingInfo = {
+  tier: number;
+  reason: string;
+  tools: string[];
+};
+
+type EscalationInfo = {
+  from_tier: number;
+  to_tier: number;
+  reason: string;
+};
+
 type PanelTab = "pipeline" | "traces";
 
 const DEFAULT_PIPELINE_STEPS: PipelineStep[] = [
@@ -106,6 +118,8 @@ export default function VideoRLMInterface() {
   const [backend, setBackend] = useState("openrouter");
   const [model, setModel] = useState("openai/gpt-4o");
   const [apiKey, setApiKey] = useState("");
+  const [maxTier, setMaxTier] = useState("3");
+  const [forceLlm, setForceLlm] = useState(false);
   const [openrouterModels, setOpenrouterModels] = useState<{ label: string; value: string }[]>(OPENROUTER_MODELS);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
 
@@ -119,6 +133,9 @@ export default function VideoRLMInterface() {
   const [indexStats, setIndexStats] = useState<IndexStats | null>(null);
   const [frameEvents, setFrameEvents] = useState<FrameEvent[]>([]);
   const [timingSummary, setTimingSummary] = useState<TimingSummary | null>(null);
+  const [routingInfo, setRoutingInfo] = useState<RoutingInfo | null>(null);
+  const [escalationInfo, setEscalationInfo] = useState<EscalationInfo | null>(null);
+  const [estimatedCostUsd, setEstimatedCostUsd] = useState<number | null>(null);
   const [panelTab, setPanelTab] = useState<PanelTab>("pipeline");
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -229,6 +246,9 @@ export default function VideoRLMInterface() {
     setIndexStats(null);
     setFrameEvents([]);
     setTimingSummary(null);
+    setRoutingInfo(null);
+    setEscalationInfo(null);
+    setEstimatedCostUsd(null);
     startTimer();
 
     const formData = new FormData();
@@ -239,6 +259,8 @@ export default function VideoRLMInterface() {
     formData.append("pipeline", pipeline);
     formData.append("index_mode", indexMode);
     formData.append("asr_model", asrModel);
+    formData.append("max_tier", maxTier);
+    formData.append("force_llm", String(forceLlm));
     formData.append("custom_api_key", apiKey);
 
     try {
@@ -275,6 +297,22 @@ export default function VideoRLMInterface() {
 
               if (event.type === "init") {
                 setSteps(event.steps);
+              } else if (event.type === "routing") {
+                setRoutingInfo({
+                  tier: Number(event.tier ?? 0),
+                  reason: String(event.reason ?? ""),
+                  tools: Array.isArray(event.tools) ? event.tools : [],
+                });
+              } else if (event.type === "escalation") {
+                setEscalationInfo({
+                  from_tier: Number(event.from_tier ?? 0),
+                  to_tier: Number(event.to_tier ?? 0),
+                  reason: String(event.reason ?? ""),
+                });
+              } else if (event.type === "cost") {
+                setEstimatedCostUsd(
+                  typeof event.estimated_usd === "number" ? event.estimated_usd : null
+                );
               } else if (event.type === "step") {
                 setSteps((prev) =>
                   prev.map((s) =>
@@ -538,6 +576,31 @@ export default function VideoRLMInterface() {
                       className="bg-white/5 border-white/10 h-11 text-sm rounded-xl text-white focus-visible:ring-amber-500/30 placeholder:text-zinc-600"
                     />
                   </div>
+                  <div className="space-y-3">
+                    <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Max Tier</Label>
+                    <Select value={maxTier} onValueChange={setMaxTier}>
+                      <SelectTrigger className="bg-white/5 border-white/10 h-11 text-sm rounded-xl focus:ring-amber-500/30 text-white">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white">
+                        <SelectItem value="1">1 (Fastest)</SelectItem>
+                        <SelectItem value="2">2 (Balanced)</SelectItem>
+                        <SelectItem value="3">3 (Full)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Force LLM</Label>
+                    <label className="flex items-center gap-2 text-xs text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={forceLlm}
+                        onChange={(e) => setForceLlm(e.target.checked)}
+                        className="accent-amber-500"
+                      />
+                      Skip router and go directly to Tier 3
+                    </label>
+                  </div>
                 </div>
               </motion.div>
             )}
@@ -745,6 +808,25 @@ export default function VideoRLMInterface() {
 
           {/* Input Area */}
           <div className="sticky bottom-0 p-4 sm:p-6 border-t border-white/5 bg-zinc-950/90 backdrop-blur-2xl z-30 shadow-[0_-10px_40px_-10px_rgba(0,0,0,0.5)]">
+            {(routingInfo || escalationInfo || estimatedCostUsd != null) && (
+              <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+                {routingInfo && (
+                  <Badge className="bg-blue-500/10 text-blue-300 border-blue-500/30">
+                    Tier {routingInfo.tier} — {routingInfo.tools.join(", ") || "no tools"}
+                  </Badge>
+                )}
+                {escalationInfo && (
+                  <Badge className="bg-amber-500/10 text-amber-300 border-amber-500/30">
+                    Escalation: {escalationInfo.from_tier} → {escalationInfo.to_tier}
+                  </Badge>
+                )}
+                {estimatedCostUsd != null && (
+                  <Badge className="bg-emerald-500/10 text-emerald-300 border-emerald-500/30">
+                    Est. Cost: ${estimatedCostUsd.toFixed(4)}
+                  </Badge>
+                )}
+              </div>
+            )}
             {error && (
               <Alert variant="destructive" className="mb-4 bg-red-500/10 border-red-500/20 text-red-400 rounded-xl px-5 py-4">
                 <AlertTriangle className="h-5 w-5" />

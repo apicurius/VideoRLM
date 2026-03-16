@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP("kuavi", json_response=True)
 
+# Backward-compatibility shim: some scripts expect `mcp.tools` to exist.
+if not hasattr(FastMCP, "tools"):
+    def _compat_tools(self: FastMCP):
+        tool_manager = getattr(self, "_tool_manager", None)
+        tools_map = getattr(tool_manager, "_tools", {}) if tool_manager is not None else {}
+        return list(tools_map.values())
+
+    setattr(FastMCP, "tools", property(_compat_tools))
+
 
 # ---------------------------------------------------------------------------
 # Server-side trace logger
@@ -456,8 +465,28 @@ class _TraceLogger:
                 "reason": reason,
             })
 
+    def log_query_trace(self, payload: dict[str, Any]) -> None:
+        """Write a tiered query-trace event for routing/cost analysis."""
+        self._emit_session_start()
+        normalized = dict(payload)
+        normalized.setdefault("tier_classified", None)
+        normalized.setdefault("tier_executed", None)
+        normalized.setdefault("llm_calls", 0)
+        normalized.setdefault("estimated_cost_usd", 0.0)
+        event = {
+            "type": "query_trace",
+            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            **normalized,
+        }
+        self._write_event(event)
+
 
 _trace_logger = _TraceLogger()
+
+
+def log_tiered_query_trace(payload: dict[str, Any]) -> None:
+    """Public helper for tiered pipeline modules to append query-trace rows."""
+    _trace_logger.log_query_trace(payload)
 
 
 def _install_trace_logging() -> None:

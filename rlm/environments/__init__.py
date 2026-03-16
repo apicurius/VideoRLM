@@ -44,3 +44,11 @@ def get_environment(
         raise ValueError(
             f"Unknown environment: {environment}. Supported: ['local']"
         )
+
+
+def create_environment(
+    environment: Literal["local"],
+    environment_kwargs: dict[str, Any],
+) -> BaseEnv:
+    """Backward-compatible alias for legacy call sites."""
+    return get_environment(environment=environment, environment_kwargs=environment_kwargs)

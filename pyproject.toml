@@ -35,7 +35,7 @@ Repository = "https://github.com/alexzhang13/rlm"
 Issues = "https://github.com/alexzhang13/rlm/issues"
 
 [project.scripts]
-kuavi = "kuavi.cli:main"
+kuavi = "kuavi.cli:cli"
 kuavi-mcp = "kuavi.mcp_server:mcp.run"
 
 [project.optional-dependencies]

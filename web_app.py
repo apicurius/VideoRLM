@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import concurrent.futures
@@ -20,6 +21,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from kuavi.tiered_pipeline import run_tiered_pipeline
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -574,6 +576,9 @@ async def analyze(
     model: str = Form(default="openai/gpt-4o"),
     index_mode: str = Form(default="fast"),
     asr_model: str = Form(default="faster-whisper/base"),
+    force_reindex: bool = Form(default=False),
+    max_tier: int = Form(default=3),
+    force_llm: bool = Form(default=False),
     custom_api_key: str = Form(default=""),
 ):
     suffix = Path(video.filename or "upload.mp4").suffix or ".mp4"
@@ -600,7 +605,26 @@ async def analyze(
     emit = _StepTimer(_raw_emit)
 
     def run() -> None:
-        _kuavi_pipeline(str(video_path), question, model, api_key, backend, emit, index_mode=index_mode, asr_model=asr_model)
+        async def _run_tiered() -> None:
+            async for event in run_tiered_pipeline(
+                video_path=str(video_path),
+                query=question,
+                model=model,
+                backend=backend,
+                index_mode=index_mode,
+                asr_model=asr_model,
+                force_reindex=force_reindex,
+                force_llm=force_llm,
+                max_tier=max_tier,
+            ):
+                if event.get("type") == "result":
+                    answer = event.get("answer", "")
+                    event["answer_html"] = _render_answer_html(answer)
+                    if not event.get("timestamps"):
+                        event["timestamps"] = _parse_timestamps(answer)
+                emit(event)
+
+        asyncio.run(_run_tiered())
         emit.flush_summary()
         event_q.put(None)
 
@@ -622,4 +646,23 @@ async def analyze(
 
 
 if __name__ == "__main__":
-    uvicorn.run("web_app:app", host="0.0.0.0", port=8000, reload=True)
+    parser = argparse.ArgumentParser(description="VideoRLM web app server")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--reload", action="store_true")
+    parser.add_argument("--use-litellm-proxy", action="store_true")
+    parser.add_argument("--litellm-port", type=int, default=4000)
+    args = parser.parse_args()
+
+    litellm_proc = None
+    if args.use_litellm_proxy:
+        from rlm.utils.litellm_proxy import start_litellm_proxy
+
+        litellm_proc = start_litellm_proxy(port=args.litellm_port)
+        os.environ["LITELLM_PROXY_URL"] = f"http://localhost:{args.litellm_port}"
+
+    try:
+        uvicorn.run("web_app:app", host=args.host, port=args.port, reload=args.reload)
+    finally:
+        if litellm_proc is not None:
+            litellm_proc.terminate()
