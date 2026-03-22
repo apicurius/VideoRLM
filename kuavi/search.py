@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 def _align_query_dim(query_emb: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     """Align query embedding dimension to match the target matrix's column dimension.
 
-    V-JEPA 2 temporal embeddings are 1024-d while SigLIP2 text queries are 768-d.
+    V-JEPA 2 temporal embeddings are 1024-d while LanguageBind text queries are 768-d.
     Zero-pad the query to match so cosine_similarity doesn't raise a ValueError.
     """
     d_q = query_emb.shape[1]
@@ -145,338 +145,95 @@ def _round_robin_from_clusters(
     return top_indices
 
 
+def search_by_embedding(query: str, index: VideoIndex, top_k: int = 5) -> list[dict[str, Any]]:
+    """Search languagebind embeddings for a given query."""
+    import logging
+    import numpy as np
+    from pathlib import Path
+    import json
+    import hashlib
+    import os
+    from kuavi.indexer import get_embedder
+
+    logger = logging.getLogger(__name__)
+
+    video_path = getattr(index, "video_path", None)
+    if not video_path:
+        return []
+
+    p = Path(video_path).resolve()
+    try:
+        stat = os.stat(p)
+        raw = f"{p}|{stat.st_size}|{stat.st_mtime}"
+        cache_key = hashlib.md5(raw.encode()).hexdigest()
+    except (FileNotFoundError, OSError):
+        return []
+
+    sidecar = Path(video_path).with_suffix(".kuavi") / cache_key / "languagebind_embeddings.json"
+    if not sidecar.exists():
+        return []
+
+    emb_data = json.loads(sidecar.read_text())
+
+    embedder = get_embedder()
+    query_emb = np.array(embedder.embed_query(query))
+
+    scores: list[float] = []
+    for entry in emb_data:
+        sims = []
+        if entry.get("video_emb") is not None:
+            sims.append(embedder.similarity(query_emb, entry["video_emb"]))
+        if entry.get("audio_emb") is not None:
+            sims.append(embedder.similarity(query_emb, entry["audio_emb"]))
+        if entry.get("text_emb") is not None:
+            sims.append(embedder.similarity(query_emb, entry["text_emb"]))
+        scores.append(float(max(sims)) if sims else 0.0)
+
+    top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+
+    results = []
+    for idx in top_indices:
+        entry = emb_data[idx]
+        res = {
+            "start_time": entry["start"],
+            "end_time": entry["end"],
+            "score": round(scores[idx], 4),
+            "caption": "",
+            "annotation": {},
+        }
+        for seg in index.segments:
+            if abs(seg.get("start_time", -1) - res["start_time"]) < 0.01:
+                res["caption"] = seg.get("caption", "")
+                res["annotation"] = seg.get("annotation", {})
+                break
+        results.append(res)
+
+    return results
+
+
 def make_search_video(index: VideoIndex) -> dict[str, Any]:
-    """Semantic search over video segment embeddings."""
-    def _search_matrix(
-        query_emb: np.ndarray,
-        matrix: np.ndarray,
-    ) -> np.ndarray:
-        return _cosine_similarity(query_emb, matrix)[0]
+    """Search for specific content in the video using multimodal embeddings."""
 
     def search_video(
         query: str,
         top_k: int = 5,
         field: str = "summary",
-        exclude_non_action: bool = True,
         diverse: bool = True,
         cluster_diverse: bool = False,
+        exclude_non_action: bool = True,
         level: int = 0,
     ) -> list[dict[str, Any]]:
-        """Search video segments by semantic similarity to *query*."""
-        # Hierarchy level search
-        if (
-            level > 0
-            and hasattr(index, "segment_hierarchy")
-            and hasattr(index, "hierarchy_embeddings")
-            and index.segment_hierarchy
-            and len(index.segment_hierarchy) >= level
-            and index.hierarchy_embeddings
-            and len(index.hierarchy_embeddings) >= level
-        ):
-            h_segments = index.segment_hierarchy[level - 1]
-            h_emb = index.hierarchy_embeddings[level - 1]
-            if h_emb is not None and len(h_emb) > 0:
-                query_emb = index.embed_fn(query)
-                query_emb = np.asarray(query_emb).reshape(1, -1)
-                scores = _search_matrix(query_emb, h_emb)
-                top_indices = list(np.argsort(scores)[::-1][:top_k])
-                results = []
-                for idx in top_indices:
-                    seg = h_segments[idx]
-                    results.append(
-                        {
-                            "start_time": seg["start_time"],
-                            "end_time": seg["end_time"],
-                            "score": round(float(scores[idx]), 4),
-                            "caption": seg.get("caption", ""),
-                            "annotation": seg.get("annotation", {}),
-                        }
-                    )
-                return results
-
-        # Temporal field (V-JEPA 2 embeddings)
-        if field == "temporal":
-            if (
-                hasattr(index, "temporal_embeddings")
-                and index.temporal_embeddings is not None
-                and len(index.temporal_embeddings) > 0
-            ):
-                # V-JEPA is vision-only; use SigLIP2 text encoder for query.
-                # Align dims: SigLIP2 produces 768-d but V-JEPA 2 embeddings are 1024-d.
-                visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
-                query_emb = visual_fn(query)
-                query_emb = np.asarray(query_emb).reshape(1, -1)
-                query_emb = _align_query_dim(query_emb, index.temporal_embeddings)
-                scores = _search_matrix(query_emb, index.temporal_embeddings)
-
-                scores = scores.copy()
-                for i, seg in enumerate(index.segments):
-                    if seg.get("is_duplicate") or seg.get("is_semantic_duplicate"):
-                        scores[i] = -np.inf
-
-                top_indices = list(np.argsort(scores)[::-1][:top_k])
-                results = []
-                for idx in top_indices:
-                    seg = index.segments[idx]
-                    results.append(
-                        {
-                            "start_time": seg["start_time"],
-                            "end_time": seg["end_time"],
-                            "score": round(float(scores[idx]), 4),
-                            "caption": seg.get("caption", ""),
-                            "annotation": seg.get("annotation", {}),
-                            "quality_score": seg.get("caption_quality_score"),
-                        }
-                    )
-                return results
-            import logging
-            logging.getLogger(__name__).warning(
-                "No temporal embeddings available — field='temporal' falling back to 'summary'. "
-                "Temporal search requires V-JEPA 2 embeddings from indexing."
-            )
-            field = "summary"
-
-        # Visual field
-        if field == "visual":
-            if (
-                hasattr(index, "frame_embeddings")
-                and index.frame_embeddings is not None
-                and len(index.frame_embeddings) > 0
-            ):
-                visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
-                query_emb = visual_fn(query)
-                query_emb = np.asarray(query_emb).reshape(1, -1)
-                scores = _search_matrix(query_emb, index.frame_embeddings)
-
-                scores = scores.copy()
-                for i, seg in enumerate(index.segments):
-                    if seg.get("is_duplicate") or seg.get("is_semantic_duplicate"):
-                        scores[i] = -np.inf
-
-                top_indices = list(np.argsort(scores)[::-1][:top_k])
-                results = []
-                for idx in top_indices:
-                    seg = index.segments[idx]
-                    results.append(
-                        {
-                            "start_time": seg["start_time"],
-                            "end_time": seg["end_time"],
-                            "score": round(float(scores[idx]), 4),
-                            "caption": seg.get("caption", ""),
-                            "annotation": seg.get("annotation", {}),
-                            "quality_score": seg.get("caption_quality_score"),
-                        }
-                    )
-                return results
-            import logging
-            logging.getLogger(__name__).warning(
-                "No frame embeddings available — field='visual' falling back to 'summary'. "
-                "Visual search requires SigLIP2 frame embeddings from indexing."
-            )
-            field = "summary"
-
-        summary_emb = index.embeddings
-        action_emb = (
-            index.action_embeddings if index.action_embeddings is not None else index.embeddings
-        )
-        temporal_emb = getattr(index, "temporal_embeddings", None)
-        frame_emb = getattr(index, "frame_embeddings", None)
-
-        if field == "summary":
-            matrices = [summary_emb]
-        elif field == "action":
-            matrices = [action_emb]
-        elif field == "all":
-            # Weighted composite: summary 0.4, action 0.2, visual 0.2, temporal 0.2
-            query_emb = index.embed_fn(query)
-            query_emb = np.asarray(query_emb).reshape(1, -1)
-
-            # SigLIP2 query for visual/temporal (different embedding space)
-            visual_fn = getattr(index, "visual_embed_fn", None) or index.embed_fn
-            query_emb_visual = visual_fn(query)
-            query_emb_visual = np.asarray(query_emb_visual).reshape(1, -1)
-
-            weighted_scores = np.zeros(len(index.segments))
-            total_weight = 0.0
-
-            if summary_emb is not None and len(summary_emb) > 0:
-                weighted_scores += 0.4 * _search_matrix(query_emb, summary_emb)
-                total_weight += 0.4
-            if action_emb is not None and len(action_emb) > 0:
-                weighted_scores += 0.2 * _search_matrix(query_emb, action_emb)
-                total_weight += 0.2
-            if frame_emb is not None and len(frame_emb) > 0:
-                weighted_scores += 0.2 * _search_matrix(query_emb_visual, frame_emb)
-                total_weight += 0.2
-            if temporal_emb is not None and len(temporal_emb) > 0:
-                # Align dims: SigLIP2 visual query (768-d) vs V-JEPA 2 temporal (1024-d).
-                query_emb_temporal = _align_query_dim(query_emb_visual, temporal_emb)
-                weighted_scores += 0.2 * _search_matrix(query_emb_temporal, temporal_emb)
-                total_weight += 0.2
-
-            if total_weight > 0:
-                scores = weighted_scores / total_weight
-            else:
-                return []
-
-            # Skip directly to filtering (bypass the max-over-matrices logic below)
-            scores = scores.copy()
-            for i, seg in enumerate(index.segments):
-                if seg.get("is_duplicate"):
-                    scores[i] = -np.inf
-
-            if cluster_diverse and top_k > 2:
-                valid_mask = scores > -np.inf
-                valid_indices_arr = np.where(valid_mask)[0]
-                n_valid = len(valid_indices_arr)
-
-                if n_valid <= top_k:
-                    top_indices = list(
-                        valid_indices_arr[np.argsort(scores[valid_indices_arr])[::-1]]
-                    )
-                elif all("cluster_id" in index.segments[vi] for vi in valid_indices_arr):
-                    # Use pre-computed cluster_ids from _semantic_deduplicate
-                    clusters: dict[int, list[int]] = {}
-                    for vi in valid_indices_arr:
-                        cid = index.segments[vi].get("cluster_id", 0)
-                        clusters.setdefault(int(cid), []).append(int(vi))
-                    top_indices = _round_robin_from_clusters(clusters, scores, top_k)
-                else:
-                    active_matrix = summary_emb if summary_emb is not None else frame_emb
-                    k = min(top_k, n_valid)
-                    valid_embs = active_matrix[valid_indices_arr]
-                    labels = _cluster_labels(valid_embs, k)
-
-                    clusters = {}
-                    for vi, label in zip(valid_indices_arr, labels, strict=False):
-                        clusters.setdefault(int(label), []).append(int(vi))
-                    top_indices = _round_robin_from_clusters(clusters, scores, top_k)
-            elif diverse and top_k > 1:
-                n_candidates = min(top_k * 3, len(scores))
-                candidate_indices = np.argsort(scores)[::-1][:n_candidates]
-                candidate_scores = scores[candidate_indices]
-                active_matrix = summary_emb if summary_emb is not None else frame_emb
-                candidate_embs = (
-                    active_matrix[candidate_indices] if active_matrix is not None else None
-                )
-                top_indices = _mmr_rerank(
-                    query_emb,
-                    candidate_embs,
-                    candidate_indices,
-                    candidate_scores,
-                    top_k=top_k,
-                    lambda_param=0.7,
-                )
-            else:
-                top_indices = list(np.argsort(scores)[::-1][:top_k])
-
-            results = []
-            for idx in top_indices:
-                seg = index.segments[idx]
-                results.append(
-                    {
-                        "start_time": seg["start_time"],
-                        "end_time": seg["end_time"],
-                        "score": round(float(scores[idx]), 4),
-                        "caption": seg.get("caption", ""),
-                        "annotation": seg.get("annotation", {}),
-                        "quality_score": seg.get("caption_quality_score"),
-                    }
-                )
-            return results
-        else:
-            matrices = [summary_emb]
-
-        matrices = [m for m in matrices if m is not None and len(m) > 0]
-        if not matrices:
-            return []
-
-        query_emb = index.embed_fn(query)
-        query_emb = np.asarray(query_emb).reshape(1, -1)
-
-        all_scores = np.stack([_search_matrix(query_emb, m) for m in matrices])
-        scores = np.max(all_scores, axis=0)
-
-        if field == "action" and exclude_non_action:
-            scores = scores.copy()
-            for i, seg in enumerate(index.segments):
-                if seg.get("is_non_action"):
-                    scores[i] = -np.inf
-
-        scores = scores.copy()
-        for i, seg in enumerate(index.segments):
-            if seg.get("is_duplicate") or seg.get("is_semantic_duplicate"):
-                scores[i] = -np.inf
-
-        if cluster_diverse and top_k > 2:
-            valid_mask = scores > -np.inf
-            valid_indices = np.where(valid_mask)[0]
-            n_valid = len(valid_indices)
-
-            if n_valid <= top_k:
-                top_indices = list(valid_indices[np.argsort(scores[valid_indices])[::-1]])
-            elif all("cluster_id" in index.segments[vi] for vi in valid_indices):
-                # Use pre-computed cluster_ids from _semantic_deduplicate
-                clusters: dict[int, list[int]] = {}
-                for vi in valid_indices:
-                    cid = index.segments[vi].get("cluster_id", 0)
-                    clusters.setdefault(int(cid), []).append(int(vi))
-                top_indices = _round_robin_from_clusters(clusters, scores, top_k)
-            else:
-                active_matrix = matrices[0]
-                k = min(top_k, n_valid)
-                valid_embs = active_matrix[valid_indices]
-                labels = _cluster_labels(valid_embs, k)
-
-                clusters = {}
-                for vi, label in zip(valid_indices, labels, strict=False):
-                    clusters.setdefault(int(label), []).append(int(vi))
-                top_indices = _round_robin_from_clusters(clusters, scores, top_k)
-        elif diverse and top_k > 1:
-            n_candidates = min(top_k * 3, len(scores))
-            candidate_indices = np.argsort(scores)[::-1][:n_candidates]
-            candidate_scores = scores[candidate_indices]
-
-            active_matrix = matrices[0]
-            candidate_embs = active_matrix[candidate_indices] if active_matrix is not None else None
-
-            top_indices = _mmr_rerank(
-                query_emb,
-                candidate_embs,
-                candidate_indices,
-                candidate_scores,
-                top_k=top_k,
-                lambda_param=0.7,
-            )
-        else:
-            top_indices = list(np.argsort(scores)[::-1][:top_k])
-
-        results = []
-        for idx in top_indices:
-            seg = index.segments[idx]
-            results.append(
-                {
-                    "start_time": seg["start_time"],
-                    "end_time": seg["end_time"],
-                    "score": round(float(scores[idx]), 4),
-                    "caption": seg.get("caption", ""),
-                    "annotation": seg.get("annotation", {}),
-                    "quality_score": seg.get("caption_quality_score"),
-                }
-            )
-        return results
+        """Search the video for visual or audio events using LanguageBind."""
+        # The unified embedding search uses video, audio, and text embeddings simultaneously.
+        return search_by_embedding(query, index, top_k=top_k)
 
     return {
         "tool": search_video,
         "description": (
-            "Semantic search over pre-indexed video segments. "
-            "Parameters: query (str), top_k (int, default 5), "
-            'field (str, default "summary" — can be "summary", "action", "visual", "temporal", or "all"), '
-            "exclude_non_action (bool, default True — filters non-action segments when field is action), "
-            "diverse (bool, default True — MMR reranking for varied results), "
-            "cluster_diverse (bool, default False — KMeans clustering alternative to MMR), "
-            "level (int, default 0 — higher levels search coarser hierarchy). "
-            "Returns list of dicts with start_time, end_time, score, caption, and annotation."
+            "Search for specific visual or audio events in the video using multimodal embeddings. "
+            "Works for complex descriptions (e.g. 'a person playing guitar'). "
+            "Parameters: query (str), top_k (int, default 5). "
+            "Returns list of matching segments with timestamps, scores, and captions."
         ),
     }
 

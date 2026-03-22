@@ -244,3 +244,5 @@ __marimo__/
 .claude/mcp.json
 .claude/CLAUDE.md
 .claude/mcp.json
+
+.languagebind_cache/

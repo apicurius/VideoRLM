@@ -2,7 +2,7 @@
 
 This module is the orchestration layer. The actual work is delegated to:
 
-- :mod:`kuavi.encoding` — frame/text encoding (SigLIP2, EmbeddingGemma, V-JEPA 2)
+- :mod:`kuavi.encoding` — frame/text encoding (LanguageBind, V-JEPA 2)
 - :mod:`kuavi.caption_pipeline` — selective decode, Tree-of-Captions, Self-Refine, quality scoring
 - :mod:`kuavi.dedup` — pre-caption, adjacent, global, and semantic deduplication
 - :mod:`kuavi.embedding` — caption embedding, smoothing, quality checks, coarse levels, prediction
@@ -30,20 +30,28 @@ from kuavi.scene_detection import detect_scenes, detect_scenes_hierarchical
 
 logger = logging.getLogger(__name__)
 
+_embedder = None
+def get_embedder():
+    global _embedder
+    if _embedder is None:
+        from kuavi.embedders import create_embedder
+        _embedder = create_embedder()
+    return _embedder
+
+
 
 @dataclass
 class VideoIndex:
     """Pre-computed searchable index for a video."""
 
+    video_path: str | None = None
     segments: list[dict] = field(default_factory=list)
     embeddings: np.ndarray | None = None
     action_embeddings: np.ndarray | None = None
     transcript: list[dict] = field(default_factory=list)
     scene_boundaries: list[float] = field(default_factory=list)
     embedding_quality: dict = field(default_factory=dict)
-    embed_fn: Any = None
     frame_embeddings: np.ndarray | None = None
-    visual_embed_fn: Any = None
     temporal_embeddings: np.ndarray | None = None  # (N_segments, 1024) from V-JEPA 2
     temporal_feature_maps: np.ndarray | None = None  # (N_segments, num_patches, D) from V-JEPA 2
     segment_hierarchy: list[list[dict]] = field(default_factory=list)
@@ -53,8 +61,7 @@ class VideoIndex:
         """Persist index to *path* (a directory).
 
         Embeddings are stored as a ``.npz`` file; metadata (segments,
-        transcript, scene_boundaries) as ``metadata.json``.  The callable
-        ``embed_fn`` is **not** serialized.
+        transcript, scene_boundaries) as ``metadata.json``.
         """
         directory = Path(path)
         directory.mkdir(parents=True, exist_ok=True)
@@ -78,6 +85,7 @@ class VideoIndex:
 
         # Save metadata
         metadata = {
+            "video_path": self.video_path,
             "segments": self.segments,
             "transcript": self.transcript,
             "scene_boundaries": self.scene_boundaries,
@@ -89,9 +97,6 @@ class VideoIndex:
     @classmethod
     def load(cls, path: str | Path) -> VideoIndex:
         """Load a previously saved index from *path*.
-
-        ``embed_fn`` will be ``None`` on the returned object — the caller
-        is responsible for re-attaching it if needed.
         """
         directory = Path(path)
         metadata = json.loads((directory / "metadata.json").read_text())
@@ -113,6 +118,7 @@ class VideoIndex:
             lvl += 1
 
         return cls(
+            video_path=metadata.get("video_path"),
             segments=metadata["segments"],
             embeddings=embeddings,
             action_embeddings=action_embeddings,
@@ -147,13 +153,12 @@ class _StageCache:
     hasn't been cached yet, and the pipeline falls through to compute it.
     """
 
-    # Canonical ordered list of stage names.
     ALL_STAGES: list[str] = [
         "scenes",
         "transcript",
         "segments",
         "captions",
-        "embeddings",
+        "languagebind",
     ]
 
     def __init__(self, video_path: str, cache_key: str) -> None:
@@ -203,14 +208,12 @@ class VideoIndexer:
 
     def __init__(
         self,
-        embedding_model: str = "google/siglip2-base-patch16-256",
         device: str = "auto",
         temporal_window: int = 4,
         max_frames_per_segment: int = 32,
         cache_dir: str | Path | None = None,
         caption_resize: tuple[int, int] | None = None,
         embedding_stride: int | None = None,
-        text_embedding_model: str | None = None,
         hierarchical: bool = False,
         scene_model: str | None = None,
         scene_clip_size: int = 16,
@@ -219,7 +222,6 @@ class VideoIndexer:
     ):
         from kuavi.types import VJEPA2_PRESETS
 
-        self._embedding_model_name = embedding_model
         self._device = device
         self._temporal_window = temporal_window
         self._max_frames_per_segment = max_frames_per_segment
@@ -227,17 +229,14 @@ class VideoIndexer:
         self._caption_resize = caption_resize
         self._embedding_stride = embedding_stride
         self._hierarchical = hierarchical
-        self._model = None
-        self._processor = None
-        self._text_embedding_model_name = text_embedding_model
-        self._text_model = None
-        self._text_tokenizer = None
         self._memory_cache: dict[str, VideoIndex] = {}
         self._scene_model = None
         self._scene_processor = None
         self._scene_predictor = None
         self._asr_model = None
         self._asr_model_name: str | None = None
+        self._faster_whisper_model = None
+        self._faster_whisper_model_size = None
 
         if scene_model_preset is not None:
             if scene_model_preset not in VJEPA2_PRESETS:
@@ -259,46 +258,7 @@ class VideoIndexer:
     # Lazy model loading
     # ------------------------------------------------------------------
 
-    def _ensure_text_model(self) -> None:
-        """Lazily load a separate text embedding model if configured."""
-        if self._text_embedding_model_name is None:
-            return
-        if self._text_model is not None:
-            return
-        try:
-            from sentence_transformers import SentenceTransformer
 
-            # SentenceTransformer doesn't accept "auto" — resolve device first
-            device = self._device
-            if device == "auto":
-                import torch
-
-                device = (
-                    "mps"
-                    if torch.backends.mps.is_available()
-                    else ("cuda" if torch.cuda.is_available() else "cpu")
-                )
-
-            self._text_model = SentenceTransformer(
-                self._text_embedding_model_name,
-                device=device,
-            )
-            self._text_model_type = "sentence_transformers"
-        except ImportError:
-            from transformers import AutoModel, AutoTokenizer
-
-            self._text_tokenizer = AutoTokenizer.from_pretrained(
-                self._text_embedding_model_name,
-            )
-            self._text_model = AutoModel.from_pretrained(
-                self._text_embedding_model_name,
-            ).eval()
-            self._text_model_type = "transformers"
-        logger.info(
-            "Loaded text embedding model %s (type=%s)",
-            self._text_embedding_model_name,
-            self._text_model_type,
-        )
 
     def _free_scene_model(self) -> None:
         """Unload V-JEPA 2 from GPU to free VRAM before loading the ASR model."""
@@ -352,28 +312,7 @@ class VideoIndexer:
                 self._scene_model_name,
             )
 
-    def _ensure_model(self) -> None:
-        """Lazily load the SigLIP2 model on first use."""
-        if self._model is not None:
-            return
-        import torch
-        from transformers import AutoModel, GemmaTokenizerFast, SiglipImageProcessor
 
-        device = self._device
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        elif device == "mps":
-            # SigLIP2 produces degenerate (identical) embeddings on MPS;
-            # fall back to CPU for correctness.
-            device = "cpu"
-
-        # AutoProcessor/AutoTokenizer crash with SigLIP2 on transformers >=5.2
-        # due to a tokenizer registration bug. Load components explicitly.
-        self._image_processor = SiglipImageProcessor.from_pretrained(self._embedding_model_name)
-        self._tokenizer = GemmaTokenizerFast.from_pretrained(self._embedding_model_name)
-        self._model = AutoModel.from_pretrained(self._embedding_model_name).eval().to(device)
-        self._torch_device = device
-        logger.info("Loaded embedding model %s on %s", self._embedding_model_name, device)
 
     # ------------------------------------------------------------------
     # Delegated encoding methods (thin wrappers preserving original API)
@@ -391,46 +330,7 @@ class VideoIndexer:
             n_future_tokens,
         )
 
-    def _encode_frames(
-        self, frames: list[np.ndarray], temporal_window: int = 1, stride: int | None = None
-    ) -> np.ndarray:
-        return encoding.encode_frames(
-            self._model,
-            self._image_processor,
-            self._torch_device,
-            frames,
-            temporal_window,
-            stride,
-        )
 
-    def _encode_texts(self, texts: list[str]) -> np.ndarray:
-        self._ensure_text_model()
-        return encoding.encode_texts(
-            texts,
-            text_embedding_model_name=self._text_embedding_model_name,
-            text_model=self._text_model,
-            text_model_type=getattr(self, "_text_model_type", None),
-            text_tokenizer=self._text_tokenizer,
-            siglip_model=self._model,
-            siglip_tokenizer=self._tokenizer,
-            siglip_device=self._torch_device,
-        )
-
-    def _encode_texts_siglip(self, texts: list[str]) -> np.ndarray:
-        return encoding.encode_texts_siglip(
-            self._model,
-            self._tokenizer,
-            self._torch_device,
-            texts,
-        )
-
-    def _encode_query_siglip(self, text: str) -> np.ndarray:
-        self._ensure_model()
-        return self._encode_texts_siglip([text])[0]
-
-    def _encode_query(self, text: str) -> np.ndarray:
-        self._ensure_model()
-        return self._encode_texts([text])[0]
 
     def _encode_clips_vjepa(
         self,
@@ -578,8 +478,7 @@ class VideoIndexer:
     # ------------------------------------------------------------------
 
     def _pre_caption_dedup(self, segments: list[dict], threshold: float = 0.90) -> None:
-        self._ensure_model()
-        dedup.pre_caption_dedup(segments, self._encode_frames, threshold)
+        pass
 
     def _semantic_deduplicate(
         self,
@@ -598,7 +497,7 @@ class VideoIndexer:
         )
 
     def _filter_edge_frames(self, seg_frames: list, threshold: float = 0.5) -> list:
-        return caption_pipeline.filter_edge_frames(seg_frames, self._encode_frames, threshold)
+        return seg_frames
 
     def _check_embedding_quality(self, embeddings: np.ndarray, label: str = "caption") -> dict:
         return emb_mod.check_embedding_quality(embeddings, label)
@@ -611,16 +510,13 @@ class VideoIndexer:
         self,
         segments: list[dict],
     ) -> tuple[np.ndarray | None, np.ndarray | None]:
-        self._ensure_model()
-        return emb_mod.embed_captions(segments, self._encode_texts)
+        return None, None
 
     def _deduplicate_segments(self, segments: list[dict], threshold: float = 0.95) -> None:
-        self._ensure_model()
-        dedup.deduplicate_segments(segments, self._encode_texts, threshold)
+        pass
 
     def _global_deduplicate(self, segments: list[dict], threshold: float = 0.90) -> None:
-        self._ensure_model()
-        dedup.global_deduplicate(segments, self._encode_texts, threshold)
+        pass
 
     @staticmethod
     def _transcript_for_range(
@@ -661,16 +557,7 @@ class VideoIndexer:
         timestamps: list[float],
         min_similarity: float = 0.3,
     ) -> None:
-        self._ensure_model()
-        caption_pipeline.score_annotations(
-            segments,
-            loaded_video_frames,
-            timestamps,
-            self._encode_frames,
-            self._encode_texts,
-            self._text_embedding_model_name,
-            min_similarity,
-        )
+        pass
 
     def _fix_low_quality_annotations(
         self,
@@ -699,16 +586,7 @@ class VideoIndexer:
         temporal_clip_embeddings: np.ndarray | None = None,
         temporal_clip_timestamps: list[float] | None = None,
     ) -> None:
-        self._ensure_model()
-        caption_pipeline.selective_decode(
-            segments,
-            frames,
-            timestamps,
-            self._encode_frames,
-            similarity_threshold,
-            temporal_clip_embeddings,
-            temporal_clip_timestamps,
-        )
+        pass
 
     def _action_first_pass(
         self,
@@ -791,7 +669,7 @@ class VideoIndexer:
             if not force_reindex and stages is None and (cache_path / "metadata.json").exists():
                 logger.info("Loading cached index from %s", cache_path)
                 idx = VideoIndex.load(cache_path)
-                idx.embed_fn = self._encode_query
+                pass
                 self._memory_cache[mem_key] = idx
                 return idx
 
@@ -916,23 +794,7 @@ class VideoIndexer:
                     )
                 logger.info("[pipeline] V-JEPA 2: %d scenes detected", len(scenes))
             else:
-                # Existing SigLIP2 path
-                self._ensure_model()
-
-                def _scene_embed_fn(f):
-                    return self._encode_frames(
-                        f, temporal_window=self._temporal_window, stride=self._embedding_stride
-                    )
-
-                if self._hierarchical:
-                    hierarchy_result = detect_scenes_hierarchical(
-                        frames,
-                        timestamps,
-                        embed_fn=_scene_embed_fn,
-                    )
-                    scenes = hierarchy_result["levels"][0]
-                else:
-                    scenes = detect_scenes(frames, timestamps, embed_fn=_scene_embed_fn)
+                raise ValueError("V-JEPA 2 scene model is required for scene detection")
             scene_boundaries = [start for start, _end in scenes]
 
             # Save scenes to sidecar cache
@@ -1066,15 +928,13 @@ class VideoIndexer:
 
                         def _caption_segment(args):
                             seg, seg_frames = args
-                            # Filter visually dissimilar edge frames
-                            if self._model is not None:
-                                real_frames = [f for f in seg_frames if not isinstance(f, str)]
-                                if len(real_frames) >= 5:
-                                    filtered_real = self._filter_edge_frames(
-                                        real_frames, threshold=0.5
-                                    )
-                                    str_tokens = [f for f in seg_frames if isinstance(f, str)]
-                                    seg_frames = str_tokens + filtered_real
+                            real_frames = [f for f in seg_frames if not isinstance(f, str)]
+                            if len(real_frames) >= 5:
+                                filtered_real = self._filter_edge_frames(
+                                    real_frames, threshold=0.5
+                                )
+                                str_tokens = [f for f in seg_frames if isinstance(f, str)]
+                                seg_frames = str_tokens + filtered_real
                             # Resize real frames for captioning if caption_resize is set
                             if self._caption_resize:
                                 import cv2
@@ -1166,221 +1026,89 @@ class VideoIndexer:
                 sc.save_json("captions", segment_infos)
                 logger.info("[stage-cache] saved captions to sidecar")
 
-        # 7. Embed captions
+        # 7. Embed segments (languagebind)
         if (
             not force_reindex
-            and _should_run("embeddings", stages)
+            and _should_run("languagebind", stages)
             and sc is not None
-            and sc.has_npz("embeddings")
+            and sc.has_json("languagebind_embeddings")
         ):
-            logger.info("[stage-cache] loading embeddings from sidecar")
-            _emb_data = sc.load_npz("embeddings")
-            embeddings = _emb_data.get("embeddings")
-            action_embeddings = _emb_data.get("action_embeddings")
-            frame_embeddings = _emb_data.get("frame_embeddings")
-            temporal_embeddings = _emb_data.get("temporal_embeddings")
-            temporal_feature_maps = _emb_data.get("temporal_feature_maps")
-            _emb_meta = sc.load_json("embeddings_meta") if sc.has_json("embeddings_meta") else {}
-            quality = _emb_meta.get("quality", {})
-            segment_hierarchy = _emb_meta.get("segment_hierarchy", [])
-            hierarchy_embeddings_raw: list[np.ndarray | None] = []
-            lvl = 0
-            while f"hierarchy_emb_L{lvl}" in _emb_data:
-                hierarchy_embeddings_raw.append(_emb_data[f"hierarchy_emb_L{lvl}"])
-                lvl += 1
-            hierarchy_embeddings = hierarchy_embeddings_raw
-        elif _should_run("embeddings", stages):
-            if self._text_embedding_model_name is not None:
-                logger.info(
-                    "[pipeline] Gemma: embedding captions for %d segments", len(segment_infos)
-                )
-            embeddings, action_embeddings = self._embed_captions(segment_infos)
-
-            # 7b. Smooth embeddings to reduce noise across adjacent segments
-            if embeddings is not None:
-                embeddings = self._smooth_embeddings(embeddings, window=3)
-            if action_embeddings is not None:
-                action_embeddings = self._smooth_embeddings(action_embeddings, window=3)
-
-            quality = self._check_embedding_quality(embeddings, label="caption")
-            if self._text_embedding_model_name is not None:
-                logger.info("[pipeline] Gemma: caption embeddings complete")
-
-            # 7b2. Semantic deduplication via k-means clustering (optional)
-            if semantic_dedup:
-                self._semantic_deduplicate(
-                    segment_infos,
-                    embeddings,
-                    action_embeddings=action_embeddings,
-                )
-
-            # 7c. Embed representative frame per segment for visual search
-            rep_frames = []
-            for seg in segment_infos:
-                seg_frames_list = [
-                    f
-                    for f, t in zip(frames, timestamps, strict=False)
-                    if seg["start_time"] <= t <= seg["end_time"]
-                ]
-                if seg_frames_list:
-                    rep_frames.append(seg_frames_list[len(seg_frames_list) // 2])
-                else:
-                    rep_frames.append(frames[0])  # fallback
-
-            logger.info(
-                "[pipeline] SigLIP2: building frame embeddings for %d segments", len(rep_frames)
-            )
-            self._ensure_model()
-            frame_embeddings = self._encode_frames(rep_frames)
-            frame_embeddings = self._smooth_embeddings(frame_embeddings, window=3)
-            self._check_embedding_quality(frame_embeddings, label="frame")
-            logger.info("[pipeline] SigLIP2: %d frame embeddings built", len(rep_frames))
-
-            # 7d. Aggregate V-JEPA 2 temporal embeddings per segment
-            temporal_embeddings: np.ndarray | None = None
-            temporal_feature_maps: np.ndarray | None = None
-            # Feature maps may use different timestamps than clip embeddings
-            # (e.g. overlapping path: embeddings are per-frame, feature maps per-window).
-            fmap_ts = locals().get("_fmap_timestamps") or vjepa_clip_timestamps
-            if vjepa_clip_embeddings is not None and vjepa_clip_timestamps is not None:
-                temporal_per_seg: list[np.ndarray] = []
-                feature_maps_per_seg: list[np.ndarray] = []
-                for seg in segment_infos:
-                    clip_indices = [
-                        i
-                        for i, ct in enumerate(vjepa_clip_timestamps)
-                        if seg["start_time"] <= ct <= seg["end_time"]
-                    ]
-                    if clip_indices:
-                        seg_emb = vjepa_clip_embeddings[clip_indices].mean(axis=0)
-                        norm = np.linalg.norm(seg_emb)
-                        if norm > 1e-10:
-                            seg_emb = seg_emb / norm
-                        temporal_per_seg.append(seg_emb)
-                        if vjepa_clip_feature_maps is not None:
-                            # Use fmap_ts (may differ from vjepa_clip_timestamps)
-                            fmap_indices = [
-                                i
-                                for i, ct in enumerate(fmap_ts)
-                                if seg["start_time"] <= ct <= seg["end_time"]
-                            ]
-                            if fmap_indices:
-                                maps = [vjepa_clip_feature_maps[i] for i in fmap_indices]
-                                shapes = {m.shape for m in maps}
-                                if len(shapes) == 1:
-                                    # All same shape — average across clips
-                                    feature_maps_per_seg.append(np.stack(maps).mean(axis=0))
-                                else:
-                                    # Variable shapes (different clip lengths) —
-                                    # pick the clip closest to segment midpoint
-                                    seg_mid = (seg["start_time"] + seg["end_time"]) / 2
-                                    best_idx = min(
-                                        fmap_indices,
-                                        key=lambda i: abs(fmap_ts[i] - seg_mid),
-                                    )
-                                    feature_maps_per_seg.append(vjepa_clip_feature_maps[best_idx])
-                            else:
-                                num_patches = vjepa_clip_feature_maps[0].shape[0]
-                                patch_dim = vjepa_clip_feature_maps[0].shape[1]
-                                feature_maps_per_seg.append(np.zeros((num_patches, patch_dim)))
-                    else:
-                        temporal_per_seg.append(np.zeros(vjepa_clip_embeddings.shape[1]))
-                        if vjepa_clip_feature_maps is not None:
-                            num_patches = vjepa_clip_feature_maps[0].shape[0]
-                            patch_dim = vjepa_clip_feature_maps[0].shape[1]
-                            feature_maps_per_seg.append(np.zeros((num_patches, patch_dim)))
-                temporal_embeddings = np.stack(temporal_per_seg)
-                temporal_embeddings = self._smooth_embeddings(temporal_embeddings, window=3)
-                self._check_embedding_quality(temporal_embeddings, label="temporal")
-                if vjepa_clip_feature_maps is not None and feature_maps_per_seg:
-                    shapes = {m.shape for m in feature_maps_per_seg}
-                    if len(shapes) == 1:
-                        temporal_feature_maps = np.stack(feature_maps_per_seg)
-                    else:
-                        # Variable patch counts across segments — store as object array
-                        temporal_feature_maps = np.empty(len(feature_maps_per_seg), dtype=object)
-                        for i, m in enumerate(feature_maps_per_seg):
-                            temporal_feature_maps[i] = m
-
-            # 8. Build hierarchy levels (when hierarchical mode is enabled)
-            segment_hierarchy: list[list[dict]] = []
-            hierarchy_embeddings: list[np.ndarray | None] = []
-            if hierarchy_result is not None and len(hierarchy_result["levels"]) > 1:
-                for lvl_idx in range(1, len(hierarchy_result["levels"])):
-                    lvl_scenes = hierarchy_result["levels"][lvl_idx]
-                    lvl_segments: list[dict] = []
-                    for h_start, h_end in lvl_scenes:
-                        # Find child segments from level 0 that fall within this range
-                        child_captions = [
-                            seg.get("caption", "")
-                            for seg in segment_infos
-                            if seg["start_time"] >= h_start and seg["end_time"] <= h_end
-                        ]
-                        merged_caption = " ".join(c for c in child_captions if c)
-                        lvl_segments.append(
-                            {
-                                "start_time": h_start,
-                                "end_time": h_end,
-                                "caption": merged_caption,
-                            }
-                        )
-                    segment_hierarchy.append(lvl_segments)
-
-                    # Embed the merged captions for this level
-                    lvl_captions = [s["caption"] for s in lvl_segments]
-                    if any(lvl_captions):
-                        lvl_emb = self._embed_captions(lvl_segments)[0]  # summary only
-                        if lvl_emb is not None:
-                            lvl_emb = self._smooth_embeddings(lvl_emb, window=3)
-                        hierarchy_embeddings.append(lvl_emb)
-                    else:
-                        hierarchy_embeddings.append(None)
-
-            # Always add a fixed-duration coarse level for multi-scale search
-            if embeddings is not None:
-                coarse_segs, coarse_embs = self._build_coarse_level(
-                    segment_infos, embeddings, target_duration=30.0
-                )
-                if coarse_segs:
-                    segment_hierarchy.append(coarse_segs)
-                    hierarchy_embeddings.append(coarse_embs)
-
-            # Save embeddings to sidecar cache
+            logger.info("[stage-cache] loading languagebind_embeddings from sidecar")
+        elif _should_run("languagebind", stages):
+            embedder = get_embedder()
+            video_path_str = loaded_video.metadata.path
+            import tempfile, subprocess
+            from pathlib import Path
+            logger.info("[pipeline] Embed: processing %d segments", len(segment_infos))
+            
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_audio:
+                audio_path = tmp_audio.name
+            try:
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", video_path_str,
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                    audio_path
+                ], check=True, capture_output=True)
+            except Exception:
+                audio_path = None
+                
+            emb_data: list[dict] = []
+            for i, seg in enumerate(segment_infos):
+                logger.info("[embed] segment %d/%d done", i + 1, len(segment_infos))
+                
+                try:
+                    video_emb = embedder.embed_video_segment(video_path_str, seg["start_time"], seg["end_time"])
+                except Exception:
+                    logger.warning("Video embedding failed for segment %d", i, exc_info=True)
+                    video_emb = None
+                    
+                audio_emb = None
+                if audio_path and Path(audio_path).exists():
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as seg_audio:
+                            seg_audio_path = seg_audio.name
+                        duration = min(seg["end_time"] - seg["start_time"], 120.0)
+                        subprocess.run([
+                            "ffmpeg", "-y", "-ss", str(seg["start_time"]),
+                            "-i", audio_path, "-t", str(duration), "-c", "copy", seg_audio_path
+                        ], check=True, capture_output=True)
+                        audio_emb = embedder.embed_audio_segment(seg_audio_path)
+                        Path(seg_audio_path).unlink(missing_ok=True)
+                    except Exception:
+                        logger.warning("Audio embedding failed for segment %d", i, exc_info=True)
+                
+                text_content = seg.get("transcript") or seg.get("caption") or ""
+                try:
+                    text_emb = embedder.embed_text(text_content) if text_content else None
+                except Exception:
+                    logger.warning("Text embedding failed for segment %d", i, exc_info=True)
+                    text_emb = None
+                    
+                emb_data.append({
+                    "segment_id": seg.get("id", i),
+                    "start": seg["start_time"],
+                    "end": seg["end_time"],
+                    "video_emb": video_emb,
+                    "audio_emb": audio_emb,
+                    "text_emb": text_emb,
+                })
+                
+            if audio_path and Path(audio_path).exists():
+                Path(audio_path).unlink(missing_ok=True)
+                
             if sc is not None:
-                _emb_arrays: dict[str, np.ndarray] = {}
-                if embeddings is not None:
-                    _emb_arrays["embeddings"] = embeddings
-                if action_embeddings is not None:
-                    _emb_arrays["action_embeddings"] = action_embeddings
-                if frame_embeddings is not None:
-                    _emb_arrays["frame_embeddings"] = frame_embeddings
-                if temporal_embeddings is not None:
-                    _emb_arrays["temporal_embeddings"] = temporal_embeddings
-                if temporal_feature_maps is not None and temporal_feature_maps.dtype != object:
-                    _emb_arrays["temporal_feature_maps"] = temporal_feature_maps
-                for _lvl, _h_emb in enumerate(hierarchy_embeddings):
-                    if _h_emb is not None:
-                        _emb_arrays[f"hierarchy_emb_L{_lvl}"] = _h_emb
-                if _emb_arrays:
-                    sc.save_npz("embeddings", _emb_arrays)
-                sc.save_json(
-                    "embeddings_meta",
-                    {
-                        "quality": quality,
-                        "segment_hierarchy": segment_hierarchy,
-                    },
-                )
-                logger.info("[stage-cache] saved embeddings to sidecar")
-        else:
-            # Embeddings stage skipped — initialise with empty defaults
-            embeddings = None
-            action_embeddings = None
-            frame_embeddings = None
-            temporal_embeddings = None
-            temporal_feature_maps = None
-            quality = {}
-            segment_hierarchy = []
-            hierarchy_embeddings = []
+                sc.save_json("languagebind_embeddings", emb_data)
+                logger.info("[stage-cache] saved languagebind_embeddings to sidecar")
+
+        embeddings = None
+        action_embeddings = None
+        frame_embeddings = None
+        temporal_embeddings = None
+        temporal_feature_maps = None
+        quality = {}
+        segment_hierarchy = []
+        hierarchy_embeddings = []
+
 
         logger.info(
             "[pipeline] search index: %d segments, %d scenes",
@@ -1389,6 +1117,7 @@ class VideoIndexer:
         )
 
         index = VideoIndex(
+            video_path=loaded_video.metadata.path,
             segments=segment_infos,
             embeddings=embeddings,
             action_embeddings=action_embeddings,
@@ -1398,8 +1127,6 @@ class VideoIndexer:
             transcript=transcript_data,
             scene_boundaries=scene_boundaries,
             embedding_quality=quality,
-            embed_fn=self._encode_query,
-            visual_embed_fn=self._encode_query_siglip,
             segment_hierarchy=segment_hierarchy,
             hierarchy_embeddings=hierarchy_embeddings,
         )
@@ -1530,7 +1257,7 @@ class VideoIndexer:
 
         Returns:
             The same :class:`VideoIndex` instance with updated segments,
-            embeddings, and ``embed_fn`` re-attached.
+            and embeddings re-attached.
         """
         fps = loaded_video.metadata.extraction_fps
         frames = loaded_video.frames
@@ -1593,12 +1320,11 @@ class VideoIndexer:
 
                 def _caption_segment(args):
                     seg, seg_frames = args
-                    if self._model is not None:
-                        real_frames = [f for f in seg_frames if not isinstance(f, str)]
-                        if len(real_frames) >= 5:
-                            filtered_real = self._filter_edge_frames(real_frames, threshold=0.5)
-                            str_tokens = [f for f in seg_frames if isinstance(f, str)]
-                            seg_frames = str_tokens + filtered_real
+                    real_frames = [f for f in seg_frames if not isinstance(f, str)]
+                    if len(real_frames) >= 5:
+                        filtered_real = self._filter_edge_frames(real_frames, threshold=0.5)
+                        str_tokens = [f for f in seg_frames if isinstance(f, str)]
+                        seg_frames = str_tokens + filtered_real
                     if self._caption_resize:
                         import cv2
 
@@ -1657,5 +1383,5 @@ class VideoIndexer:
 
         index.embeddings = embeddings
         index.action_embeddings = action_embeddings
-        index.embed_fn = self._encode_query
+
         return index

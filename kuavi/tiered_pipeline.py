@@ -11,13 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from kuavi.query_router import QueryRouter
-from kuavi.tier_executors import execute_tier1, execute_tier2, execute_tier3
+from kuavi.tier_executors import execute_tier1, execute_tier2, execute_tier25
 
 
 @dataclass
 class TieredContext:
-    """Runtime context for tier execution."""
-
     index: Any
     video_path: str
 
@@ -28,7 +26,6 @@ async def load_or_build_index(
     asr_model: str,
     force_reindex: bool = False,
 ):
-    """Load/build index for the requested video path."""
     from kuavi.indexer import VideoIndexer
     from kuavi.loader import VideoLoader
 
@@ -37,8 +34,6 @@ async def load_or_build_index(
         loaded = loader.load(video_path)
 
         indexer = VideoIndexer(
-            embedding_model="google/siglip2-base-patch16-256",
-            text_embedding_model="google/embeddinggemma-300m",
             scene_model="facebook/vjepa2-vitl-fpc64-256",
         )
         index = indexer.index_video(
@@ -52,6 +47,9 @@ async def load_or_build_index(
     return await asyncio.to_thread(_build_sync)
 
 
+TIER_ORDER = [1, 2, 2.5]
+
+
 async def run_tiered_pipeline(
     video_path: str,
     query: str,
@@ -60,35 +58,23 @@ async def run_tiered_pipeline(
     index_mode: str = "fast",
     asr_model: str = "faster-whisper/base",
     force_reindex: bool = False,
-    force_llm: bool = False,
-    max_tier: int = 3,
+    max_tier: float = 2.5,
 ) -> AsyncIterator[dict]:
     """
     Main pipeline. Yields SSE-compatible event dicts.
 
-    Flow:
-    1. Index video (with stage caching)
-    2. Classify query -> tier
-    3. Execute at classified tier
-    4. If escalate=True AND current_tier < max_tier: retry at tier+1
-    5. Yield final result event
+    Tier progression: 1 -> 2 -> 2.5
 
-    Yields events:
-      {"type": "routing",   "tier": 1, "reason": "...", "tools": [...]} 
-      {"type": "step",      "id": "...", "status": "running|done|error"}
-      {"type": "escalation","from_tier": 1, "to_tier": 2, "reason": "low confidence"}
-      {"type": "result",    "answer": "...", "timestamps": [], "llm_calls": 0}
-      {"type": "cost",      "tier_used": 1, "llm_calls": 0, "estimated_usd": 0.0}
+    Tier 1: V-JEPA probes + temporal grounding ($0)
+    Tier 2: Gemini Embedding 2 similarity search ($0)
+    Tier 2.5: V-JEPA temporal re-ranking + hierarchical search ($0)
+
+    No LLM calls are made in any tier.
     """
-    max_tier = max(1, min(3, int(max_tier)))
+    max_tier = max(1.0, min(2.5, float(max_tier)))
 
     router = QueryRouter()
-    routing = router.classify(query) if not force_llm else {
-        "tier": 3,
-        "reason": "forced",
-        "suggested_tools": ["full_agent"],
-        "output_format": "text",
-    }
+    routing = router.classify(query)
 
     yield {
         "type": "routing",
@@ -106,43 +92,48 @@ async def run_tiered_pipeline(
     )
     yield {"type": "step", "id": "index", "status": "done"}
 
-    current_tier = min(routing["tier"], max_tier)
+    start_tier = min(routing["tier"], max_tier)
+    allowed_tiers = [t for t in TIER_ORDER if start_tier <= t <= max_tier]
+
     tier2_result = None
     result: dict[str, Any] | None = None
 
-    while current_tier <= 3:
-        yield {"type": "step", "id": f"tier_{current_tier}", "status": "running"}
+    for current_tier in allowed_tiers:
+        tier_id = f"tier_{current_tier}" if current_tier != 2.5 else "tier_2_5"
+        yield {"type": "step", "id": tier_id, "status": "running"}
 
         if current_tier == 1:
             result = await execute_tier1(ctx, query, routing)
         elif current_tier == 2:
             result = await execute_tier2(ctx.index, query, routing)
             tier2_result = result
-        else:
-            result = await execute_tier3(
+        elif current_tier == 2.5:
+            if tier2_result is None:
+                result = await execute_tier2(ctx.index, query, routing)
+                tier2_result = result
+            result = await execute_tier25(
                 ctx,
                 query,
                 routing,
-                model=model,
-                backend=backend,
                 tier2_result=tier2_result,
             )
 
         yield {
             "type": "step",
-            "id": f"tier_{current_tier}",
+            "id": tier_id,
             "status": "done",
         }
 
         if result.get("escalate") and current_tier < max_tier:
-            yield {
-                "type": "escalation",
-                "from_tier": current_tier,
-                "to_tier": current_tier + 1,
-                "reason": f"confidence too low: {result.get('confidence', '?')}",
-            }
-            current_tier += 1
-            continue
+            next_tiers = [t for t in TIER_ORDER if t > current_tier and t <= max_tier]
+            if next_tiers:
+                yield {
+                    "type": "escalation",
+                    "from_tier": current_tier,
+                    "to_tier": next_tiers[0],
+                    "reason": f"confidence too low: {result.get('confidence', '?')}",
+                }
+                continue
 
         yield {
             "type": "result",
@@ -170,11 +161,6 @@ async def run_tiered_pipeline(
 
 
 def _estimate_cost(result: dict) -> float:
-    """
-    Rough USD cost estimate per query.
-    Tier 1/2: $0.0
-    Tier 3: estimate from token count if available, else $0.01 default.
-    """
     llm_calls = result.get("llm_calls", 0)
     if llm_calls == 0:
         return 0.0
@@ -185,11 +171,10 @@ def _estimate_cost(result: dict) -> float:
 def _append_query_trace(
     query: str,
     routing: dict,
-    tier_executed: int,
+    tier_executed: float,
     result: dict,
     estimated_cost_usd: float,
 ) -> None:
-    """Append tier-routing trace records as JSONL for cost-distribution analysis."""
     trace = {
         "query": query,
         "tier_classified": routing.get("tier"),
@@ -218,5 +203,4 @@ def _append_query_trace(
 
         log_tiered_query_trace(trace)
     except Exception:
-        # mcp_server may not be active in this runtime context.
         pass

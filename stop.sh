@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# stop.sh — stop KUAVi backend (:7860) and frontend (:4000)
+# stop.sh — stop KUAVi backend (:8000) and frontend (:4001)
 set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -26,11 +26,14 @@ kill_by_port() {
     fi
 }
 
-kill_by_port 7860 "backend"
-kill_by_port 4000 "frontend"
+kill_by_port 8000 "backend"
+kill_by_port 4001 "frontend"
 
 # Fallback cleanup for common dev process names.
 pkill -f "uvicorn web_app:app" 2>/dev/null || true
-pkill -f "next dev -p 4000" 2>/dev/null || true
+pkill -f "next dev -p 4001" 2>/dev/null || true
+
+# Remove stale Next.js locks
+rm -f "$ROOT/frontend/.next/dev/lock" 2>/dev/null || true
 
 echo "✓ Stop command completed"

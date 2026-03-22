@@ -131,7 +131,6 @@ def _do_load_index(
     video_id: str | None = None,
     embedding_model: str = "google/siglip2-base-patch16-256",
 ) -> dict:
-    """Load a saved .kuavi index into _state."""
     from kuavi.indexer import VideoIndex, VideoIndexer
 
     idx = VideoIndex.load(index_dir)
@@ -1194,8 +1193,7 @@ def cmd_query(args: argparse.Namespace) -> None:
             backend=args.backend,
             index_mode=getattr(args, "index_mode", "fast"),
             asr_model=getattr(args, "asr_model", "faster-whisper/base"),
-            force_llm=getattr(args, "force_llm", False),
-            max_tier=getattr(args, "max_tier", 3),
+            max_tier=getattr(args, "max_tier", 2.5),
         ):
             events.append(event)
         return events
@@ -1496,8 +1494,7 @@ def main() -> None:
     p_qr.add_argument("--backend", default="openrouter")
     p_qr.add_argument("--index-mode", default="fast", choices=["fast", "full", "captioned"])
     p_qr.add_argument("--asr-model", default="faster-whisper/base")
-    p_qr.add_argument("--max-tier", type=int, default=3, choices=[1, 2, 3])
-    p_qr.add_argument("--force-llm", action="store_true")
+    p_qr.add_argument("--max-tier", type=float, default=2.5)
     p_qr.add_argument("--show-routing", action="store_true")
     p_qr.add_argument("--output-format", choices=["json", "jsonl"], default="jsonl")
 

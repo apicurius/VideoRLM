@@ -34,8 +34,7 @@ logger = logging.getLogger(__name__)
 # Constants shared with web_app.py — kept in sync via single source
 # ---------------------------------------------------------------------------
 
-VISUAL_EMBED_MODEL = "google/siglip2-base-patch16-256"
-TEXT_EMBED_MODEL = "google/embeddinggemma-300m"
+
 SCENE_MODEL = "facebook/vjepa2-vitl-fpc64-256"
 
 # ---------------------------------------------------------------------------
@@ -743,8 +742,6 @@ def run_agent(
                     pass
 
         indexer = VideoIndexer(
-            embedding_model=VISUAL_EMBED_MODEL,
-            text_embedding_model=TEXT_EMBED_MODEL,
             scene_model=SCENE_MODEL,
         )
         index = indexer.index_video(

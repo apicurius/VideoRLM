@@ -1,4 +1,4 @@
-"""Neural encoding: SigLIP2 frames/text, EmbeddingGemma text, V-JEPA 2 clips."""
+"""Neural encoding: frame/text embeddings via LanguageBind, V-JEPA 2 clips."""
 
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def encode_texts_siglip(
     torch_device: str,
     texts: list[str],
 ) -> np.ndarray:
-    """Encode texts using SigLIP2's text encoder (ignoring text_embedding_model)."""
+    """Encode texts using the default text encoder (LanguageBind or fallback)."""
     import torch
 
     inputs = tokenizer(

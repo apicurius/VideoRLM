@@ -18,7 +18,7 @@ import { TraceViewer } from "@/components/TraceViewer";
 // Next.js rewrite proxy 10 MB body-size cap (videos are much larger).
 // CORS is enabled on the backend with allow_origins=["*"].
 const BACKEND_DIRECT =
-  process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:7860";
+  process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 // All other API calls (logs, arch, tools …) go through the Next.js proxy.
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "/backend";
@@ -73,10 +73,8 @@ const DEFAULT_PIPELINE_STEPS: PipelineStep[] = [
   { id: "vjepa", label: "V-JEPA 2 Scene Detection", status: "pending" },
   { id: "whisper", label: "Speech Recognition", status: "pending" },
   { id: "caption", label: "Segment Captioning", status: "pending" },
-  { id: "gemma", label: "Gemma Text Embeddings", status: "pending" },
-  { id: "siglip", label: "SigLIP2 Visual Embeddings", status: "pending" },
+  { id: "languagebind", label: "LanguageBind Embedding", status: "pending" },
   { id: "index", label: "Search Index", status: "pending" },
-  { id: "agent", label: "Recursive Agent Loop", status: "pending" },
 ];
 
 // Popular OpenRouter model suggestions grouped by provider
@@ -118,8 +116,7 @@ export default function VideoRLMInterface() {
   const [backend, setBackend] = useState("openrouter");
   const [model, setModel] = useState("openai/gpt-4o");
   const [apiKey, setApiKey] = useState("");
-  const [maxTier, setMaxTier] = useState("3");
-  const [forceLlm, setForceLlm] = useState(false);
+  const [maxTier, setMaxTier] = useState("2.5");
   const [openrouterModels, setOpenrouterModels] = useState<{ label: string; value: string }[]>(OPENROUTER_MODELS);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
 
@@ -262,7 +259,6 @@ export default function VideoRLMInterface() {
     formData.append("index_mode", indexMode);
     formData.append("asr_model", asrModel);
     formData.append("max_tier", maxTier);
-    formData.append("force_llm", String(forceLlm));
     formData.append("custom_api_key", apiKey);
 
     try {
@@ -322,7 +318,7 @@ export default function VideoRLMInterface() {
                 if (stepId === "index" && event.status === "done") {
                   setSteps((prev) =>
                     prev.map((s) => {
-                      if (["vjepa", "whisper", "caption", "gemma", "siglip"].includes(s.id) && s.status === "pending") {
+                      if (["vjepa", "whisper", "caption", "gemini_embed"].includes(s.id) && s.status === "pending") {
                         return { ...s, status: "cached", detail: "handled during indexing" };
                       }
                       if (s.id === "index") {
@@ -340,7 +336,7 @@ export default function VideoRLMInterface() {
                 }
 
                 if (stepId.startsWith("tier_")) {
-                  const mappedId = stepId === "tier_1" ? "vjepa" : stepId === "tier_2" ? "siglip" : "agent";
+                  const mappedId = stepId === "tier_1" ? "vjepa" : stepId === "tier_2" ? "gemini_embed" : stepId === "tier_2_5" ? "index" : "index";
                   const tierLabel = stepId.replace("_", " ").toUpperCase();
                   setSteps((prev) =>
                     prev.map((s) =>
@@ -388,9 +384,6 @@ export default function VideoRLMInterface() {
               } else if (event.type === "result") {
                 setSteps((prev) =>
                   prev.map((s) => {
-                    if (s.id === "agent" && executedTier === 3 && (s.status === "pending" || s.status === "running")) {
-                      return { ...s, status: "done", detail: s.detail || "Tier 3 completed" };
-                    }
                     if (s.status === "pending") {
                       return { ...s, status: "skip", detail: s.detail || "not required for this query" };
                     }
@@ -644,23 +637,11 @@ export default function VideoRLMInterface() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent className="bg-zinc-900 border-white/10 rounded-xl text-white">
-                        <SelectItem value="1">1 (Fastest)</SelectItem>
-                        <SelectItem value="2">2 (Balanced)</SelectItem>
-                        <SelectItem value="3">3 (Full)</SelectItem>
+                        <SelectItem value="1">1 — V-JEPA Only</SelectItem>
+                        <SelectItem value="2">2 — Gemini Embedding</SelectItem>
+                        <SelectItem value="2.5">2.5 — Full (Re-ranking)</SelectItem>
                       </SelectContent>
                     </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Force LLM</Label>
-                    <label className="flex items-center gap-2 text-xs text-zinc-300">
-                      <input
-                        type="checkbox"
-                        checked={forceLlm}
-                        onChange={(e) => setForceLlm(e.target.checked)}
-                        className="accent-amber-500"
-                      />
-                      Skip router and go directly to Tier 3
-                    </label>
                   </div>
                 </div>
               </motion.div>

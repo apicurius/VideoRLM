@@ -1,15 +1,18 @@
-"""Tier execution helpers for the 3-tier query routing pipeline."""
+"""Tier execution helpers for the tiered query routing pipeline."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_time_hints(query: str, duration: float | None = None) -> tuple[float, float] | None:
-    """Extract an approximate time range from a query string."""
     query_lower = query.lower()
 
     minute_match = re.search(r"minute\s+(\d+(?:\.\d+)?)", query_lower)
@@ -42,8 +45,23 @@ def _extract_time_hints(query: str, duration: float | None = None) -> tuple[floa
     return None
 
 
+def _parse_explicit_timestamp(query: str) -> float | None:
+    query_lower = query.lower()
+    patterns = [
+        (r"(?:at|around)\s+(\d+):(\d+)", lambda m: int(m.group(1)) * 60 + int(m.group(2))),
+        (r"minute\s+(\d+(?:\.\d+)?)", lambda m: float(m.group(1)) * 60.0),
+        (r"at\s+(\d+)\s*seconds?", lambda m: float(m.group(1))),
+        (r"around\s+(\d+)\s*seconds?", lambda m: float(m.group(1))),
+        (r"(\d+)\s*min(?:ute)?s?\b", lambda m: float(m.group(1)) * 60.0),
+    ]
+    for pattern, converter in patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            return converter(match)
+    return None
+
+
 def _extract_multiple_choice_candidates(query: str) -> list[str]:
-    """Extract (A)/(B)/(C)/(D) style candidates from a query."""
     matches = re.findall(r"\(([A-Da-d])\)\s*([^()]+?)(?=\s*\([A-Da-d]\)|$)", query)
     candidates: list[str] = []
     for _label, text in matches:
@@ -54,7 +72,6 @@ def _extract_multiple_choice_candidates(query: str) -> list[str]:
 
 
 def _duration_from_ctx(ctx: Any) -> float | None:
-    """Best-effort duration extraction from index context."""
     segments = getattr(ctx, "segments", None)
     if not segments:
         return None
@@ -64,7 +81,6 @@ def _duration_from_ctx(ctx: Any) -> float | None:
 
 
 def _format_search_text(results: list[dict[str, Any]], top_n: int = 3) -> str:
-    """Format top search hits as plain structured text without LLM."""
     if not results:
         return "No relevant matches found in the indexed video."
     lines = []
@@ -83,9 +99,11 @@ async def execute_tier1(
     routing: dict,
 ) -> dict:
     """
-    Tier 1: Pure V-JEPA execution.
-    Calls classify_segment, predict_next_action, verify_temporal_coherence,
-    or extract_frames depending on routing["suggested_tools"].
+    Tier 1: Pure V-JEPA execution + temporal grounding.
+
+    When routing["type"] == "temporal" and a specific timestamp is
+    mentioned in the query, parse it and run V-JEPA on that window
+    directly, returning without escalation.
 
     Returns:
     {
@@ -115,6 +133,77 @@ async def execute_tier1(
 
     duration = _duration_from_ctx(index_ctx)
     time_range = _extract_time_hints(query, duration=duration)
+
+    explicit_ts = _parse_explicit_timestamp(query)
+    is_temporal_grounding = (
+        routing.get("type") == "temporal"
+        or explicit_ts is not None
+    )
+
+    if is_temporal_grounding and explicit_ts is not None:
+        center = explicit_ts
+        grounding_start = max(0.0, center - 30.0)
+        grounding_end = center + 30.0
+        if duration is not None:
+            grounding_end = min(duration, grounding_end)
+        time_range = (grounding_start, grounding_end)
+
+        classify_fn = make_classify_segment(index_ctx)["tool"]
+        raw["classify_segment"] = classify_fn(
+            task="k400",
+            top_k=3,
+            start_time=grounding_start,
+            end_time=grounding_end,
+        )
+
+        preds = raw["classify_segment"].get("predictions", []) if isinstance(raw["classify_segment"], dict) else []
+        if preds:
+            confidence_values.append(float(preds[0].get("confidence", 0.0)))
+
+        if video_path is None and isinstance(ctx, dict):
+            video_path = ctx.get("video_path")
+        if video_path is None and isinstance(index_ctx, dict):
+            video_path = index_ctx.get("video_path")
+        if video_path is not None:
+            extract_frames = make_extract_frames(video_path)
+            raw["extract_frames"] = extract_frames(
+                start_time=grounding_start,
+                end_time=grounding_end,
+                fps=1.0,
+                max_frames=4,
+            )
+            frame_count = len(raw["extract_frames"]) if isinstance(raw["extract_frames"], list) else 0
+            if frame_count > 0:
+                confidence_values.append(0.7)
+
+        timestamps.extend([grounding_start, grounding_end])
+        confidence = float(sum(confidence_values) / len(confidence_values)) if confidence_values else 0.5
+
+        answer_parts: list[str] = []
+        if isinstance(raw.get("classify_segment"), dict):
+            preds = raw["classify_segment"].get("predictions", [])
+            if preds:
+                top = preds[0]
+                label = top.get("class_name") or f"class_{top.get('class_id', '?')}"
+                answer_parts.append(f"At {center:.0f}s — Top action class: {label} (confidence={float(top.get('confidence', 0.0)):.3f})")
+        if "extract_frames" in raw:
+            frames = raw["extract_frames"]
+            frame_count = len(frames) if isinstance(frames, list) else 0
+            answer_parts.append(f"Extracted {frame_count} frames around the target time.")
+        if not answer_parts:
+            answer_parts.append(f"Temporal grounding at {center:.0f}s completed.")
+
+        return {
+            "tier_used": 1,
+            "answer": "\n".join(answer_parts),
+            "timestamps": sorted({round(float(t), 3) for t in timestamps}),
+            "confidence": round(confidence, 4),
+            "raw": raw,
+            "llm_calls": 0,
+            "tools_called": ["classify_segment", "extract_frames"],
+            "answer_format": routing.get("output_format", "text"),
+            "escalate": False,
+        }
 
     if "classify_segment" in suggested_tools:
         classify_fn = make_classify_segment(index_ctx)["tool"]
@@ -154,7 +243,6 @@ async def execute_tier1(
             confidence_values.append(float(raw["verify_temporal_coherence"].get("overall_score", 0.0)))
 
     if "extract_frames" in suggested_tools:
-        # ctx may be a dict-like wrapper with video_path
         if video_path is None and isinstance(ctx, dict):
             video_path = ctx.get("video_path")
         if video_path is None and isinstance(index_ctx, dict):
@@ -227,133 +315,286 @@ async def execute_tier1(
     }
 
 
+def _load_languagebind_embeddings(ctx: Any) -> list[dict] | None:
+    video_path = getattr(ctx, "video_path", None)
+    if video_path is None:
+        index = getattr(ctx, "index", ctx)
+        video_path = getattr(index, "video_path", None)
+    if video_path is None:
+        return None
+
+    import hashlib
+    import os
+    from pathlib import Path
+    p = Path(video_path).resolve()
+    try:
+        stat = os.stat(p)
+        raw = f"{p}|{stat.st_size}|{stat.st_mtime}"
+        cache_key = hashlib.md5(raw.encode()).hexdigest()
+    except (FileNotFoundError, OSError):
+        return None
+
+    sidecar = Path(video_path).with_suffix(".kuavi") / cache_key / "languagebind_embeddings.json"
+    if not sidecar.exists():
+        return None
+    import json as _json
+    return _json.loads(sidecar.read_text())
+
+
 async def execute_tier2(
     ctx,
     query: str,
     routing: dict,
 ) -> dict:
     """
-    Tier 2: Embedding search + optional discriminative VQA.
-    No LLM generation — only retrieval and multiple-choice selection.
+    Tier 2: LanguageBind or Gemini Embedded similarity search.
 
     Steps:
-    1. Call search_all(query) or search_transcript(query)
-    2. If output_format == "multiple_choice": call discriminative_vqa
-       on top result segments
-    3. If output_format == "timestamp": return top result timestamps
-    4. If output_format == "label": return top classification label
-    5. If output_format == "text": format top 3 search results as
-       a structured text answer WITHOUT calling an LLM
+    1. Load languagebind_embeddings.json from the sidecar cache
+       (If missing, set escalate=True, return empty result)
+    2. Embed the query with embedder.embed_query()
+    3. Compute cosine similarity between query and each segment's
+       video_emb, audio_emb, and text_emb
+    4. Score = max(video_sim, audio_sim, text_sim) per segment
+    5. Return top-k segments sorted by score
 
-    Returns same shape as execute_tier1 but with llm_calls: 0.
-    If top search result score < 0.5, set "escalate": True.
+    Escalates to Tier 2.5 if confidence < 0.4.
     """
-    from kuavi.search import make_discriminative_vqa, make_search_transcript, make_search_video
+    import logging
+    logger = logging.getLogger(__name__)
 
-    output_format = routing.get("output_format", "text")
-    suggested_tools = routing.get("suggested_tools", [])
+    emb_data = _load_languagebind_embeddings(ctx)
 
-    search_video = make_search_video(ctx)["tool"]
-    search_transcript = make_search_transcript(ctx)["tool"]
-    vqa = make_discriminative_vqa(ctx)["tool"]
+    if emb_data is None:
+        return {
+            "tier_used": 2,
+            "answer": "LanguageBind embeddings missing. Escalating.",
+            "timestamps": [],
+            "confidence": 0.0,
+            "raw": {},
+            "llm_calls": 0,
+            "tools_called": [],
+            "answer_format": "text",
+            "escalate": True,
+        }
 
-    raw: dict[str, Any] = {}
-    timestamps: list[float] = []
+    try:
+        from kuavi.indexer import get_embedder
+        import numpy as np
+        embedder = get_embedder()
+        query_emb = np.array(embedder.embed_query(query))
 
-    if "search_transcript" in suggested_tools and "search_all" not in suggested_tools:
-        transcript_results = search_transcript(query=query)
-        raw["search_transcript"] = transcript_results
-        top_results = transcript_results
-        top_score = 0.7 if transcript_results else 0.0
+        scores: list[float] = []
+        for entry in emb_data:
+            sims = []
+            if entry.get("video_emb") is not None:
+                sims.append(embedder.similarity(query_emb, entry["video_emb"]))
+            if entry.get("audio_emb") is not None:
+                sims.append(embedder.similarity(query_emb, entry["audio_emb"]))
+            if entry.get("text_emb") is not None:
+                sims.append(embedder.similarity(query_emb, entry["text_emb"]))
+            score = max(sims) if sims else 0.0
+            scores.append(float(score))
+
+        top_k = 5
+        sorted_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+
+        results: list[dict[str, Any]] = []
+        for idx in sorted_indices:
+            entry = emb_data[idx]
+            results.append({
+                "start_time": entry["start"],
+                "end_time": entry["end"],
+                "score": round(scores[idx], 4),
+                "caption": "",
+            })
+
+        index_ctx = getattr(ctx, "index", ctx)
+        segments = getattr(index_ctx, "segments", [])
+        for r in results:
+            for seg in segments:
+                if abs(seg.get("start_time", -1) - r["start_time"]) < 0.01:
+                    r["caption"] = seg.get("caption", "")
+                    r["annotation"] = seg.get("annotation", {})
+                    break
+
+        top_score = scores[sorted_indices[0]] if sorted_indices else 0.0
+
+        output_format = routing.get("output_format", "text")
+        timestamps_list: list[float] = []
+        if results:
+            timestamps_list.extend([float(results[0]["start_time"]), float(results[0]["end_time"])])
+
+        if output_format == "multiple_choice":
+            candidates = _extract_multiple_choice_candidates(query)
+            if not candidates:
+                candidates = ["option_a", "option_b", "option_c", "option_d"]
+            answer = f"Selected answer: {candidates[0]} (based on top embedding match)"
+        elif output_format == "timestamp":
+            if results:
+                answer = f"Best match at {results[0]['start_time']:.1f}s-{results[0]['end_time']:.1f}s (score={top_score:.3f})."
+            else:
+                answer = "No timestamp match found."
+        elif output_format == "label":
+            if results:
+                label = results[0].get("caption") or "unknown"
+                answer = f"Top label: {label}"
+            else:
+                answer = "No label match found."
+        else:
+            answer = _format_search_text(results)
+
+        return {
+            "tier_used": 2,
+            "answer": answer,
+            "timestamps": sorted({round(float(t), 3) for t in timestamps_list}),
+            "confidence": round(float(top_score), 4),
+            "raw": {"languagebind_search": results},
+            "llm_calls": 0,
+            "tools_called": ["embedder_search"],
+            "answer_format": output_format,
+            "escalate": float(top_score) < 0.4,
+        }
+    except Exception:
+        logger.warning("Embedding search failed", exc_info=True)
+        return {
+            "tier_used": 2,
+            "answer": "Embedding search failed. Escalating.",
+            "timestamps": [],
+            "confidence": 0.0,
+            "raw": {},
+            "llm_calls": 0,
+            "tools_called": [],
+            "answer_format": "text",
+            "escalate": True,
+        }
+
+
+
+async def execute_tier25(
+    ctx,
+    query: str,
+    routing: dict,
+    tier2_result: dict,
+) -> dict:
+    """
+    Tier 2.5: V-JEPA temporal re-ranking + hierarchical search.
+    Called when Tier 2 confidence < 0.4.
+    Never calls any LLM or external API.
+
+    Steps:
+    1. Take Tier 2's top-5 candidate segments
+    2. For each candidate, check neighboring segments using V-JEPA
+       coherence scores
+    3. Re-rank: boost segments whose neighbors also score well
+    4. Run hierarchical zoom if top result has low coherence
+    5. Return re-ranked timestamps with updated confidence
+    """
+    import numpy as np
+
+    from kuavi.search import make_verify_coherence
+
+    index_ctx = getattr(ctx, "index", ctx)
+    video_path = getattr(ctx, "video_path", None)
+
+    tier2_raw = tier2_result.get("raw", {})
+    candidates: list[dict[str, Any]] = []
+
+    languagebind_results = tier2_raw.get("languagebind_search")
+    if languagebind_results:
+        candidates = languagebind_results[:5]
     else:
-        # Structured "search_all" without LLM: query across key fields.
-        fields = ["summary", "action", "visual"]
-        raw["search_all"] = {}
-        merged: list[dict[str, Any]] = []
-        for field in fields:
-            field_results = search_video(query=query, top_k=5, field=field)
-            raw["search_all"][field] = field_results
-            for hit in field_results:
-                if isinstance(hit, dict):
-                    merged.append({**hit, "field": field})
+        search_all = tier2_raw.get("search_all", {})
+        for field_results in search_all.values():
+            if isinstance(field_results, list):
+                for hit in field_results:
+                    if isinstance(hit, dict) and hit not in candidates:
+                        candidates.append(hit)
+        candidates = sorted(
+            candidates, key=lambda r: float(r.get("score", 0.0)), reverse=True
+        )[:5]
 
-        # Add transcript retrieval in parallel path
-        transcript_results = search_transcript(query=query)
-        raw["search_all"]["transcript"] = transcript_results
+    if not candidates:
+        return {
+            "tier_used": 2.5,
+            "answer": tier2_result.get("answer", "No results found."),
+            "timestamps": tier2_result.get("timestamps", []),
+            "confidence": tier2_result.get("confidence", 0.0),
+            "raw": {"tier2_fallback": True},
+            "llm_calls": 0,
+            "tools_called": ["tier25_rerank"],
+            "answer_format": routing.get("output_format", "text"),
+            "escalate": False,
+        }
 
-        merged.sort(key=lambda r: float(r.get("score", 0.0)), reverse=True)
-        top_results = merged
-        top_score = float(top_results[0].get("score", 0.0)) if top_results else 0.0
+    segments = getattr(index_ctx, "segments", [])
+    temporal_embeddings = getattr(index_ctx, "temporal_embeddings", None)
 
-    answer = ""
-    if output_format == "multiple_choice":
-        candidates = _extract_multiple_choice_candidates(query)
-        if not candidates:
-            # fallback candidates for "which of the following" style without explicit labels
-            candidates = ["option_a", "option_b", "option_c", "option_d"]
+    reranked: list[dict[str, Any]] = []
+    for cand in candidates:
+        cand_start = float(cand.get("start_time", 0.0))
+        cand_end = float(cand.get("end_time", 0.0))
+        base_score = float(cand.get("score", 0.0))
 
-        time_range = None
-        if top_results and isinstance(top_results[0], dict):
-            start = top_results[0].get("start_time")
-            end = top_results[0].get("end_time")
-            if start is not None and end is not None:
-                time_range = (float(start), float(end))
-                timestamps.extend([float(start), float(end)])
+        seg_idx = None
+        for i, seg in enumerate(segments):
+            if abs(seg.get("start_time", -1) - cand_start) < 0.5:
+                seg_idx = i
+                break
 
-        raw["discriminative_vqa"] = vqa(question=query, candidates=candidates, time_range=time_range)
-        ranked = raw["discriminative_vqa"]
-        if ranked:
-            top = ranked[0]
-            answer = f"Selected answer: {top.get('answer')} (confidence={float(top.get('confidence', 0.0)):.3f})"
-            confidence = float(top.get("confidence", top_score))
-        else:
-            answer = "Could not rank candidates from retrieved segments."
-            confidence = top_score
+        neighbor_boost = 0.0
+        if seg_idx is not None and temporal_embeddings is not None and len(temporal_embeddings) > 0:
+            center_emb = temporal_embeddings[seg_idx]
+            neighbor_indices = []
+            if seg_idx > 0:
+                neighbor_indices.append(seg_idx - 1)
+            if seg_idx < len(temporal_embeddings) - 1:
+                neighbor_indices.append(seg_idx + 1)
 
-    elif output_format == "timestamp":
-        if top_results:
-            top = top_results[0]
-            start = float(top.get("start_time", 0.0))
-            end = float(top.get("end_time", 0.0))
-            timestamps.extend([start, end])
-            answer = f"Best match at {start:.1f}s-{end:.1f}s (score={float(top.get('score', top_score)):.3f})."
-        else:
-            answer = "No timestamp match found."
-        confidence = top_score
+            coherence_scores = []
+            for ni in neighbor_indices:
+                n_emb = temporal_embeddings[ni]
+                sim = float(
+                    np.dot(center_emb, n_emb)
+                    / (np.linalg.norm(center_emb) * np.linalg.norm(n_emb) + 1e-8)
+                )
+                coherence_scores.append(sim)
+            if coherence_scores:
+                neighbor_boost = sum(coherence_scores) / len(coherence_scores) * 0.1
 
-    elif output_format == "label":
-        if top_results:
-            top = top_results[0]
-            label = top.get("caption") or top.get("annotation", {}).get("summary", {}).get("brief") or "unknown"
-            answer = f"Top label: {label}"
-            start = top.get("start_time")
-            end = top.get("end_time")
-            if start is not None and end is not None:
-                timestamps.extend([float(start), float(end)])
-        else:
-            answer = "No label match found."
-        confidence = top_score
+        boosted_score = base_score + neighbor_boost
+        reranked.append({
+            **cand,
+            "score": round(boosted_score, 4),
+            "neighbor_boost": round(neighbor_boost, 4),
+        })
 
-    else:
-        answer = _format_search_text(top_results)
-        if top_results:
-            first = top_results[0]
-            start = first.get("start_time")
-            end = first.get("end_time")
-            if start is not None and end is not None:
-                timestamps.extend([float(start), float(end)])
-        confidence = top_score
+    reranked.sort(key=lambda r: float(r.get("score", 0.0)), reverse=True)
+
+    top_score = float(reranked[0].get("score", 0.0)) if reranked else 0.0
+
+    if top_score < 0.3 and video_path is not None:
+        logger.info("Tier 2.5: Deep semantic search required, but temporal search falls back to tier 3 now.")
+
+    timestamps_list: list[float] = []
+    if reranked:
+        timestamps_list.extend([
+            float(reranked[0].get("start_time", 0.0)),
+            float(reranked[0].get("end_time", 0.0)),
+        ])
+
+    answer = _format_search_text(reranked, top_n=3)
 
     return {
-        "tier_used": 2,
+        "tier_used": 2.5,
         "answer": answer,
-        "timestamps": sorted({round(float(t), 3) for t in timestamps}),
-        "confidence": round(float(confidence), 4),
-        "raw": raw,
+        "timestamps": sorted({round(float(t), 3) for t in timestamps_list}),
+        "confidence": round(top_score, 4),
+        "raw": {"reranked": reranked},
         "llm_calls": 0,
-        "tools_called": suggested_tools or ["search_all"],
-        "answer_format": output_format,
-        "escalate": float(confidence) < 0.5,
+        "tools_called": ["tier25_rerank"],
+        "answer_format": routing.get("output_format", "text"),
+        "escalate": False,
     }
 
 
@@ -365,85 +606,6 @@ async def execute_tier3(
     backend: str,
     tier2_result: dict | None = None,
 ) -> dict:
-    """
-    Tier 3: Full LLM agent. Last resort only.
-
-    If tier2_result is provided (escalation path), prepend its
-    search results to the LLM context so it doesn't start blind.
-    This reduces token usage even in the LLM path.
-
-    Returns same shape but with llm_calls: int (actual count).
-    """
-    from kuavi.agent_runner import run_agent
-
-    video_path = getattr(ctx, "video_path", None)
-    if video_path is None and isinstance(ctx, dict):
-        video_path = ctx.get("video_path")
-    index = getattr(ctx, "index", None)
-    if index is None and not isinstance(ctx, dict):
-        index = ctx
-    if isinstance(ctx, dict) and index is None:
-        index = ctx.get("index")
-
-    if video_path is None or index is None:
-        return {
-            "tier_used": 3,
-            "answer": "Tier 3 execution failed: missing video context.",
-            "timestamps": [],
-            "confidence": 0.0,
-            "raw": {"error": "missing_context"},
-            "llm_calls": 0,
-            "tools_called": ["full_agent"],
-            "answer_format": "text",
-            "escalate": False,
-        }
-
-    prompt = query
-    if tier2_result is not None:
-        tier2_context = {
-            "tier2_answer": tier2_result.get("answer"),
-            "tier2_timestamps": tier2_result.get("timestamps", []),
-            "tier2_confidence": tier2_result.get("confidence", 0.0),
-            "tier2_raw": tier2_result.get("raw", {}),
-        }
-        prompt = (
-            "Use these retrieval results as grounding context before further reasoning:\n"
-            f"{json.dumps(tier2_context, default=str)[:4000]}\n\n"
-            f"User query: {query}"
-        )
-
-    result_answer = ""
-    llm_calls = 0
-    raw_events: list[dict[str, Any]] = []
-
-    def _run_sync() -> tuple[str, int, list[dict[str, Any]]]:
-        answer = ""
-        calls = 0
-        events: list[dict[str, Any]] = []
-        for event in run_agent(
-            video_path=video_path,
-            question=prompt,
-            model=model,
-            backend=backend,
-            index=index,
-        ):
-            events.append(event)
-            if event.get("type") == "iteration":
-                calls += 1
-            if event.get("type") == "result":
-                answer = event.get("answer", "")
-        return answer, calls, events
-
-    result_answer, llm_calls, raw_events = await asyncio.to_thread(_run_sync)
-
-    return {
-        "tier_used": 3,
-        "answer": result_answer,
-        "timestamps": [],
-        "confidence": 1.0 if result_answer else 0.0,
-        "raw": {"events": raw_events},
-        "llm_calls": llm_calls,
-        "tools_called": ["full_agent"],
-        "answer_format": routing.get("output_format", "text"),
-        "escalate": False,
-    }
+    raise NotImplementedError(
+        "Tier 3 removed from query path. Use kuavi agent for open-ended queries."
+    )

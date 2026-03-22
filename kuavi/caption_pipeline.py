@@ -40,7 +40,7 @@ def selective_decode(
     Tier 2 — DYNAMIC: Full captioning pipeline (no change).
 
     V-JEPA temporal variance can promote Tier 1 → Tier 2 when subtle motion
-    is detected that SigLIP2 misses.
+    is detected that the default embedder misses.
     """
     import cv2
 
@@ -90,7 +90,7 @@ def selective_decode(
             tier_0_count += 1
             continue
 
-        # --- Compute SigLIP2 visual similarity for Tier 1/2 ---
+        # --- Compute visual embedding similarity for Tier 1/2 (LanguageBind) ---
         if len(seg_frames) < 3:
             seg["_selective_tier"] = 2
             tier_2_count += 1

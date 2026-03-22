@@ -1,4 +1,4 @@
-"""Scene boundary detection using frame embeddings (V-JEPA 2 or SigLIP2)."""
+"""Scene boundary detection using frame embeddings (V-JEPA 2 or LanguageBind)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def detect_scenes(
         frames: BGR numpy arrays (OpenCV format).
         timestamps: Per-frame timestamps in seconds (same length as *frames*).
         embed_fn: Callable that takes a list of frames and returns an
-            ``(N, D)`` embedding matrix (V-JEPA 2 or SigLIP2).
+            ``(N, D)`` embedding matrix (V-JEPA 2 or LanguageBind).
         threshold: Distance threshold controlling the number of scenes.
             Higher → fewer scenes.
         min_duration: Minimum scene duration in seconds. Defaults to 4.0.

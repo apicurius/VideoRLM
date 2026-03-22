@@ -109,17 +109,13 @@ def _render_answer_html(text: str | None) -> str:
 
 
 SCENE_MODEL = "facebook/vjepa2-vitl-fpc64-256"
-VISUAL_EMBED_MODEL = "google/siglip2-base-patch16-256"
-TEXT_EMBED_MODEL = "google/embeddinggemma-300m"
 
 PIPELINE_STEPS = [
-    {"id": "vjepa",   "label": "V-JEPA 2 Scene Detection"},
-    {"id": "whisper", "label": "Speech Recognition"},
-    {"id": "caption", "label": "Segment Captioning"},
-    {"id": "gemma",   "label": "Gemma Text Embeddings"},
-    {"id": "siglip",  "label": "SigLIP2 Visual Embeddings"},
-    {"id": "index",   "label": "Search Index"},
-    {"id": "agent",   "label": "Recursive Agent Loop"},
+    {"id": "vjepa",        "label": "V-JEPA 2 Scene Detection"},
+    {"id": "whisper",      "label": "Speech Recognition"},
+    {"id": "caption",      "label": "Segment Captioning"},
+    {"id": "languagebind", "label": "LanguageBind Embedding"},
+    {"id": "index",        "label": "Search Index"},
 ]
 
 _AGENT_TOOLS = [
@@ -134,8 +130,7 @@ _AGENT_TOOLS = [
 async def arch_info():
     return JSONResponse({
         "scene_model": SCENE_MODEL,
-        "visual_embed_model": VISUAL_EMBED_MODEL,
-        "text_embed_model": TEXT_EMBED_MODEL,
+        "embed_model": "LanguageBind",
         "tool_count": len(_TOOL_SCHEMAS),
         "tools": [s["function"]["name"] for s in _TOOL_SCHEMAS],
     })
@@ -205,14 +200,10 @@ class _QueueLogHandler(logging.Handler):
             self._emit_step("vjepa", "running", msg.split("[pipeline] ")[-1])
         elif "[pipeline] V-JEPA 2" in msg and "scenes detected" in msg:
             self._emit_step("vjepa", "done", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] SigLIP2: building" in msg:
-            self._emit_step("siglip", "running", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] SigLIP2:" in msg:
-            self._emit_step("siglip", "done", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] Gemma: embedding" in msg:
-            self._emit_step("gemma", "running", msg.split("[pipeline] ")[-1])
-        elif "[pipeline] Gemma:" in msg:
-            self._emit_step("gemma", "done", msg.split("[pipeline] ")[-1])
+        elif "[pipeline] Gemini Embed: embedding" in msg:
+            self._emit_step("gemini_embed", "running", msg.split("[pipeline] ")[-1])
+        elif "[pipeline] Gemini Embed: complete" in msg:
+            self._emit_step("gemini_embed", "done", msg.split("[pipeline] ")[-1])
         elif "[pipeline] Qwen3-ASR: loading" in msg or "[pipeline] Qwen3-ASR: starting" in msg:
             self._emit_step("whisper", "running", msg.split("[pipeline] ")[-1])
         elif "[pipeline] faster-whisper: loading" in msg or "[pipeline] faster-whisper: starting" in msg:
@@ -254,7 +245,7 @@ class _QueueLogHandler(logging.Handler):
         elif "[pipeline] search index:" in msg:
             self._emit_step("index", "done", msg.split("[pipeline] ")[-1])
         elif "Returning in-memory cached index" in msg or "Loading cached index" in msg:
-            for sid in ["vjepa", "whisper", "caption", "gemma", "siglip"]:
+            for sid in ["vjepa", "whisper", "caption", "gemini_embed"]:
                 self._emit_step(sid, "cached", "loaded from cache")
             self._emit_step("index", "done", "search index loaded from cache")
 
@@ -323,9 +314,7 @@ from kuavi.agent_runner import (  # noqa: E402
     AGENT_STRATEGY as _AGENT_STRATEGY,
     AGENT_SYSTEM as _AGENT_SYSTEM,
     SCENE_MODEL,
-    TEXT_EMBED_MODEL,
     TOOL_SCHEMAS as _TOOL_SCHEMAS,
-    VISUAL_EMBED_MODEL,
     make_compound_tools as _make_compound_tools,
     make_pixel_tools as _make_pixel_tools,
 )
@@ -473,8 +462,6 @@ def _kuavi_pipeline(
             emit_step("caption", "skip", "fast mode — embeddings only")
 
         indexer = VideoIndexer(
-            embedding_model=VISUAL_EMBED_MODEL,
-            text_embedding_model=TEXT_EMBED_MODEL,
             scene_model=SCENE_MODEL,
         )
         index = indexer.index_video(
@@ -508,13 +495,8 @@ def _kuavi_pipeline(
             else:
                 emit_step("caption", "skip", "no captioning available")
 
-        if "gemma" not in completed:
-            if use_captioning:
-                emit_step("gemma", "done", "text embeddings ready")
-            else:
-                emit_step("gemma", "skip", "no captions to embed")
-        if "siglip" not in completed:
-            emit_step("siglip", "done", f"{n_segs} segments embedded")
+        if "gemini_embed" not in completed:
+            emit_step("gemini_embed", "done", f"{n_segs} segments embedded")
         emit_step("index", "done", f"{n_segs} segments, {n_scenes} scenes")
 
         # Emit index stats for frontend
@@ -577,8 +559,7 @@ async def analyze(
     index_mode: str = Form(default="fast"),
     asr_model: str = Form(default="faster-whisper/base"),
     force_reindex: bool = Form(default=False),
-    max_tier: int = Form(default=3),
-    force_llm: bool = Form(default=False),
+    max_tier: float = Form(default=2.5),
     custom_api_key: str = Form(default=""),
 ):
     suffix = Path(video.filename or "upload.mp4").suffix or ".mp4"
@@ -614,7 +595,6 @@ async def analyze(
                 index_mode=index_mode,
                 asr_model=asr_model,
                 force_reindex=force_reindex,
-                force_llm=force_llm,
                 max_tier=max_tier,
             ):
                 if event.get("type") == "result":
@@ -650,19 +630,6 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--reload", action="store_true")
-    parser.add_argument("--use-litellm-proxy", action="store_true")
-    parser.add_argument("--litellm-port", type=int, default=4000)
     args = parser.parse_args()
 
-    litellm_proc = None
-    if args.use_litellm_proxy:
-        from rlm.utils.litellm_proxy import start_litellm_proxy
-
-        litellm_proc = start_litellm_proxy(port=args.litellm_port)
-        os.environ["LITELLM_PROXY_URL"] = f"http://localhost:{args.litellm_port}"
-
-    try:
-        uvicorn.run("web_app:app", host=args.host, port=args.port, reload=args.reload)
-    finally:
-        if litellm_proc is not None:
-            litellm_proc.terminate()
+    uvicorn.run("web_app:app", host=args.host, port=args.port, reload=args.reload)
