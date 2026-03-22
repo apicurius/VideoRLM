@@ -50,6 +50,31 @@ async def load_or_build_index(
 TIER_ORDER = [1, 2, 2.5]
 
 
+def _format_timestamp_label(seconds: float) -> str:
+    total = int(seconds)
+    minutes = total // 60
+    secs = total % 60
+    return f"{minutes}:{secs:02d}"
+
+
+def _extract_top_timestamp(timestamps: list[Any] | None) -> tuple[float | None, str | None]:
+    if not timestamps:
+        return None, None
+
+    first = timestamps[0]
+    value: float | None = None
+    if isinstance(first, dict):
+        maybe_seconds = first.get("seconds")
+        if isinstance(maybe_seconds, (int, float)):
+            value = float(maybe_seconds)
+    elif isinstance(first, (int, float)):
+        value = float(first)
+
+    if value is None:
+        return None, None
+    return value, _format_timestamp_label(value)
+
+
 async def run_tiered_pipeline(
     video_path: str,
     query: str,
@@ -135,10 +160,16 @@ async def run_tiered_pipeline(
                 }
                 continue
 
+        top_ts_seconds, top_ts_label = _extract_top_timestamp(result.get("timestamps", []))
+
         yield {
             "type": "result",
             "answer": result["answer"],
             "timestamps": result.get("timestamps", []),
+            "confidence": result.get("confidence"),
+            "tier_used": current_tier,
+            "top_timestamp_seconds": top_ts_seconds,
+            "top_timestamp_label": top_ts_label,
             "llm_calls": result.get("llm_calls", 0),
         }
 

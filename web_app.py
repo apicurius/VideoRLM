@@ -78,6 +78,22 @@ def _parse_timestamps(text: str | None) -> list[dict]:
     return sorted(unique, key=lambda x: x["seconds"])
 
 
+def _normalize_timestamps(timestamps: list | None) -> list[dict]:
+    if not timestamps:
+        return []
+
+    normalized: list[dict] = []
+    for item in timestamps:
+        if isinstance(item, dict):
+            seconds = item.get("seconds")
+            if isinstance(seconds, (int, float)):
+                normalized.append({"seconds": float(seconds), "label": _seconds_to_label(float(seconds))})
+        elif isinstance(item, (int, float)):
+            normalized.append({"seconds": float(item), "label": _seconds_to_label(float(item))})
+
+    return sorted(normalized, key=lambda x: x["seconds"])
+
+
 def _render_answer_html(text: str | None) -> str:
     if not text:
         return ""
@@ -600,8 +616,14 @@ async def analyze(
                 if event.get("type") == "result":
                     answer = event.get("answer", "")
                     event["answer_html"] = _render_answer_html(answer)
+                    event["timestamps"] = _normalize_timestamps(event.get("timestamps"))
                     if not event.get("timestamps"):
                         event["timestamps"] = _parse_timestamps(answer)
+
+                    if event.get("top_timestamp_seconds") is None and event.get("timestamps"):
+                        top = event["timestamps"][0]
+                        event["top_timestamp_seconds"] = top.get("seconds")
+                        event["top_timestamp_label"] = top.get("label")
                 emit(event)
 
         asyncio.run(_run_tiered())

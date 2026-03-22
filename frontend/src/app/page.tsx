@@ -67,6 +67,12 @@ type EscalationInfo = {
   reason: string;
 };
 
+type StructuredResult = {
+  tier_used: number | null;
+  confidence: number | null;
+  top_timestamp_label: string | null;
+};
+
 type PanelTab = "pipeline" | "traces";
 
 const DEFAULT_PIPELINE_STEPS: PipelineStep[] = [
@@ -134,6 +140,7 @@ export default function VideoRLMInterface() {
   const [escalationInfo, setEscalationInfo] = useState<EscalationInfo | null>(null);
   const [estimatedCostUsd, setEstimatedCostUsd] = useState<number | null>(null);
   const [executedTier, setExecutedTier] = useState<number | null>(null);
+  const [structuredResult, setStructuredResult] = useState<StructuredResult | null>(null);
   const [panelTab, setPanelTab] = useState<PanelTab>("pipeline");
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -221,6 +228,13 @@ export default function VideoRLMInterface() {
     return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
   };
 
+  const formatTimestampLabel = (seconds: number) => {
+    const total = Math.max(0, Math.floor(seconds));
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
   const handleSeek = (seconds: number) => {
     if (videoRef.current) {
       videoRef.current.currentTime = seconds;
@@ -248,6 +262,7 @@ export default function VideoRLMInterface() {
     setEscalationInfo(null);
     setEstimatedCostUsd(null);
     setExecutedTier(null);
+    setStructuredResult(null);
     startTimer();
 
     const formData = new FormData();
@@ -312,6 +327,11 @@ export default function VideoRLMInterface() {
                 setEstimatedCostUsd(
                   typeof event.estimated_usd === "number" ? event.estimated_usd : null
                 );
+                setStructuredResult((prev) => ({
+                  tier_used: typeof event.tier_used === "number" ? event.tier_used : (prev?.tier_used ?? null),
+                  confidence: prev?.confidence ?? null,
+                  top_timestamp_label: prev?.top_timestamp_label ?? null,
+                }));
               } else if (event.type === "step") {
                 const stepId = String(event.id || "");
 
@@ -392,6 +412,23 @@ export default function VideoRLMInterface() {
                 );
                 setAnswerHtml({ __html: event.answer_html });
                 setTimestamps(event.timestamps || []);
+                const firstTimestamp = Array.isArray(event.timestamps) && event.timestamps.length > 0
+                  ? event.timestamps[0]
+                  : null;
+                const fallbackTopLabel = firstTimestamp && typeof firstTimestamp.seconds === "number"
+                  ? formatTimestampLabel(firstTimestamp.seconds)
+                  : null;
+                setStructuredResult((prev) => ({
+                  tier_used:
+                    typeof event.tier_used === "number"
+                      ? event.tier_used
+                      : (prev?.tier_used ?? executedTier ?? null),
+                  confidence: typeof event.confidence === "number" ? event.confidence : null,
+                  top_timestamp_label:
+                    typeof event.top_timestamp_label === "string"
+                      ? event.top_timestamp_label
+                      : fallbackTopLabel,
+                }));
                 stopTimer();
                 setIsLoading(false);
               } else if (event.type === "error") {
@@ -827,6 +864,27 @@ export default function VideoRLMInterface() {
               })()}
 
               {/* Final Answer */}
+              {structuredResult && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="rounded-2xl border border-amber-500/20 bg-amber-500/5 px-4 py-3"
+                >
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-amber-400">Structured Result</h4>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                    <Badge className="bg-blue-500/10 text-blue-300 border-blue-500/30">
+                      Tier: {structuredResult.tier_used ?? "-"}
+                    </Badge>
+                    <Badge className="bg-emerald-500/10 text-emerald-300 border-emerald-500/30">
+                      Confidence: {structuredResult.confidence != null ? structuredResult.confidence.toFixed(3) : "-"}
+                    </Badge>
+                    <Badge className="bg-purple-500/10 text-purple-300 border-purple-500/30">
+                      Top timestamp: {structuredResult.top_timestamp_label ?? "-"}
+                    </Badge>
+                  </div>
+                </motion.div>
+              )}
+
               {answerHtml && (
                 <motion.div
                   initial={{ opacity: 0, scale: 0.95, y: 15, filter: "blur(5px)" }}

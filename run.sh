@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # run.sh — start BOTH the backend API and the Next.js frontend
-set -e
+set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-# ── Ensure Virtual Environment exists ──────────────────────────────────────────
-if [ ! -d ".venv" ]; then
-    echo "→ Creating virtual environment..."
-    uv venv --python 3.12 .venv
-fi
-VENV_PYTHON="$ROOT/.venv/bin/python"
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT="${FRONTEND_PORT:-4001}"
+RUN_DIR="$ROOT/.run"
+BACKEND_PID_FILE="$RUN_DIR/backend.pid"
+
+mkdir -p "$RUN_DIR"
 
 # ── Load .env ────────────────────────────────────────────────────────────────
 if [ -f .env ]; then
@@ -19,52 +19,15 @@ if [ -f .env ]; then
     set +a
 fi
 
-# ── Vendor LanguageBind if missing ───────────────────────────────────────────
-mkdir -p vendor
-if [ ! -d "vendor/LanguageBind" ]; then
-    echo "→ Local multimodal backend missing. Vendoring LanguageBind..."
-    git clone https://github.com/PKU-YuanGroup/LanguageBind.git vendor/LanguageBind
-    
-    # RELAX version pins: old pins like numpy==1.23.0 fail on Python 3.12+ 
-    # as they lack wheels and require building from source (missing Python.h).
-    # Using >= allows uv to find modern, compatible wheels.
-    sed -i 's/==/>=/g' vendor/LanguageBind/requirements.txt
+if [ ! -x "$ROOT/.venv/bin/python" ]; then
+    echo "✗ Missing virtual environment at .venv. Run: uv sync"
+    exit 1
 fi
 
-# ── Pre-flight checks ────────────────────────────────────────────────────────
-echo ""
-echo "  ╔══════════════════════════════════════════╗"
-echo "  ║        VideoRLM  ·  KUAVi  Demo          ║"
-echo "  ╚══════════════════════════════════════════╝"
-echo ""
-echo "  API server : http://localhost:8000"
-echo "  Frontend   : http://localhost:4001"
-echo "  Backend    : ${EMBEDDING_BACKEND:-languagebind} (Local multimodal)"
-echo ""
-
-# ── GPU memory tuning ────────────────────────────────────────────────────────
-export PYTORCH_ALLOC_CONF=expandable_segments:True
-# Ensure LanguageBind is discoverable
-export PYTHONPATH="$ROOT/vendor/LanguageBind:$PYTHONPATH"
-
-# ── Ensure Python deps are installed ─────────────────────────────────────────
-# Use a sentinel to check if the full install happened
-if ! "$VENV_PYTHON" -c "import languagebind, fastapi" >/dev/null 2>&1; then
-    echo "→ Installing backend dependencies..."
-    # Always install main project deps
-    uv pip install \
-        fastapi uvicorn python-multipart numpy opencv-python scikit-learn \
-        torch torchvision torchaudio torchcodec transformers pillow openai markdown \
-        --python "$VENV_PYTHON" --quiet
-        
-    echo "→ Installing LanguageBind sub-dependencies (relaxing strict pins)..."
-    # Relax pins to avoid build failures with newer versions of torch/transformers
-    sed -i 's/==/>=/g' vendor/LanguageBind/requirements.txt
-    # Install from the vendored requirements, ensure we relaxed the pins
-    uv pip install -r vendor/LanguageBind/requirements.txt --python .venv/bin/python --quiet
-
-    # Patch pytorchvideo for compatibility with newer torchvision
-    find .venv/lib* -name "augmentations.py" -path "*/pytorchvideo/transforms/*" -exec sed -i 's/torchvision.transforms.functional_tensor/torchvision.transforms.functional/g' {} +
+# ── GPU memory tuning + vendored LanguageBind path ──────────────────────────
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
+if [ -d "$ROOT/vendor/LanguageBind" ]; then
+    export PYTHONPATH="$ROOT/vendor/LanguageBind${PYTHONPATH:+:$PYTHONPATH}"
 fi
 
 # ── Ensure frontend deps are installed ───────────────────────────────────────
@@ -73,16 +36,47 @@ if [ ! -d "$ROOT/frontend/node_modules" ]; then
     (cd "$ROOT/frontend" && npm install --silent)
 fi
 
+# ── Stop stale listeners on target ports ─────────────────────────────────────
+if [ -x "$ROOT/stop.sh" ]; then
+    BACKEND_PORT="$BACKEND_PORT" FRONTEND_PORT="$FRONTEND_PORT" "$ROOT/stop.sh" >/dev/null 2>&1 || true
+fi
+
+echo ""
+echo "  ╔══════════════════════════════════════════╗"
+echo "  ║        VideoRLM  ·  KUAVi  Demo          ║"
+echo "  ╚══════════════════════════════════════════╝"
+echo ""
+echo "  API server : http://localhost:$BACKEND_PORT"
+echo "  Frontend   : http://localhost:$FRONTEND_PORT"
+echo ""
+
 # ── Start backend (background) ───────────────────────────────────────────────
-echo "→ Starting API server on :8000 ..."
-"$VENV_PYTHON" -m uvicorn web_app:app \
+echo "→ Starting API server on :$BACKEND_PORT ..."
+uv run python -m uvicorn web_app:app \
     --host 0.0.0.0 \
-    --port 8000 \
+    --port "$BACKEND_PORT" \
     --reload \
     --log-level info &
 BACKEND_PID=$!
+echo "$BACKEND_PID" > "$BACKEND_PID_FILE"
+
+cleanup() {
+    if [ -f "$BACKEND_PID_FILE" ]; then
+        PID="$(cat "$BACKEND_PID_FILE" 2>/dev/null || true)"
+        if [ -n "${PID:-}" ]; then
+            kill "$PID" 2>/dev/null || true
+        fi
+        rm -f "$BACKEND_PID_FILE"
+    fi
+}
+
+trap cleanup INT TERM EXIT
 
 # ── Start frontend (foreground, exits on Ctrl-C) ─────────────────────────────
-echo "→ Starting frontend on :4001 ..."
-trap "kill $BACKEND_PID 2>/dev/null; exit" INT TERM
-(cd "$ROOT/frontend" && npm run dev)
+echo "→ Starting frontend on :$FRONTEND_PORT ..."
+(
+    cd "$ROOT/frontend"
+    BACKEND_URL="http://localhost:$BACKEND_PORT" \
+    NEXT_PUBLIC_BACKEND_URL="http://localhost:$BACKEND_PORT" \
+    npm run dev -- --port "$FRONTEND_PORT"
+)
