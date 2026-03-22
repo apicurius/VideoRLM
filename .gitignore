@@ -246,3 +246,6 @@ __marimo__/
 .claude/mcp.json
 
 .languagebind_cache/
+.run/
+vendor/
+uv.lock
